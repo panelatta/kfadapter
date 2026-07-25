@@ -9,14 +9,13 @@ import (
 
 	wireprofile "github.com/kfadapter/kfadapter/internal/kuaifan/profile"
 	"github.com/kfadapter/kfadapter/internal/kuaifan/wifiin"
-	"github.com/kfadapter/kfadapter/internal/state"
 )
 
 type windowsClientProfile struct{ wire wireprofile.Windows }
 
-func (p windowsClientProfile) id() state.ClientProfile { return state.ClientProfileWindows }
-func (p windowsClientProfile) userAgent() string       { return p.wire.UserAgent() }
-func (p windowsClientProfile) configFields() any       { return p.wire.ConfigFields() }
+func (p windowsClientProfile) id() wireprofile.ID { return wireprofile.WindowsID }
+func (p windowsClientProfile) userAgent() string  { return p.wire.UserAgent() }
+func (p windowsClientProfile) configFields() any  { return p.wire.ConfigFields() }
 func (p windowsClientProfile) requiresPostLoginRefresh() bool {
 	return p.wire.RequiresPostLoginRefresh()
 }
@@ -110,7 +109,7 @@ func (windowsClientProfile) fetchAuthority(ctx context.Context, c *Client, sessi
 		return Authority{}, err
 	}
 	userIDText := formatUserID(session.UserID)
-	providerExtension, err := wifiin.ProviderExtensionForProfile(string(state.ClientProfileWindows), providerToken, orderID, userIDText)
+	providerExtension, err := wifiin.ProviderExtensionForProfile(string(wireprofile.WindowsID), providerToken, orderID, userIDText)
 	if err != nil {
 		return Authority{}, ErrSchema
 	}

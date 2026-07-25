@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kfadapter/kfadapter/internal/provider"
 )
 
 // RuntimeStore publishes immutable snapshots through an atomic pointer. It
@@ -64,13 +66,13 @@ func (s *RuntimeStore) replace(next *RuntimeSnapshot) {
 
 // Status is a redacted lifecycle view for API and event consumers.
 type Status struct {
-	State      ServiceState   `json:"state"`
-	Generation uint64         `json:"generation,omitempty"`
-	CreatedAt  time.Time      `json:"createdAt,omitempty"`
-	ExpiresAt  time.Time      `json:"expiresAt,omitempty"`
-	Account    AccountSummary `json:"account"`
-	NodeTotal  int            `json:"nodeTotal"`
-	Eligible   int            `json:"eligible"`
+	State      ServiceState                   `json:"state"`
+	Generation uint64                         `json:"generation,omitempty"`
+	CreatedAt  time.Time                      `json:"createdAt,omitempty"`
+	ExpiresAt  time.Time                      `json:"expiresAt,omitempty"`
+	Accounts   map[provider.ID]AccountSummary `json:"accounts,omitempty"`
+	NodeTotal  int                            `json:"nodeTotal"`
+	Eligible   int                            `json:"eligible"`
 }
 
 // AccountBindingStatus reports whether a raw account ID is authorized by the
@@ -91,23 +93,23 @@ type Manager struct {
 	state                ServiceState
 	active               Operation
 	lease                uint64
-	subscription         SubscriptionGeneration
+	subscription         SubscriptionAuthority
+	previousState        ServiceState
 	accountBindingKey    []byte
 	bindingKeyConfigured bool
 }
 
 // NewManager constructs a manager with no durable account-binding authority.
 func NewManager(initial *RuntimeSnapshot) (*Manager, error) {
-	return NewManagerWithSubscription(initial, SubscriptionGeneration{}, nil)
+	return NewManagerWithSubscription(initial, SubscriptionAuthority{}, nil)
 }
 
-// NewManagerWithSubscription restores persisted subscription authority. An
-// uninitialized v2 installation has an unbound generation and nil binding key.
-func NewManagerWithSubscription(initial *RuntimeSnapshot, subscription SubscriptionGeneration, bindingKey []byte) (*Manager, error) {
+// NewManagerWithSubscription restores persisted subscription authority.
+func NewManagerWithSubscription(initial *RuntimeSnapshot, subscription SubscriptionAuthority, bindingKey []byte) (*Manager, error) {
 	if len(bindingKey) != 0 && len(bindingKey) != sha256.Size {
 		return nil, ErrAccountChanged
 	}
-	if subscription.Generation != 0 && validateSubscriptionGeneration(subscription) != nil {
+	if len(subscription.SelectorKey) != 0 && validateSubscriptionAuthority(subscription) != nil {
 		return nil, ErrAccountChanged
 	}
 	if len(subscription.AccountBinding) != 0 && len(bindingKey) != sha256.Size {
@@ -117,9 +119,9 @@ func NewManagerWithSubscription(initial *RuntimeSnapshot, subscription Subscript
 	now := time.Now()
 	if initial != nil && now.Before(initial.CreatedAt) {
 		prepared = nil
-	} else if initial != nil && !SessionUsable(initial, now) {
+	} else if initial != nil && (ValidateRuntimeSnapshot(initial) != nil || !SessionUsable(initial, now)) {
 		prepared = initial.Clone()
-		prepared.Sessions.Wipe()
+		prepared.Providers = nil
 		if now.Before(prepared.ExpiresAt) {
 			prepared.ExpiresAt = now.UTC()
 		}
@@ -128,13 +130,10 @@ func NewManagerWithSubscription(initial *RuntimeSnapshot, subscription Subscript
 	if err != nil {
 		return nil, err
 	}
-	manager := &Manager{
-		runtime: store, state: StateSignedOut, subscription: subscription.clone(),
-		accountBindingKey: append([]byte(nil), bindingKey...), bindingKeyConfigured: len(bindingKey) == sha256.Size,
-	}
+	manager := &Manager{runtime: store, state: StateSignedOut, subscription: subscription.clone(), accountBindingKey: append([]byte(nil), bindingKey...), bindingKeyConfigured: len(bindingKey) == sha256.Size}
 	if initial != nil {
-		if SessionUsable(initial, now) {
-			if !manager.bindingKeyConfigured || subscription.Generation == 0 || len(subscription.AccountBinding) != sha256.Size || !matchesAccountBinding(subscription.AccountBinding, bindingKey, initial.Sessions.UserID()) {
+		if ValidateRuntimeSnapshot(initial) == nil && SessionUsable(initial, now) {
+			if !manager.bindingKeyConfigured || len(subscription.AccountBinding) != sha256.Size || !matchesAccountBinding(subscription.AccountBinding, bindingKey, initial.AccountBindingID()) {
 				return nil, ErrAccountChanged
 			}
 			manager.state = StateReady
@@ -169,20 +168,19 @@ func (m *Manager) Current() *RuntimeSnapshot {
 	return m.runtime.Current()
 }
 
-// TunnelPin is the compact authority and route record retained by one SOCKS
-// flow. It deliberately contains no RuntimeSnapshot or selector map.
+// TunnelPin is the compact opaque authority and route record retained by one
+// SOCKS flow. Only the selected provider transport may decode Authority.Data.
 type TunnelPin struct {
-	Session   SessionSecrets
+	Authority provider.Authority
 	ExpiresAt time.Time
 	Node      Node
 	Ref       NodeRef
 }
 
-// CompactPin atomically resolves one authenticated selector from the internal
-// immutable snapshot. Callers authenticate selector/password in selector.Registry
-// first, then provide the resulting credentialGeneration.
-func (m *Manager) CompactPin(selector string, credentialGeneration uint64, now time.Time) (TunnelPin, error) {
-	if m == nil || selector == "" || credentialGeneration == 0 {
+// CompactPin atomically resolves one authenticated selector from the immutable
+// snapshot. Authentication is performed by selector.Registry first.
+func (m *Manager) CompactPin(selector string, now time.Time) (TunnelPin, error) {
+	if m == nil || selector == "" {
 		return TunnelPin{}, ErrSelectorUnknown
 	}
 	m.mu.Lock()
@@ -198,14 +196,12 @@ func (m *Manager) CompactPin(selector string, credentialGeneration uint64, now t
 	if err != nil {
 		return TunnelPin{}, err
 	}
-	if ref.Generation != credentialGeneration {
+	authority, available := current.Authority(node)
+	providerSnapshot, providerAvailable := current.Providers[node.Provider]
+	if !available || !providerAvailable || !providerSnapshot.ExpiresAt.After(now) {
 		return TunnelPin{}, ErrSelectorUnknown
 	}
-	session, available := current.Sessions.For(node.EffectiveClientProfile())
-	if !available {
-		return TunnelPin{}, ErrSelectorUnknown
-	}
-	return TunnelPin{Session: session, ExpiresAt: current.ExpiresAt, Node: node, Ref: ref}, nil
+	return TunnelPin{Authority: authority, ExpiresAt: providerSnapshot.ExpiresAt, Node: node, Ref: ref}, nil
 }
 
 // SessionCurrentPin is the compact final admission check for a SOCKS flow
@@ -219,17 +215,13 @@ func (m *Manager) SessionCurrentPin(pin TunnelPin, now time.Time) bool {
 	defer m.mu.Unlock()
 	current := m.runtime.snapshot.Load()
 	return (m.state == StateReady || m.state == StateDegraded || m.state == StateSyncing) &&
-		current != nil &&
-		current.ExpiresAt.Equal(pin.ExpiresAt) &&
-		SessionUsable(current, now) &&
-		currentSessionMatchesPin(current, pin)
+		current != nil && SessionUsable(current, now) && currentSessionMatchesPin(current, pin, now)
 }
 
-// InstallSubscriptionGeneration installs a durable candidate only while an
-// authentication operation is active. It supports first binding and an account
-// change, and returns an idempotent rollback for a later failed publish.
-func (m *Manager) InstallSubscriptionGeneration(candidate SubscriptionGeneration, userID string) (func(), error) {
-	if m == nil || validateSubscriptionGeneration(candidate) != nil {
+// InstallEpoch installs a durable candidate only while an authentication
+// operation is active. A same-account refresh retains keys; a cutover rotates both.
+func (m *Manager) InstallEpoch(candidate SubscriptionAuthority, userID string) (func(), error) {
+	if m == nil || validateSubscriptionAuthority(candidate) != nil {
 		return nil, ErrAccountChanged
 	}
 	m.mu.Lock()
@@ -238,21 +230,13 @@ func (m *Manager) InstallSubscriptionGeneration(candidate SubscriptionGeneration
 		return nil, ErrAccountChanged
 	}
 	current := m.subscription
-	switch {
-	case current.Generation == 0:
-		// A manager created without an on-disk generation may adopt a validated candidate.
-	case len(current.AccountBinding) == 0:
-		if candidate.Generation != current.Generation || !sameSubscriptionCredentials(current, candidate) {
-			m.mu.Unlock()
-			return nil, ErrAccountChanged
-		}
-	case subtle.ConstantTimeCompare(current.AccountBinding, candidate.AccountBinding) == 1:
-		if candidate.Generation != current.Generation || !sameSubscriptionCredentials(current, candidate) {
-			m.mu.Unlock()
-			return nil, ErrAccountChanged
-		}
-	default:
-		if candidate.Generation != current.Generation+1 || !rotatedSubscriptionMaterial(current, candidate) {
+	if len(current.SelectorKey) != 0 {
+		if len(current.AccountBinding) == 0 || subtle.ConstantTimeCompare(current.AccountBinding, candidate.AccountBinding) == 1 {
+			if !sameSubscriptionCredentials(current, candidate) {
+				m.mu.Unlock()
+				return nil, ErrAccountChanged
+			}
+		} else if !rotatedSubscriptionMaterial(current, candidate) {
 			m.mu.Unlock()
 			return nil, ErrAccountChanged
 		}
@@ -265,22 +249,18 @@ func (m *Manager) InstallSubscriptionGeneration(candidate SubscriptionGeneration
 		once.Do(func() {
 			m.mu.Lock()
 			defer m.mu.Unlock()
-			if sameSubscriptionGeneration(m.subscription, candidate) {
+			if sameSubscriptionAuthority(m.subscription, candidate) {
 				m.subscription = previous
 			}
 		})
 	}, nil
 }
 
-func sameSubscriptionCredentials(left, right SubscriptionGeneration) bool {
-	return subtle.ConstantTimeCompare(left.SelectorKey, right.SelectorKey) == 1 &&
-		subtle.ConstantTimeCompare(left.ProxyAuthKey, right.ProxyAuthKey) == 1
+func sameSubscriptionCredentials(left, right SubscriptionAuthority) bool {
+	return subtle.ConstantTimeCompare(left.SelectorKey, right.SelectorKey) == 1 && subtle.ConstantTimeCompare(left.ProxyAuthKey, right.ProxyAuthKey) == 1
 }
-
-func sameSubscriptionGeneration(left, right SubscriptionGeneration) bool {
-	return left.Generation == right.Generation &&
-		sameSubscriptionCredentials(left, right) &&
-		subtle.ConstantTimeCompare(left.AccountBinding, right.AccountBinding) == 1
+func sameSubscriptionAuthority(left, right SubscriptionAuthority) bool {
+	return sameSubscriptionCredentials(left, right) && subtle.ConstantTimeCompare(left.AccountBinding, right.AccountBinding) == 1
 }
 
 // AccountBindingStatus checks the supplied account against durable authority
@@ -291,7 +271,7 @@ func (m *Manager) AccountBindingStatus(userID string) AccountBindingStatus {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.bindingKeyConfigured || m.subscription.Generation == 0 || len(m.subscription.AccountBinding) == 0 {
+	if !m.bindingKeyConfigured || len(m.subscription.SelectorKey) == 0 || len(m.subscription.AccountBinding) == 0 {
 		return AccountBindingUnbound
 	}
 	if matchesAccountBinding(m.subscription.AccountBinding, m.accountBindingKey, userID) {
@@ -300,46 +280,14 @@ func (m *Manager) AccountBindingStatus(userID string) AccountBindingStatus {
 	return AccountBindingMismatch
 }
 
-// SessionCurrent atomically admits a pinned snapshot for a new tunnel after an
-// upstream handshake. It permits metadata-only probe publications, but rejects
-// logout, expiry, and authority renewal. Established relays retain their own
-// pinned snapshot.
-func (m *Manager) SessionCurrent(pinned *RuntimeSnapshot, now time.Time) bool {
-	if m == nil || pinned == nil {
-		return false
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	current := m.runtime.snapshot.Load()
-	return (m.state == StateReady || m.state == StateDegraded || m.state == StateSyncing) &&
-		current != nil &&
-		current.ExpiresAt.Equal(pinned.ExpiresAt) &&
-		SessionUsable(current, now) &&
-		sameClientSessions(current.Sessions, pinned.Sessions)
-}
-
-func sameClientSessions(left, right ClientSessions) bool {
-	return sameSessionAuthority(left.IOS, right.IOS) && sameSessionAuthority(left.Windows, right.Windows)
-}
-
-func currentSessionMatchesPin(current *RuntimeSnapshot, pin TunnelPin) bool {
+func currentSessionMatchesPin(current *RuntimeSnapshot, pin TunnelPin, now time.Time) bool {
 	if current == nil {
 		return false
 	}
-	session, available := current.Sessions.For(pin.Node.EffectiveClientProfile())
-	return available && sameSessionAuthority(session, pin.Session)
-}
-
-// sameSessionAuthority compares all source authority material without making
-// a secret-bearing session comparable through ordinary string equality.
-func sameSessionAuthority(a, b SessionSecrets) bool {
-	match := subtle.ConstantTimeCompare([]byte(a.UserID), []byte(b.UserID))
-	match &= subtle.ConstantTimeCompare([]byte(a.LoginToken), []byte(b.LoginToken))
-	match &= subtle.ConstantTimeCompare([]byte(a.ProviderToken), []byte(b.ProviderToken))
-	match &= subtle.ConstantTimeCompare([]byte(a.TunnelPassword), []byte(b.TunnelPassword))
-	match &= subtle.ConstantTimeCompare([]byte(a.TunnelMethod), []byte(b.TunnelMethod))
-	match &= subtle.ConstantTimeCompare([]byte(a.ProviderExtension), []byte(b.ProviderExtension))
-	return match == 1
+	providerSnapshot, available := current.Providers[pin.Node.Provider]
+	authority, authorityAvailable := current.Authority(pin.Node)
+	return available && providerSnapshot.ExpiresAt.After(now) && providerSnapshot.ExpiresAt.Equal(pin.ExpiresAt) && authorityAvailable &&
+		authority.Protocol == pin.Authority.Protocol && subtle.ConstantTimeCompare(authority.Data, pin.Authority.Data) == 1
 }
 
 // State returns the current lifecycle state.
@@ -365,12 +313,12 @@ func (m *Manager) Status() Status {
 		return Status{State: currentState}
 	}
 	status := Status{
-		State:      currentState,
-		Generation: snapshot.Generation,
-		CreatedAt:  snapshot.CreatedAt,
-		ExpiresAt:  snapshot.ExpiresAt,
-		Account:    snapshot.Account,
-		NodeTotal:  len(snapshot.Nodes),
+		State: currentState, Generation: snapshot.Generation, CreatedAt: snapshot.CreatedAt,
+		ExpiresAt: snapshot.ExpiresAt, Accounts: make(map[provider.ID]AccountSummary, len(snapshot.Providers)),
+		NodeTotal: len(snapshot.Nodes),
+	}
+	for id, providerSnapshot := range snapshot.Providers {
+		status.Accounts[id] = AccountSummary{Display: providerSnapshot.Account.Display, Tier: providerSnapshot.Account.Tier, SubscriptionActive: providerSnapshot.Account.SubscriptionActive, SubscriptionEndsAt: providerSnapshot.Account.SubscriptionEndsAt}
 	}
 	for _, node := range snapshot.Nodes {
 		if node.TunnelEligible() {
@@ -392,11 +340,14 @@ func (m *Manager) Begin(operation Operation) (func(Outcome), error) {
 		return nil, ErrOperationInProgress
 	}
 	var target ServiceState
+	previous := m.state
 	switch operation {
 	case OperationLogin:
 		switch m.state {
 		case StateSignedOut, StateExpired, StateError:
 			target = StateAuthenticating
+		case StateReady, StateDegraded:
+			target = StateSyncing
 		default:
 			m.mu.Unlock()
 			return nil, ErrInvalidTransition
@@ -413,6 +364,7 @@ func (m *Manager) Begin(operation Operation) (func(Outcome), error) {
 		m.mu.Unlock()
 		return nil, ErrInvalidTransition
 	}
+	m.previousState = previous
 	m.state = target
 	m.active = operation
 	m.lease++
@@ -438,17 +390,19 @@ func (m *Manager) finish(lease uint64, operation Operation, outcome Outcome) {
 		}
 		return
 	}
+	current := m.runtime.Current()
+	if operation == OperationLogin && SessionUsable(current, time.Now()) && (m.previousState == StateReady || m.previousState == StateDegraded) {
+		m.state = m.previousState
+		return
+	}
 	if operation == OperationLogin {
 		m.signOutLocked()
 		return
 	}
-	current := m.runtime.Current()
-	if current != nil && current.Sessions.Valid() {
-		if !current.ExpiresAt.IsZero() && !time.Now().Before(current.ExpiresAt) {
-			m.expireLocked(time.Now())
-		} else {
-			m.state = StateDegraded
-		}
+	if SessionUsable(current, time.Now()) {
+		m.state = StateDegraded
+	} else if current != nil && !current.ExpiresAt.IsZero() && !time.Now().Before(current.ExpiresAt) {
+		m.expireLocked(time.Now())
 	} else {
 		m.state = StateError
 	}
@@ -499,8 +453,8 @@ func (m *Manager) Commit(snapshot *RuntimeSnapshot) error {
 	if err := ValidateRuntimeSnapshot(snapshot); err != nil {
 		return err
 	}
-	if !snapshot.Sessions.Valid() {
-		return fmt.Errorf("%w: incomplete client sessions", ErrInvalidSnapshot)
+	if len(snapshot.Providers) == 0 {
+		return fmt.Errorf("%w: no provider accounts", ErrInvalidSnapshot)
 	}
 	hasEligible := false
 	for _, node := range snapshot.Nodes {
@@ -521,7 +475,7 @@ func (m *Manager) Commit(snapshot *RuntimeSnapshot) error {
 	if m.runtime.snapshot.Load() != nil && snapshot.Generation <= m.runtime.snapshot.Load().Generation {
 		return fmt.Errorf("%w: non-monotonic generation", ErrInvalidSnapshot)
 	}
-	if !m.bindingKeyConfigured || m.subscription.Generation == 0 || len(m.subscription.AccountBinding) != sha256.Size || !matchesAccountBinding(m.subscription.AccountBinding, m.accountBindingKey, snapshot.Sessions.UserID()) {
+	if !m.bindingKeyConfigured || len(m.subscription.SelectorKey) == 0 || len(m.subscription.AccountBinding) != sha256.Size || !matchesAccountBinding(m.subscription.AccountBinding, m.accountBindingKey, snapshot.AccountBindingID()) {
 		return ErrAccountChanged
 	}
 	m.runtime.replace(snapshot)
@@ -531,7 +485,7 @@ func (m *Manager) Commit(snapshot *RuntimeSnapshot) error {
 	return nil
 }
 
-func rotatedSubscriptionMaterial(current, candidate SubscriptionGeneration) bool {
+func rotatedSubscriptionMaterial(current, candidate SubscriptionAuthority) bool {
 	return subtle.ConstantTimeCompare(current.SelectorKey, candidate.SelectorKey) != 1 &&
 		subtle.ConstantTimeCompare(current.ProxyAuthKey, candidate.ProxyAuthKey) != 1
 }
@@ -555,8 +509,7 @@ func (m *Manager) SignOut() {
 func (m *Manager) signOutLocked() {
 	current := m.runtime.Current()
 	if current != nil {
-		current.Sessions.Wipe()
-		current.Account = AccountSummary{}
+		current.Providers = nil
 		m.runtime.replace(current)
 	}
 	m.state = StateSignedOut
@@ -590,14 +543,22 @@ func (m *Manager) expireLocked(now time.Time) {
 	current := m.runtime.Current()
 	if current != nil {
 		current.ExpiresAt = now.UTC()
-		current.Sessions.Wipe()
+		current.Providers = nil
 		m.runtime.replace(current)
 	}
 	m.state = StateExpired
 }
 
-// SessionUsable reports whether the supplied pinned snapshot may establish a
-// new tunnel at now. Existing relays deliberately do not re-check this value.
+// SessionUsable reports whether at least one complete provider account may
+// establish a new tunnel at now.
 func SessionUsable(snapshot *RuntimeSnapshot, now time.Time) bool {
-	return snapshot != nil && snapshot.Sessions.Valid() && !snapshot.CreatedAt.IsZero() && !snapshot.ExpiresAt.IsZero() && !now.Before(snapshot.CreatedAt) && now.Before(snapshot.ExpiresAt)
+	if snapshot == nil || snapshot.CreatedAt.IsZero() || snapshot.ExpiresAt.IsZero() || now.Before(snapshot.CreatedAt) || !now.Before(snapshot.ExpiresAt) {
+		return false
+	}
+	for _, providerSnapshot := range snapshot.Providers {
+		if providerSnapshot.ExpiresAt.After(now) {
+			return true
+		}
+	}
+	return false
 }

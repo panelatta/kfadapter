@@ -8,24 +8,25 @@ export const readyStatus = (): StatusResponse => ({
   state: "ready",
   version: "0.1.0",
   deployment: { mode: "container" },
-  account: { display: "u•••@example.com", isVip: true },
-  controlPlane: { lastRefreshAt: "2026-07-15T10:00:00Z" },
-  dataPlane: { socksAddress: "127.0.0.1:10808", udpMode: "disabled_unverified" },
+	providers: ["kuaifan", "quickfox"],
+	accounts: { kuaifan: { provider: "kuaifan", display: "u•••@example.com", tier: "VIP", subscriptionActive: true, subscriptionEndsAt: "2026-08-15T10:00:00Z" } },
+	controlPlane: { lastRefreshAt: "2026-07-15T10:00:00Z" },
+	dataPlane: { socksAddress: "127.0.0.1:10808", udpMode: "provider_transport" },
   nodes: { total: 3, eligible: 2, healthy: 1 },
-  subscription: { active: true, generation: 7, nodeCount: 2, lastFetchedAt: "2026-07-15T10:02:00Z", lastFetchedGeneration: 7, reloadRecommended: false },
+  subscription: { active: true, nodeCount: 2 },
 });
 
 export const signedOutStatus = (): StatusResponse => ({
   ...readyStatus(),
   state: "signed_out",
-  account: undefined,
+	accounts: undefined,
   nodes: { total: 0, eligible: 0, healthy: 0 },
-  subscription: { active: false, generation: 0, nodeCount: 0, reloadRecommended: false },
+  subscription: { active: false, nodeCount: 0 },
 });
 
 export const nodes: NodeRecord[] = [
-  { id: "n-east", name: "Shanghai 01", group: "East China", provider: "WIFIIN", health: "healthy", tcpLatencyMs: 76, udpHealth: "unavailable", eligible: true },
-  { id: "n-west", name: "Chengdu 02", group: "West China", provider: "WIFIIN", health: "degraded", tcpLatencyMs: 114, udpHealth: "unavailable", eligible: true },
+  { id: "n-east", name: "Shanghai 01", group: "East China", provider: "kuaifan", health: "healthy", tcpLatencyMs: 76, udpHealth: "unavailable", eligible: true },
+  { id: "n-west", name: "Chengdu 02", group: "West China", provider: "kuaifan", health: "degraded", tcpLatencyMs: 114, udpHealth: "unavailable", eligible: true },
 ];
 
 export const chengduDetails: NodeDetails = {
@@ -40,7 +41,6 @@ export const chengduDetails: NodeDetails = {
   socksPassword: "local-socks-password",
   health: "degraded",
   tcpLatencyMs: 114,
-  generation: 7,
 };
 
 export function makeApi(initialStatus = readyStatus(), initialNodes = nodes): ApiClient & { statusValue: StatusResponse } {
@@ -60,7 +60,7 @@ export function makeApi(initialStatus = readyStatus(), initialNodes = nodes): Ap
     status: vi.fn().mockImplementation(async () => state.statusValue),
     nodes: vi.fn().mockImplementation(async () => ({ nodes: state.nodeList })),
     nodeDetails: vi.fn().mockResolvedValue(chengduDetails),
-    subscriptionURL: vi.fn().mockResolvedValue({ url: currentConsumerURL, generation: 7 }),
+    subscriptionURL: vi.fn().mockResolvedValue({ url: currentConsumerURL }),
     login: vi.fn().mockImplementation(async () => { state.statusValue = readyStatus(); return {}; }),
     logoutAccount: vi.fn().mockResolvedValue(undefined),
     lockConsole: vi.fn().mockResolvedValue(undefined),

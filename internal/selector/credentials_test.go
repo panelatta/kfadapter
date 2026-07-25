@@ -1,166 +1,53 @@
 package selector
 
 import (
-	"encoding/hex"
-	"errors"
-	"fmt"
-	"sync"
+	"bytes"
 	"testing"
 	"time"
 
 	"github.com/kfadapter/kfadapter/internal/state"
 )
 
-func bytesFromHex(t *testing.T, value string) []byte {
-	t.Helper()
-	decoded, err := hex.DecodeString(value)
+func TestDeriveUsesCompleteNodeIDOnly(t *testing.T) {
+	selectorKey := bytes.Repeat([]byte{1}, 32)
+	proxyKey := bytes.Repeat([]byte{2}, 32)
+	identity := NodeIdentity{NodeID: "kuaifan_IZL4HC1WCgH5U2Ve", Provider: "wifiin", Host: "irrelevant.example", Port: 1}
+	credentials, err := Derive(identity, selectorKey, proxyKey)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return decoded
-}
-
-func normativeGeneration(t *testing.T, generation uint64) state.SubscriptionGeneration {
-	t.Helper()
-	return state.SubscriptionGeneration{
-		Generation:   generation,
-		SelectorKey:  bytesFromHex(t, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
-		ProxyAuthKey: bytesFromHex(t, "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"),
+	if credentials.Selector != "n_oiejDe4bdehSlvRr" || credentials.Password != "p_Nj1QpSyarUQVjKj-p0Sczc_t" {
+		t.Fatalf("credentials = %#v", credentials)
 	}
-}
-
-func TestLiteralSelectorCredentialVectorAndSingleGeneration(t *testing.T) {
-	current := normativeGeneration(t, 1)
-	registry, err := NewRegistry(current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity := NodeIdentity{NodeID: "logical-node", Provider: "WIFIIN", Host: "node.example.com", Port: 11000}
-	canonical, err := Canonicalize(identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := hex.EncodeToString(canonical.Fingerprint()), "63726564656e7469616c006c6f676963616c2d6e6f64650057494649494e006e6f64652e6578616d706c652e636f6d003131303030"; got != want {
-		t.Fatalf("fingerprint = %s", got)
-	}
-	credential, err := Derive(identity, current.SelectorKey, current.ProxyAuthKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if credential.Selector != "n_mxil1BgwUEdowkbk" || credential.Password != "p_PTcyncorolR0QCpa8NdZV8z8" {
-		t.Fatalf("credential = %#v", credential)
-	}
-	if generations := registry.Generations(); len(generations) != 1 || generations[0] != 1 {
-		t.Fatalf("Generations = %#v", generations)
-	}
-	if generation, ok := registry.Authenticate(credential.Selector, credential.Password); !ok || generation != 1 {
-		t.Fatalf("Authenticate = (%d, %v)", generation, ok)
-	}
-	if _, ok := registry.Credentials(2, identity); ok {
-		t.Fatal("registry exposed a non-current credential generation")
+	other, err := Derive(NodeIdentity{NodeID: identity.NodeID, Provider: "quickfox", Host: "different.example", Port: 65535}, selectorKey, proxyKey)
+	if err != nil || other != credentials {
+		t.Fatalf("route affected NodeID-only derivation: %#v, %v", other, err)
 	}
 }
 
-func TestDeriveRejectsMissingLogicalNodeID(t *testing.T) {
-	identity := NodeIdentity{Provider: "WIFIIN", Host: "node.example.com", Port: 11000}
-	if _, err := Derive(identity, normativeGeneration(t, 1).SelectorKey, normativeGeneration(t, 1).ProxyAuthKey); !errors.Is(err, ErrInvalidIdentity) {
-		t.Fatalf("missing logical node ID error = %v", err)
-	}
-}
-
-func TestAccountCutoverUsesReplacementRegistry(t *testing.T) {
-	first := normativeGeneration(t, 1)
-	second := normativeGeneration(t, 2)
-	second.SelectorKey[0] ^= 0xff
-	second.ProxyAuthKey[0] ^= 0xff
-	oldRegistry, err := NewRegistry(first)
+func TestExactIdentityReactivationIsDeterministic(t *testing.T) {
+	registry, err := NewRegistry(state.SubscriptionAuthority{SelectorKey: bytes.Repeat([]byte{3}, 32), ProxyAuthKey: bytes.Repeat([]byte{4}, 32), ActivatedAt: time.Now().UTC()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	newRegistry, err := NewRegistry(second)
+	node := state.Node{ID: "quickfox_oPBFuUUKYh007NL5"}
+	first, err := registry.Build([]state.Node{node})
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := NodeIdentity{NodeID: "node", Provider: "WIFIIN", Host: "node.example.com", Port: 11000}
-	oldCredentials, ok := oldRegistry.Credentials(1, identity)
-	if !ok {
-		t.Fatal("old credentials unavailable")
+	if _, err := registry.Build(nil); err != nil {
+		t.Fatal(err)
 	}
-	newCredentials, ok := newRegistry.Credentials(2, identity)
-	if !ok || newCredentials == oldCredentials {
-		t.Fatalf("new credentials = %#v, ok=%v", newCredentials, ok)
-	}
-	if _, ok := newRegistry.Authenticate(oldCredentials.Selector, oldCredentials.Password); ok {
-		t.Fatal("replacement registry accepted old account credential")
-	}
-	if generation, ok := newRegistry.Authenticate(newCredentials.Selector, newCredentials.Password); !ok || generation != 2 {
-		t.Fatalf("new authentication = (%d, %v)", generation, ok)
-	}
-}
-
-func TestTombstonesRemainGenerationBoundAndDeterministic(t *testing.T) {
-	now := time.Date(2026, 7, 16, 11, 0, 0, 0, time.UTC)
-	registry, err := NewRegistry(normativeGeneration(t, 7))
+	second, err := registry.Build([]state.Node{node})
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := state.Node{ID: "stable", Provider: "WIFIIN", Host: "node.example.com", Port: 11000, Eligible: true}
-	first, err := registry.BuildWithTombstones(7, []state.Node{node}, nil, now)
-	if err != nil {
-		t.Fatal(err)
+	if len(first.Selectors) != 1 || len(second.Selectors) != 1 {
+		t.Fatalf("selectors = %#v %#v", first.Selectors, second.Selectors)
 	}
-	removed, err := registry.BuildWithTombstones(7, nil, first.Selectors, now.Add(time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(removed.Nodes) != 0 || len(removed.Selectors) != 1 {
-		t.Fatalf("removed result = %#v", removed)
-	}
-	for name, ref := range removed.Selectors {
-		if !ref.Tombstoned || ref.Generation != 7 || ref.NodeID != "" || !ref.IsTombstoned(now.Add(time.Minute)) {
-			t.Fatalf("invalid tombstone %q: %#v", name, ref)
+	for name := range first.Selectors {
+		if _, found := second.Selectors[name]; !found {
+			t.Fatal("exact identity did not reactivate deterministic selector")
 		}
-	}
-	resurrected, err := registry.BuildWithTombstones(7, []state.Node{node}, removed.Selectors, now.Add(2*time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(resurrected.Nodes) != 0 {
-		t.Fatalf("active tombstone allowed selector remap: %#v", resurrected)
-	}
-	if _, err := registry.BuildWithTombstones(8, []state.Node{node}, nil, now); !errors.Is(err, ErrUnknownGeneration) {
-		t.Fatalf("wrong generation error = %v", err)
-	}
-}
-
-func TestRegistryConcurrentReadsAreRaceSafe(t *testing.T) {
-	registry, err := NewRegistry(normativeGeneration(t, 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity := NodeIdentity{NodeID: "node", Provider: "WIFIIN", Host: "node.example.com", Port: 11000}
-	credential, ok := registry.Credentials(1, identity)
-	if !ok {
-		t.Fatal("credentials unavailable")
-	}
-	node := state.Node{ID: "node", Provider: "WIFIIN", Host: "node.example.com", Port: 11000, Eligible: true}
-	var wait sync.WaitGroup
-	errors := make(chan error, 64)
-	for range 64 {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			if generation, ok := registry.AuthenticateAt(credential.Selector, credential.Password, time.Now()); !ok || generation != 1 {
-				errors <- fmt.Errorf("authentication = (%d, %v)", generation, ok)
-			}
-			if _, err := registry.BuildWithTombstones(1, []state.Node{node}, nil, time.Now()); err != nil {
-				errors <- err
-			}
-		}()
-	}
-	wait.Wait()
-	close(errors)
-	for err := range errors {
-		t.Error(err)
 	}
 }

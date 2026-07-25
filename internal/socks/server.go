@@ -2,20 +2,16 @@ package socks
 
 import (
 	"context"
-	"crypto/cipher"
 	"crypto/subtle"
 	"errors"
 	"fmt"
-	"io"
 	"net"
-	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/kfadapter/kfadapter/internal/kuaifan/wifiin"
+	"github.com/kfadapter/kfadapter/internal/provider"
 	"github.com/kfadapter/kfadapter/internal/selector"
 	"github.com/kfadapter/kfadapter/internal/state"
 )
@@ -30,20 +26,17 @@ const (
 // snapshot or selector map to the SOCKS hot path. state.Manager is the
 // production implementation.
 type SnapshotSource interface {
-	CompactPin(selector string, credentialGeneration uint64, now time.Time) (state.TunnelPin, error)
+	CompactPin(selector string, now time.Time) (state.TunnelPin, error)
 	SessionCurrentPin(pin state.TunnelPin, now time.Time) bool
 }
-
-// DialContextFunc dials only the selected WIFIIN node. target destinations are
-// deliberately never handed to it, preventing a direct-traffic escape.
-type DialContextFunc func(ctx context.Context, network, address string) (net.Conn, error)
 
 // Config defines the SOCKS listener's dependency boundaries.
 type Config struct {
 	Snapshots SnapshotSource
 	Selectors *selector.Registry
+	Providers *provider.Registry
 
-	DialContext      DialContextFunc
+	DialContext      provider.DialContextFunc
 	HandshakeTimeout time.Duration
 	MaxConnections   int
 }
@@ -53,7 +46,8 @@ type Config struct {
 // only a compact state tunnel pin, never a runtime snapshot.
 type Server struct {
 	snapshots        SnapshotSource
-	dial             DialContextFunc
+	providers        *provider.Registry
+	dial             provider.DialContextFunc
 	handshakeTimeout time.Duration
 	slots            chan struct{}
 	selectors        atomic.Pointer[selector.Registry]
@@ -72,6 +66,9 @@ func New(config Config) (*Server, error) {
 	}
 	if config.Selectors == nil {
 		return nil, errors.New("socks: selector registry is required")
+	}
+	if config.Providers == nil {
+		return nil, errors.New("socks: provider registry is required")
 	}
 	timeout := config.HandshakeTimeout
 	if timeout == 0 {
@@ -94,14 +91,13 @@ func New(config Config) (*Server, error) {
 	}
 	drained := make(chan struct{})
 	close(drained)
-	server := &Server{snapshots: config.Snapshots, dial: dial, handshakeTimeout: timeout, slots: make(chan struct{}, maxConnections), active: make(map[net.Conn]context.CancelFunc), drained: drained}
+	server := &Server{snapshots: config.Snapshots, providers: config.Providers, dial: dial, handshakeTimeout: timeout, slots: make(chan struct{}, maxConnections), active: make(map[net.Conn]context.CancelFunc), drained: drained}
 	server.selectors.Store(config.Selectors)
 	return server, nil
 }
 
 // SetSelectors atomically adopts an immutable registry containing the current
-// and, if applicable, pending subscription generation. Existing TCP flows are
-// unaffected.
+// subscription authority. Existing TCP flows are unaffected.
 func (s *Server) SetSelectors(registry *selector.Registry) error {
 	if s == nil || registry == nil {
 		return errors.New("socks: selector registry is required")
@@ -288,12 +284,12 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		_ = writeAuthStatus(client, false)
 		return state.ErrSelectorUnknown
 	}
-	credentialGeneration, authenticated := registry.AuthenticateAt(username, password, now)
+	authenticated := registry.AuthenticateAt(username, password, now)
 	if !authenticated {
 		_ = writeAuthStatus(client, false)
 		return state.ErrSelectorUnknown
 	}
-	pin, err := s.snapshots.CompactPin(username, credentialGeneration, now)
+	pin, err := s.snapshots.CompactPin(username, now)
 	node := pin.Node
 	if err != nil || !node.TunnelEligible() {
 		_ = writeAuthStatus(client, false)
@@ -333,12 +329,12 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		_ = writeReply(client, replyGeneralFailure, target{})
 		return state.ErrSelectorUnknown
 	}
-	credentialGeneration, authenticated = registry.AuthenticateAt(username, password, now)
+	authenticated = registry.AuthenticateAt(username, password, now)
 	if !authenticated {
 		_ = writeReply(client, replyGeneralFailure, target{})
 		return state.ErrSelectorUnknown
 	}
-	revalidatedPin, resolveErr := s.snapshots.CompactPin(username, credentialGeneration, now)
+	revalidatedPin, resolveErr := s.snapshots.CompactPin(username, now)
 	revalidatedNode := revalidatedPin.Node
 	if resolveErr != nil || s.selectors.Load() != registry || !samePinAuthority(pin, revalidatedPin) || !revalidatedNode.TunnelEligible() || !sameCanonicalNode(node, revalidatedNode) {
 		_ = writeReply(client, replyGeneralFailure, target{})
@@ -353,11 +349,11 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		return fmt.Errorf("socks: clear client setup deadline: %w", err)
 	}
 
-	if !strings.EqualFold(pin.Session.TunnelMethod, "aes-256-cfb") {
+	transport, err := s.providers.Transport(node.Protocol)
+	if err != nil {
 		_ = writeReply(client, replyGeneralFailure, target{})
-		return errors.New("socks: unsupported WIFIIN tunnel cipher")
+		return err
 	}
-
 	var association *udpAssociation
 	if command == commandUDP {
 		association, err = newUDPAssociation(client, destination)
@@ -369,169 +365,63 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 			_ = writeReply(client, code, target{})
 			return err
 		}
-		defer association.conn.Close()
+		defer association.Close()
 	}
-
-	dialCtx, cancelDial := context.WithTimeout(ctx, s.handshakeTimeout)
-	upstream, err := s.dial(dialCtx, "tcp", net.JoinHostPort(node.Host, strconv.Itoa(int(node.Port))))
-	cancelDial()
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if err != nil {
-		_ = writeReply(client, dialReply(err), target{})
-		return fmt.Errorf("socks: connect selected upstream: %w", err)
-	}
-	defer upstream.Close()
-
-	deadline := time.Now().Add(s.handshakeTimeout)
-	if err := upstream.SetDeadline(deadline); err != nil {
-		_ = writeReply(client, replyGeneralFailure, target{})
-		return fmt.Errorf("socks: set handshake deadline: %w", err)
-	}
-	key := wifiin.DeriveKey(pin.Session.TunnelPassword)
-	var header *wifiin.OutboundHeader
-	if command == commandUDP {
-		header, err = wifiin.NewUOTOutboundHeader(key[:], node.Host, node.Port, pin.Session.ProviderExtension)
-	} else {
-		header, err = wifiin.NewOutboundHeader(key[:], destination.Host, destination.Port, pin.Session.ProviderExtension)
-	}
-	if err == nil {
-		err = writeAll(upstream, header.Packet)
-	}
-	var reader *wifiin.HandshakeReader
-	if err == nil {
-		reader = wifiin.NewHandshakeReader(upstream)
-		err = reader.ReadACK()
-	}
-	if err != nil {
-		_ = writeReply(client, replyGeneralFailure, target{})
-		return fmt.Errorf("socks: WIFIIN handshake: %w", err)
-	}
-	if err := upstream.SetDeadline(time.Time{}); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) {
-		_ = writeReply(client, replyGeneralFailure, target{})
-		return fmt.Errorf("socks: clear handshake deadline: %w", err)
-	}
-	// The upstream acknowledged the header. This is the final admission point:
-	// lifecycle invalidation that linearized first prevents a new tunnel, while
-	// later invalidation may drain the now-pinned established flow.
-	now = time.Now()
-	if !s.snapshots.SessionCurrentPin(pin, now) {
-		_ = writeReply(client, replyGeneralFailure, target{})
-		return state.ErrSelectorUnknown
-	}
-	registry = s.selectors.Load()
-	if registry == nil {
-		_ = writeReply(client, replyGeneralFailure, target{})
-		return state.ErrSelectorUnknown
-	}
-	credentialGeneration, authenticated = registry.AuthenticateAt(username, password, now)
-	if !authenticated {
-		_ = writeReply(client, replyGeneralFailure, target{})
-		return state.ErrSelectorUnknown
-	}
-	finalPin, finalResolveErr := s.snapshots.CompactPin(username, credentialGeneration, now)
-	finalNode := finalPin.Node
-	if finalResolveErr != nil || s.selectors.Load() != registry || !samePinAuthority(pin, finalPin) || !finalNode.TunnelEligible() || !sameCanonicalNode(node, finalNode) {
-		_ = writeReply(client, replyGeneralFailure, target{})
-		if finalResolveErr != nil {
-			return finalResolveErr
+	admit := func() bool {
+		now := time.Now()
+		if !s.snapshots.SessionCurrentPin(pin, now) {
+			return false
 		}
-		return state.ErrSelectorUnknown
+		currentRegistry := s.selectors.Load()
+		if currentRegistry == nil {
+			return false
+		}
+		authenticated := currentRegistry.AuthenticateAt(username, password, now)
+		if !authenticated {
+			return false
+		}
+		finalPin, resolveErr := s.snapshots.CompactPin(username, now)
+		finalNode := finalPin.Node
+		if resolveErr != nil || s.selectors.Load() != currentRegistry || !samePinAuthority(pin, finalPin) || !finalNode.TunnelEligible() || !sameCanonicalNode(node, finalNode) {
+			return false
+		}
+		pin, node = finalPin, finalNode
+		return true
 	}
-	pin = finalPin
-	if association != nil {
-		if err := writeReply(client, replySucceeded, targetFromAddr(association.conn.LocalAddr())); err != nil {
+	ready := false
+	readyRelay := func(bound net.Addr) error {
+		if err := writeReply(client, replySucceeded, targetFromAddr(bound)); err != nil {
 			return err
 		}
-		return s.relayUDPAssociation(ctx, client, upstream, reader, header, key[:], association)
+		ready = true
+		return nil
 	}
-	if err := writeReply(client, replySucceeded, targetFromAddr(upstream.LocalAddr())); err != nil {
-		return err
+	if association != nil {
+		err = transport.RelayDatagrams(ctx, provider.DatagramRequest{
+			Dial: s.dial, Control: client, Packets: association, NodeHost: node.Host, NodePort: node.Port,
+			Authority: pin.Authority.Data, HandshakeTimeout: s.handshakeTimeout, Admit: admit, Ready: readyRelay,
+		})
+	} else {
+		err = transport.RelayStream(ctx, provider.RelayRequest{
+			Dial: s.dial, Client: client, NodeHost: node.Host, NodePort: node.Port,
+			Target: provider.Target{Host: destination.Host, Port: destination.Port}, Authority: pin.Authority.Data,
+			HandshakeTimeout: s.handshakeTimeout, Admit: admit, Ready: readyRelay,
+		})
 	}
-
-	// The server IV is deliberately lazy: real WIFIIN providers can withhold it
-	// until they receive application ciphertext. Relay starts both directions,
-	// and outboundCFBWriter arms the bounded IV read only on the first write.
-	lazyInbound, err := wifiin.NewLazyInboundReader(reader, key[:], upstream, s.handshakeTimeout)
-	if err != nil {
-		return fmt.Errorf("socks: configure delayed WIFIIN IV: %w", err)
+	if err != nil && !ready {
+		_ = writeReply(client, dialReply(err), target{})
 	}
-	tunnel := &cipherConn{
-		Conn:   upstream,
-		reader: lazyInbound,
-		writer: &outboundCFBWriter{
-			writer:  &cipher.StreamWriter{S: header.Stream, W: upstream},
-			inbound: lazyInbound,
-			conn:    upstream,
-		},
-	}
-	return wifiin.Relay(ctx, client, tunnel)
-}
-
-type cipherConn struct {
-	net.Conn
-	reader io.Reader
-	writer io.Writer
-}
-
-func (c *cipherConn) Read(p []byte) (int, error)  { return c.reader.Read(p) }
-func (c *cipherConn) Write(p []byte) (int, error) { return c.writer.Write(p) }
-
-func (c *cipherConn) CloseWrite() error {
-	if closer, ok := c.writer.(interface{ CloseWrite() error }); ok {
-		return closer.CloseWrite()
-	}
-	if closer, ok := c.Conn.(interface{ CloseWrite() error }); ok {
-		return closer.CloseWrite()
-	}
-	return c.Conn.Close()
-}
-
-type outboundCFBWriter struct {
-	writer  io.Writer
-	inbound *wifiin.LazyInboundReader
-	conn    net.Conn
-}
-
-func (w *outboundCFBWriter) Write(p []byte) (int, error) {
-	if len(p) != 0 {
-		if err := w.inbound.ArmForOutbound(); err != nil {
-			return 0, err
-		}
-	}
-	return w.writer.Write(p)
-}
-
-func (w *outboundCFBWriter) CloseWrite() error {
-	if !w.inbound.OutboundStarted() {
-		return w.conn.Close()
-	}
-	if closer, ok := w.conn.(interface{ CloseWrite() error }); ok {
-		return closer.CloseWrite()
-	}
-	return w.conn.Close()
+	return err
 }
 
 func samePinAuthority(left, right state.TunnelPin) bool {
-	if !left.ExpiresAt.Equal(right.ExpiresAt) {
-		return false
-	}
-	return constantTimeEqual(left.Session.UserID, right.Session.UserID) &&
-		constantTimeEqual(left.Session.LoginToken, right.Session.LoginToken) &&
-		constantTimeEqual(left.Session.ProviderToken, right.Session.ProviderToken) &&
-		constantTimeEqual(left.Session.TunnelPassword, right.Session.TunnelPassword) &&
-		constantTimeEqual(left.Session.TunnelMethod, right.Session.TunnelMethod) &&
-		constantTimeEqual(left.Session.ProviderExtension, right.Session.ProviderExtension)
-}
-
-func constantTimeEqual(left, right string) bool {
-	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
+	return left.ExpiresAt.Equal(right.ExpiresAt) && left.Authority.Protocol == right.Authority.Protocol &&
+		subtle.ConstantTimeCompare(left.Authority.Data, right.Authority.Data) == 1
 }
 
 func sameCanonicalNode(left, right state.Node) bool {
-	leftIdentity, leftErr := selector.Canonicalize(selector.NodeIdentity{NodeID: left.ID, Provider: left.Provider, Host: left.Host, Port: int(left.Port)})
-	rightIdentity, rightErr := selector.Canonicalize(selector.NodeIdentity{NodeID: right.ID, Provider: right.Provider, Host: right.Host, Port: int(right.Port)})
+	leftIdentity, leftErr := selector.Canonicalize(selector.NodeIdentity{NodeID: left.ID, Provider: string(left.Provider), Host: left.Host, Port: int(left.Port)})
+	rightIdentity, rightErr := selector.Canonicalize(selector.NodeIdentity{NodeID: right.ID, Provider: string(right.Provider), Host: right.Host, Port: int(right.Port)})
 	return leftErr == nil && rightErr == nil && leftIdentity == rightIdentity
 }
 

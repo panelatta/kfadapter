@@ -50,7 +50,6 @@ describe("API response contracts", () => {
       socksPassword: "local-password",
       health: "healthy",
       tcpLatencyMs: 42,
-      generation: 7,
     };
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(details), { status: 200, headers: jsonHeaders }));
     vi.stubGlobal("fetch", fetchMock);
@@ -71,14 +70,16 @@ describe("API response contracts", () => {
     const api = new ApiClient();
     api.setCsrfToken("csrf-before-logout");
 
-    await expect(api.logoutAccount()).resolves.toBeUndefined();
-    await api.refresh();
+		await expect(api.logoutAccount("kuaifan")).resolves.toBeUndefined();
+		await api.refresh("kuaifan");
     await expect(api.lockConsole()).resolves.toBeUndefined();
-    await api.refresh();
+		await api.refresh("kuaifan");
 
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/auth/logout");
     expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "POST", credentials: "same-origin", cache: "no-store" });
+		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ provider: "kuaifan" });
     expect(fetchMock.mock.calls[1][1].headers["X-CSRF-Token"]).toBe("csrf-before-logout");
+		expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ provider: "kuaifan" });
     expect(fetchMock.mock.calls[2][0]).toBe("/api/v1/access/logout");
     expect(fetchMock.mock.calls[2][1].method).toBe("POST");
     expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({});
@@ -89,10 +90,10 @@ describe("API response contracts", () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(new ApiClient().refresh()).resolves.toBeUndefined();
+		await expect(new ApiClient().refresh("kuaifan")).resolves.toBeUndefined();
 
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/control/refresh");
     expect(fetchMock.mock.calls[0][1].method).toBe("POST");
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({});
+		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ provider: "kuaifan" });
   });
 });

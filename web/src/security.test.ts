@@ -27,7 +27,7 @@ describe("browser boundary", () => {
     await api.setupAccess("console-token-12345");
     await api.loginAccess("console-token-12345");
     await api.status();
-    await api.login("operator@example.com", "volatile-password");
+		await api.login("kuaifan", "operator@example.com", "volatile-password");
 
     for (const [request, options] of fetchMock.mock.calls) {
       expect(request).toMatch(/^\/api\/v1\//);
@@ -56,7 +56,7 @@ describe("browser boundary", () => {
     api.setCsrfToken("csrf-before-logout");
 
     await expect(api.lockConsole()).rejects.toBeInstanceOf(Error);
-    await api.refresh();
+		await api.refresh("kuaifan");
 
     expect(fetchMock.mock.calls[1][1].headers["X-CSRF-Token"]).toBe("");
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/access/logout");
@@ -71,7 +71,7 @@ describe("browser boundary", () => {
     api.setCsrfToken("csrf-before-lock");
 
     await expect(api.lockConsole()).resolves.toBeUndefined();
-    await api.refresh();
+		await api.refresh("kuaifan");
 
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/access/logout");
     expect(fetchMock.mock.calls[1][1].headers["X-CSRF-Token"]).toBe("");
@@ -88,7 +88,7 @@ describe("browser boundary", () => {
 
     await expect(api.lockConsole()).rejects.toBeInstanceOf(TypeError);
     await api.lockConsole();
-    await api.refresh();
+		await api.refresh("kuaifan");
 
     expect(fetchMock.mock.calls[1][1].headers["X-CSRF-Token"]).toBe("csrf-retry-token");
     expect(fetchMock.mock.calls[2][1].headers["X-CSRF-Token"]).toBe("");
@@ -96,12 +96,12 @@ describe("browser boundary", () => {
   });
 
   it("loads the reusable subscription URL through its authenticated GET endpoint", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ url: currentConsumerURL, generation: 7 }));
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ url: currentConsumerURL }));
     vi.stubGlobal("fetch", fetchMock);
     const api = new ApiClient();
     api.setCsrfToken("csrf-test");
 
-    await expect(api.subscriptionURL()).resolves.toEqual({ url: currentConsumerURL, generation: 7 });
+    await expect(api.subscriptionURL()).resolves.toEqual({ url: currentConsumerURL });
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/subscription/url");
     expect(fetchMock.mock.calls[0][1].method).toBe("GET");
   });

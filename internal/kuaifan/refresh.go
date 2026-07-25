@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,171 +12,128 @@ import (
 	"time"
 
 	wireprofile "github.com/kfadapter/kfadapter/internal/kuaifan/profile"
+	"github.com/kfadapter/kfadapter/internal/provider"
 	"github.com/kfadapter/kfadapter/internal/selector"
-	"github.com/kfadapter/kfadapter/internal/state"
 )
 
-var (
-	ErrNoSession        = errors.New("control: no refreshable session")
-	ErrAuthorityExpired = errors.New("control: authority has expired")
+const (
+	ProviderID     provider.ID       = "kuaifan"
+	WIFIINProtocol provider.Protocol = "kuaifan-wifiin"
+	standardTier                     = "Standard"
+	vipTier                          = "VIP"
 )
 
-// RefresherConfig configures the serialized KuaiFan coordinator. All state
-// changes go through Manager; it is the sole publication path for a complete
-// refreshed-session, authority, and line generation.
-type RefresherConfig struct {
-	IOSClient       *Client
-	WindowsClient   *Client
-	Manager         *state.Manager
-	SelectorBuilder state.SelectorBuilder
-	// CommitSnapshot is the single final publication hook. When supplied, it
-	// must durably render/persist any last-good subscription state before it
-	// calls Manager.Commit. Returning an error leaves Manager untouched.
-	CommitSnapshot func(*state.RuntimeSnapshot) error
-
-	// AuthorityLifetime is the conservative lifetime assigned after a complete
-	// authority refresh. It defaults to the observed 24-hour refresh deadline.
+// DriverConfig configures the KuaiFan account driver. It owns both captured
+// control profiles; outer packages see one provider account and opaque state.
+type DriverConfig struct {
+	IOSClient         *Client
+	WindowsClient     *Client
 	AuthorityLifetime time.Duration
-	// MaxAttempts bounds retryable refresh requests. Login itself is never
-	// retried, including after rejected credentials.
-	MaxAttempts int
-	BackoffMin  time.Duration
-	BackoffMax  time.Duration
-	Clock       func() time.Time
+	MaxAttempts       int
+	BackoffMin        time.Duration
+	BackoffMax        time.Duration
+	Clock             func() time.Time
 }
 
-// Refresher serializes login and refresh with state.Manager's operation lease.
-type Refresher struct {
-	clients        [2]*Client
-	manager        *state.Manager
-	builder        state.SelectorBuilder
-	commitSnapshot func(*state.RuntimeSnapshot) error
-	lifetime       time.Duration
-	attempts       int
-	backoff        time.Duration
-	maxBackoff     time.Duration
-	clock          func() time.Time
+// Driver implements provider.Driver for one KuaiFan account.
+type Driver struct {
+	clients    [2]*Client
+	lifetime   time.Duration
+	attempts   int
+	backoff    time.Duration
+	maxBackoff time.Duration
+	clock      func() time.Time
 }
 
-// NewRefresher validates the two distinct profile clients required to publish
-// an aggregate generation.
-func NewRefresher(cfg RefresherConfig) (*Refresher, error) {
-	if cfg.IOSClient == nil || cfg.WindowsClient == nil || cfg.Manager == nil || cfg.SelectorBuilder == nil ||
-		cfg.IOSClient.Profile() != state.ClientProfileIOS || cfg.WindowsClient.Profile() != state.ClientProfileWindows {
-		return nil, ErrNoSession
+func NewDriver(config DriverConfig) (*Driver, error) {
+	if config.IOSClient == nil || config.WindowsClient == nil ||
+		config.IOSClient.Profile() != wireprofile.IOSID || config.WindowsClient.Profile() != wireprofile.WindowsID {
+		return nil, provider.ErrNoSession
 	}
-	lifetime := cfg.AuthorityLifetime
+	lifetime := config.AuthorityLifetime
 	if lifetime <= 0 {
 		lifetime = 24 * time.Hour
 	}
-	attempts := cfg.MaxAttempts
+	attempts := config.MaxAttempts
 	if attempts <= 0 {
 		attempts = 3
 	}
 	if attempts > 5 {
 		attempts = 5
 	}
-	backoff := cfg.BackoffMin
+	backoff := config.BackoffMin
 	if backoff <= 0 {
 		backoff = 250 * time.Millisecond
 	}
-	maxBackoff := cfg.BackoffMax
+	maxBackoff := config.BackoffMax
 	if maxBackoff <= 0 || maxBackoff > 5*time.Second {
 		maxBackoff = 5 * time.Second
 	}
 	if maxBackoff < backoff {
-		return nil, fmt.Errorf("control: invalid backoff bounds")
+		return nil, errors.New("kuaifan: invalid backoff bounds")
 	}
-	clock := cfg.Clock
+	clock := config.Clock
 	if clock == nil {
 		clock = time.Now
 	}
-	commitSnapshot := cfg.CommitSnapshot
-	if commitSnapshot == nil {
-		commitSnapshot = cfg.Manager.Commit
-	}
-	return &Refresher{
-		clients: [2]*Client{cfg.IOSClient, cfg.WindowsClient}, manager: cfg.Manager,
-		builder: cfg.SelectorBuilder, commitSnapshot: commitSnapshot,
-		lifetime: lifetime, attempts: attempts, backoff: backoff,
-		maxBackoff: maxBackoff, clock: clock,
+	return &Driver{
+		clients: [2]*Client{config.IOSClient, config.WindowsClient}, lifetime: lifetime,
+		attempts: attempts, backoff: backoff, maxBackoff: maxBackoff, clock: clock,
 	}, nil
 }
 
-// Login authenticates both control profiles and publishes only after both
-// authority/catalog branches form one validated aggregate generation.
-func (r *Refresher) Login(ctx context.Context, input EmailLogin) (err error) {
-	complete, err := r.manager.Begin(state.OperationLogin)
-	if err != nil {
-		return err
-	}
-	outcome := state.OutcomeFailed
-	defer func() { complete(outcome) }()
+func (*Driver) ID() provider.ID { return ProviderID }
 
-	sessions, err := r.loginBoth(ctx, input)
+func (driver *Driver) Login(ctx context.Context, credentials provider.Credentials) (provider.Snapshot, error) {
+	if driver == nil || !credentials.Valid() {
+		return provider.Snapshot{}, provider.ErrInvalidInput
+	}
+	input := EmailLogin{Account: credentials.Account, Password: credentials.Password, InstallationID: credentials.InstallationID}
+	sessions, err := driver.loginBoth(ctx, input)
 	input.Password = ""
+	credentials.Password = ""
 	if err != nil {
-		return err
-	}
-	if err := r.manager.Transition(state.StateSyncing); err != nil {
-		return err
-	}
-	profiles, err := r.fetchBothProfiles(ctx, sessions, false)
-	if err != nil {
-		return err
-	}
-	account, err := aggregateAccount(input.Account, profiles)
-	if err != nil {
-		return err
-	}
-	if err := r.commit(profiles, account); err != nil {
-		return err
-	}
-	outcome = state.OutcomeSucceeded
-	return nil
-}
-
-// Refresh rotates both login sessions and refreshes both catalogs under one
-// lease. Any branch failure retains the prior complete generation.
-func (r *Refresher) Refresh(ctx context.Context) (err error) {
-	if expired, expireErr := r.ExpireIfNeeded(r.now()); expireErr != nil || expired {
-		if expireErr != nil {
-			return expireErr
+		if errors.Is(err, ErrLoginRejected) {
+			return provider.Snapshot{}, provider.ErrLoginRejected
 		}
-		return ErrAuthorityExpired
+		return provider.Snapshot{}, err
 	}
-	complete, err := r.manager.Begin(state.OperationRefresh)
+	profiles, err := driver.fetchBothProfiles(ctx, sessions, false)
 	if err != nil {
-		return err
+		return provider.Snapshot{}, err
 	}
-	outcome := state.OutcomeFailed
-	defer func() { complete(outcome) }()
-
-	current := r.manager.Current()
-	if current == nil || !current.Sessions.Valid() || current.Sessions.Windows == (state.SessionSecrets{}) {
-		return ErrNoSession
-	}
-	sessions, err := r.refreshBoth(ctx, current.Sessions)
+	account, err := aggregateProviderAccount(provider.RedactAccount(input.Account), profiles, driver.now().UTC())
 	if err != nil {
-		return err
+		return provider.Snapshot{}, err
 	}
-	profiles, err := r.fetchBothProfiles(ctx, sessions, true)
-	if err != nil {
-		return err
-	}
-	account, err := aggregateAccountDisplay(current.Account.Display, profiles)
-	if err != nil {
-		return err
-	}
-	if err := r.commit(profiles, account); err != nil {
-		return err
-	}
-	outcome = state.OutcomeSucceeded
-	return nil
+	return driver.snapshot(profiles, account)
 }
 
-func (r *Refresher) loginBoth(ctx context.Context, input EmailLogin) ([2]LoginSession, error) {
-	return parallelSessions(ctx, r.clients, func(child context.Context, client *Client) (LoginSession, error) {
+func (driver *Driver) Refresh(ctx context.Context, current provider.Snapshot) (provider.Snapshot, error) {
+	if driver == nil || current.Provider != ProviderID || !current.Valid() {
+		return provider.Snapshot{}, provider.ErrNoSession
+	}
+	stored, err := decodeDriverState(current.RefreshState)
+	if err != nil {
+		return provider.Snapshot{}, provider.ErrNoSession
+	}
+	sessions, err := driver.refreshBoth(ctx, stored)
+	if err != nil {
+		return provider.Snapshot{}, err
+	}
+	profiles, err := driver.fetchBothProfiles(ctx, sessions, true)
+	if err != nil {
+		return provider.Snapshot{}, err
+	}
+	account, err := aggregateProviderAccount(current.Account.Display, profiles, driver.now().UTC())
+	if err != nil {
+		return provider.Snapshot{}, err
+	}
+	return driver.snapshot(profiles, account)
+}
+
+func (driver *Driver) loginBoth(ctx context.Context, input EmailLogin) ([2]LoginSession, error) {
+	return parallelSessions(ctx, driver.clients, func(child context.Context, client *Client) (LoginSession, error) {
 		copyInput := input
 		session, err := client.Login(child, copyInput)
 		copyInput.Password = ""
@@ -189,24 +147,31 @@ func (r *Refresher) loginBoth(ctx context.Context, input EmailLogin) ([2]LoginSe
 	})
 }
 
-func (r *Refresher) refreshBoth(ctx context.Context, current state.ClientSessions) ([2]LoginSession, error) {
-	return parallelSessions(ctx, r.clients, func(child context.Context, client *Client) (LoginSession, error) {
-		stored, available := current.For(client.Profile())
-		if !available {
-			return LoginSession{}, ErrNoSession
+type driverState struct {
+	IOS     storedLoginSession `json:"ios"`
+	Windows storedLoginSession `json:"windows"`
+}
+
+type storedLoginSession struct {
+	UserID int32  `json:"userId"`
+	Token  string `json:"token"`
+}
+
+func (driver *Driver) refreshBoth(ctx context.Context, current driverState) ([2]LoginSession, error) {
+	return parallelSessions(ctx, driver.clients, func(child context.Context, client *Client) (LoginSession, error) {
+		stored := current.IOS
+		if client.Profile() == wireprofile.WindowsID {
+			stored = current.Windows
 		}
-		userID, err := parsePositiveDecimal(stored.UserID)
-		if err != nil {
-			return LoginSession{}, ErrSchema
+		if stored.UserID <= 0 || stored.Token == "" {
+			return LoginSession{}, provider.ErrNoSession
 		}
-		configuration, err := retry(child, r, func() (ClientConfig, error) {
-			return client.FetchClientConfig(child)
-		})
+		configuration, err := retry(child, driver, func() (ClientConfig, error) { return client.FetchClientConfig(child) })
 		if err != nil {
 			return LoginSession{}, err
 		}
-		session := LoginSession{UserID: userID, Token: stored.LoginToken, APIBase: configuration.APIBase}
-		return retry(child, r, func() (LoginSession, error) { return client.RefreshSession(child, session) })
+		session := LoginSession{UserID: stored.UserID, Token: stored.Token, APIBase: configuration.APIBase}
+		return retry(child, driver, func() (LoginSession, error) { return client.RefreshSession(child, session) })
 	})
 }
 
@@ -231,6 +196,7 @@ func parallelSessions(ctx context.Context, clients [2]*Client, call func(context
 		result := <-results
 		if result.err != nil && firstErr == nil {
 			firstErr = result.err
+			cancel()
 		}
 		sessions[result.index] = result.session
 	}
@@ -243,26 +209,6 @@ func parallelSessions(ctx context.Context, clients [2]*Client, call func(context
 	return sessions, nil
 }
 
-// ExpireIfNeeded transitions a usable generation to expired before a new
-// control operation starts. Existing connections retain their pinned snapshot.
-func (r *Refresher) ExpireIfNeeded(now time.Time) (bool, error) {
-	current := r.manager.Current()
-	if current == nil || current.ExpiresAt.IsZero() || now.Before(current.ExpiresAt) {
-		return false, nil
-	}
-	stateNow := r.manager.State()
-	if stateNow == state.StateExpired {
-		return true, nil
-	}
-	if stateNow != state.StateReady && stateNow != state.StateDegraded {
-		return true, ErrAuthorityExpired
-	}
-	if err := r.manager.MarkExpired(now); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 type completeProfile struct {
 	client    *Client
 	session   LoginSession
@@ -270,7 +216,7 @@ type completeProfile struct {
 	lines     Lines
 }
 
-func (r *Refresher) fetchBothProfiles(ctx context.Context, sessions [2]LoginSession, retryRequests bool) ([2]completeProfile, error) {
+func (driver *Driver) fetchBothProfiles(ctx context.Context, sessions [2]LoginSession, retryRequests bool) ([2]completeProfile, error) {
 	child, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type result struct {
@@ -278,10 +224,10 @@ func (r *Refresher) fetchBothProfiles(ctx context.Context, sessions [2]LoginSess
 		profile completeProfile
 		err     error
 	}
-	results := make(chan result, len(r.clients))
-	for index, client := range r.clients {
+	results := make(chan result, len(driver.clients))
+	for index, client := range driver.clients {
 		go func() {
-			authority, lines, err := r.fetchAuthorityAndLines(child, client, sessions[index], retryRequests)
+			authority, lines, err := driver.fetchAuthorityAndLines(child, client, sessions[index], retryRequests)
 			if err != nil {
 				cancel()
 			}
@@ -289,7 +235,7 @@ func (r *Refresher) fetchBothProfiles(ctx context.Context, sessions [2]LoginSess
 		}()
 	}
 	var profiles [2]completeProfile
-	for range r.clients {
+	for range driver.clients {
 		result := <-results
 		if result.err != nil {
 			return [2]completeProfile{}, result.err
@@ -299,8 +245,8 @@ func (r *Refresher) fetchBothProfiles(ctx context.Context, sessions [2]LoginSess
 	return profiles, nil
 }
 
-func (r *Refresher) fetchAuthorityAndLines(ctx context.Context, client *Client, session LoginSession, retryRequests bool) (Authority, Lines, error) {
-	childCtx, cancel := context.WithCancel(ctx)
+func (driver *Driver) fetchAuthorityAndLines(ctx context.Context, client *Client, session LoginSession, retryRequests bool) (Authority, Lines, error) {
+	child, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type result struct {
 		authority *Authority
@@ -312,9 +258,9 @@ func (r *Refresher) fetchAuthorityAndLines(ctx context.Context, client *Client, 
 		var authority Authority
 		var err error
 		if retryRequests {
-			authority, err = retry(childCtx, r, func() (Authority, error) { return client.FetchAuthority(childCtx, session) })
+			authority, err = retry(child, driver, func() (Authority, error) { return client.FetchAuthority(child, session) })
 		} else {
-			authority, err = client.FetchAuthority(childCtx, session)
+			authority, err = client.FetchAuthority(child, session)
 		}
 		if err != nil {
 			cancel()
@@ -327,9 +273,9 @@ func (r *Refresher) fetchAuthorityAndLines(ctx context.Context, client *Client, 
 		var lines Lines
 		var err error
 		if retryRequests {
-			lines, err = retry(childCtx, r, func() (Lines, error) { return client.FetchLines(childCtx, session) })
+			lines, err = retry(child, driver, func() (Lines, error) { return client.FetchLines(child, session) })
 		} else {
-			lines, err = client.FetchLines(childCtx, session)
+			lines, err = client.FetchLines(child, session)
 		}
 		if err != nil {
 			cancel()
@@ -358,76 +304,99 @@ func (r *Refresher) fetchAuthorityAndLines(ctx context.Context, client *Client, 
 	return authority, lines, nil
 }
 
-func aggregateAccount(account string, profiles [2]completeProfile) (state.AccountSummary, error) {
-	return aggregateAccountDisplay(state.RedactAccount(account), profiles)
-}
-
-func aggregateAccountDisplay(display string, profiles [2]completeProfile) (state.AccountSummary, error) {
+func aggregateProviderAccount(display string, profiles [2]completeProfile, now time.Time) (provider.Account, error) {
 	if display == "" || profiles[0].session.UserID <= 0 || profiles[0].session.UserID != profiles[1].session.UserID {
-		return state.AccountSummary{}, ErrSchema
+		return provider.Account{}, ErrSchema
 	}
-	isVIP := profiles[0].session.Profile.IsVIP && profiles[1].session.Profile.IsVIP
-	vipEndsAt := time.Time{}
-	if isVIP {
-		vipEndsAt = profiles[0].session.Profile.VIPEndsAt
-		if other := profiles[1].session.Profile.VIPEndsAt; vipEndsAt.IsZero() || !other.IsZero() && other.Before(vipEndsAt) {
-			vipEndsAt = other
+	active := profiles[0].session.Profile.IsVIP && profiles[1].session.Profile.IsVIP
+	subscriptionEndsAt := time.Time{}
+	if active {
+		subscriptionEndsAt = profiles[0].session.Profile.VIPEndsAt
+		if other := profiles[1].session.Profile.VIPEndsAt; subscriptionEndsAt.IsZero() || !other.IsZero() && other.Before(subscriptionEndsAt) {
+			subscriptionEndsAt = other
 		}
-		if vipEndsAt.IsZero() {
-			return state.AccountSummary{}, ErrSchema
+		if subscriptionEndsAt.IsZero() {
+			return provider.Account{}, ErrSchema
 		}
+		active = subscriptionEndsAt.After(now)
 	}
-	return state.AccountSummary{Display: display, IsVIP: isVIP, VIPEndsAt: vipEndsAt}, nil
+	tier := standardTier
+	if active {
+		tier = vipTier
+	} else {
+		subscriptionEndsAt = time.Time{}
+	}
+	return provider.Account{
+		UserID: formatUserID(profiles[0].session.UserID), Display: display, Tier: tier,
+		SubscriptionActive: active, SubscriptionEndsAt: subscriptionEndsAt,
+	}, nil
 }
 
-func (r *Refresher) commit(profiles [2]completeProfile, account state.AccountSummary) error {
-	if profiles[0].session.UserID <= 0 || profiles[0].session.UserID != profiles[1].session.UserID {
-		return ErrSchema
-	}
-	current := r.manager.Current()
-	generation := uint64(1)
-	var previous map[string]state.NodeRef
-	if current != nil {
-		generation = current.Generation + 1
-		previous = current.Selectors
-	}
-	iosNodes, err := nodesFromLines(profiles[0].lines, state.ClientProfileIOS)
-	if err != nil {
-		return err
-	}
-	windowsNodes, err := nodesFromLines(profiles[1].lines, state.ClientProfileWindows)
-	if err != nil {
-		return err
-	}
-	nodes := mergeProfileNodes(iosNodes, windowsNodes)
-	builtNodes, selectors, err := r.buildSelectors(generation, nodes, previous)
-	if err != nil {
-		return fmt.Errorf("control: build selectors: %w", err)
-	}
-	now := r.now().UTC()
-	snapshot := &state.RuntimeSnapshot{
-		Generation: generation, CreatedAt: now, ExpiresAt: now.Add(r.lifetime), Account: account,
-		Sessions: state.ClientSessions{
-			IOS:     sessionSecrets(profiles[0]),
-			Windows: sessionSecrets(profiles[1]),
-		},
-		Nodes: builtNodes, Selectors: selectors,
-	}
-	return r.commitSnapshot(snapshot)
+type tunnelAuthority struct {
+	Password  string `json:"password"`
+	Method    string `json:"method"`
+	Extension string `json:"extension"`
 }
 
-func sessionSecrets(profile completeProfile) state.SessionSecrets {
-	return state.SessionSecrets{
-		UserID: formatUserID(profile.session.UserID), LoginToken: profile.session.Token,
-		ProviderToken: profile.authority.ProviderToken, TunnelPassword: profile.authority.EncryptKey,
-		TunnelMethod: profile.authority.EncryptType, ProviderExtension: profile.authority.ProviderExtension,
+func (driver *Driver) snapshot(profiles [2]completeProfile, account provider.Account) (provider.Snapshot, error) {
+	stateBytes, err := json.Marshal(driverState{
+		IOS:     storedLoginSession{UserID: profiles[0].session.UserID, Token: profiles[0].session.Token},
+		Windows: storedLoginSession{UserID: profiles[1].session.UserID, Token: profiles[1].session.Token},
+	})
+	if err != nil {
+		return provider.Snapshot{}, ErrSchema
 	}
+	authorities := make(map[string]provider.Authority, len(profiles))
+	for _, profile := range profiles {
+		encoded, err := json.Marshal(tunnelAuthority{
+			Password: profile.authority.EncryptKey, Method: profile.authority.EncryptType, Extension: profile.authority.ProviderExtension,
+		})
+		if err != nil {
+			return provider.Snapshot{}, ErrSchema
+		}
+		authorities[string(profile.client.Profile())] = provider.Authority{Protocol: WIFIINProtocol, Data: encoded}
+	}
+	iosNodes, err := nodesFromLines(profiles[0].lines, wireprofile.IOSID)
+	if err != nil {
+		return provider.Snapshot{}, err
+	}
+	windowsNodes, err := nodesFromLines(profiles[1].lines, wireprofile.WindowsID)
+	if err != nil {
+		return provider.Snapshot{}, err
+	}
+	now := driver.now().UTC()
+	snapshot := provider.Snapshot{
+		Provider: ProviderID, Account: account, ExpiresAt: now.Add(driver.lifetime), RefreshState: stateBytes,
+		Authorities: authorities, Nodes: mergeProfileNodes(iosNodes, windowsNodes),
+	}
+	if err := provider.ValidateSnapshot(snapshot, ProviderID, now); err != nil {
+		return provider.Snapshot{}, err
+	}
+	return snapshot, nil
 }
 
-func mergeProfileNodes(ios, windows []state.Node) []state.Node {
-	merged := make([]state.Node, 0, len(ios)+len(windows))
+func decodeDriverState(encoded []byte) (driverState, error) {
+	var state driverState
+	if len(encoded) == 0 || len(encoded) > 1<<20 || json.Unmarshal(encoded, &state) != nil ||
+		state.IOS.UserID <= 0 || state.Windows.UserID != state.IOS.UserID || state.IOS.Token == "" || state.Windows.Token == "" {
+		return driverState{}, ErrSchema
+	}
+	return state, nil
+}
+
+func decodeTunnelAuthority(encoded []byte) (tunnelAuthority, error) {
+	var authority tunnelAuthority
+	if len(encoded) == 0 || len(encoded) > 1<<20 || json.Unmarshal(encoded, &authority) != nil ||
+		authority.Password == "" || authority.Method != "aes-256-cfb" || authority.Extension == "" {
+		return tunnelAuthority{}, ErrSchema
+	}
+	return authority, nil
+}
+
+func mergeProfileNodes(ios, windows []provider.Node) []provider.Node {
+	merged := make([]provider.Node, 0, len(ios)+len(windows))
 	seen := make(map[string]struct{}, len(ios)+len(windows))
-	for _, profileNodes := range [][]state.Node{ios, windows} {
+	for _, profileNodes := range [][]provider.Node{ios, windows} {
 		for _, node := range profileNodes {
 			if _, duplicate := seen[node.ID]; duplicate {
 				continue
@@ -439,97 +408,8 @@ func mergeProfileNodes(ios, windows []state.Node) []state.Node {
 	return merged
 }
 
-func (r *Refresher) buildSelectors(snapshotGeneration uint64, nodes []state.Node, previous map[string]state.NodeRef) ([]state.Node, map[string]state.NodeRef, error) {
-	tombstoneBuilder, hasTombstones := r.builder.(interface {
-		BuildWithTombstones(uint64, []state.Node, map[string]state.NodeRef, time.Time) (selector.BuildResult, error)
-	})
-	if generationProvider, hasGenerations := r.builder.(interface{ Generations() []uint64 }); hasGenerations {
-		if !hasTombstones {
-			return nil, nil, fmt.Errorf("control: generation-aware selector builder lacks tombstones")
-		}
-		credentialGenerations := generationProvider.Generations()
-		if len(credentialGenerations) == 0 {
-			return nil, nil, fmt.Errorf("control: selector builder has no credential generation")
-		}
-		selectors := make(map[string]state.NodeRef, len(nodes)*len(credentialGenerations)+len(previous))
-		seenGenerations := make(map[uint64]struct{}, len(credentialGenerations))
-		var currentNodes []state.Node
-		for index, credentialGeneration := range credentialGenerations {
-			if credentialGeneration == 0 {
-				return nil, nil, fmt.Errorf("control: selector builder has zero credential generation")
-			}
-			if _, duplicate := seenGenerations[credentialGeneration]; duplicate {
-				return nil, nil, fmt.Errorf("control: selector builder repeats credential generation")
-			}
-			seenGenerations[credentialGeneration] = struct{}{}
-			result, err := tombstoneBuilder.BuildWithTombstones(credentialGeneration, nodes, selectorsForGeneration(previous, credentialGeneration), r.now().UTC())
-			if err != nil {
-				return nil, nil, err
-			}
-			if index == 0 {
-				// The current credential generation defines every Node.Selector.
-				// Pending credentials remain valid through NodeRefs only.
-				currentNodes = result.Nodes
-			}
-			for name, ref := range result.Selectors {
-				if _, collision := selectors[name]; collision {
-					return nil, nil, fmt.Errorf("control: selector collision across credential generations")
-				}
-				selectors[name] = ref
-			}
-		}
-		return currentNodes, selectors, nil
-	}
-	if hasTombstones {
-		result, err := tombstoneBuilder.BuildWithTombstones(snapshotGeneration, nodes, previous, r.now().UTC())
-		if err != nil {
-			return nil, nil, err
-		}
-		return result.Nodes, result.Selectors, nil
-	}
-	selectors, err := r.builder.Build(snapshotGeneration, nodes)
-	if err != nil {
-		return nil, nil, err
-	}
-	// A generic builder cannot retain its own historical state, so preserve
-	// removed selectors as explicit tombstones here rather than remapping them.
-	for name, ref := range previous {
-		if _, exists := selectors[name]; !exists && (!ref.Tombstoned || ref.IsTombstoned(r.now())) {
-			selectors[name] = state.NodeRef{
-				Generation: snapshotGeneration, Tombstoned: true,
-				TombstoneUntil: r.now().UTC().Add(24 * time.Hour),
-			}
-		}
-	}
-	byID := make(map[string]int, len(nodes))
-	for index := range nodes {
-		byID[nodes[index].ID] = index
-	}
-	for name, ref := range selectors {
-		if ref.Tombstoned {
-			continue
-		}
-		index, exists := byID[ref.NodeID]
-		if !exists {
-			return nil, nil, ErrSchema
-		}
-		nodes[index].Selector = name
-	}
-	return nodes, selectors, nil
-}
-
-func selectorsForGeneration(previous map[string]state.NodeRef, generation uint64) map[string]state.NodeRef {
-	selected := make(map[string]state.NodeRef)
-	for name, ref := range previous {
-		if ref.Generation == generation {
-			selected[name] = ref
-		}
-	}
-	return selected
-}
-
-func nodesFromLines(lines Lines, profile state.ClientProfile) ([]state.Node, error) {
-	if !profile.Valid() {
+func nodesFromLines(lines Lines, profileID wireprofile.ID) ([]provider.Node, error) {
+	if profileID != wireprofile.IOSID && profileID != wireprofile.WindowsID {
 		return nil, ErrSchema
 	}
 	groups := make(map[string]string, len(lines.Groups))
@@ -537,9 +417,12 @@ func nodesFromLines(lines Lines, profile state.ClientProfile) ([]state.Node, err
 		groups[group.ID] = group.Name
 	}
 	seen := make(map[string]struct{}, len(lines.Lines))
-	nodes := make([]state.Node, 0, len(lines.Lines))
+	nodes := make([]provider.Node, 0, len(lines.Lines))
 	for _, line := range lines.Lines {
-		identity, err := selector.Canonicalize(selector.NodeIdentity{Provider: line.Provider, Host: line.Host, Port: int(line.Port)})
+		if !line.Eligible {
+			continue
+		}
+		identity, err := selector.Canonicalize(selector.NodeIdentity{Provider: string(ProviderID), Host: line.Host, Port: int(line.Port)})
 		if err != nil {
 			return nil, fmt.Errorf("%w: canonical node identity", ErrSchema)
 		}
@@ -552,40 +435,35 @@ func nodesFromLines(lines Lines, profile state.ClientProfile) ([]state.Node, err
 		if groupName == "" {
 			groupName = groups[line.GroupID]
 		}
-		nodes = append(nodes, state.Node{
-			ID: id, Provider: identity.Provider, ClientProfile: profile, Host: identity.Host,
-			Port: identity.Port, Name: line.Label, Group: groupName, Model: line.Model,
-			Weight: line.Weight, Auto: line.Auto, Eligible: line.Eligible,
-			Health: state.NodeHealthUnknown, UDPHealth: state.UDPHealthUnavailable,
+		nodes = append(nodes, provider.Node{
+			ID: id, AuthorityID: string(profileID), Protocol: WIFIINProtocol, Host: identity.Host, Port: identity.Port,
+			Name: line.Label, Group: groupName, Model: line.Model, Weight: line.Weight, Auto: line.Auto, Eligible: line.Eligible,
 		})
 	}
 	return nodes, nil
 }
 
 func nodeID(identity selector.CanonicalIdentity, groupID string) string {
-	payload := []byte("kuaifan-line\x00" + groupID + "\x00" + identity.Provider + "\x00" + identity.Host + "\x00" + fmt.Sprintf("%d", identity.Port))
+	payload := []byte(groupID + "\x00" + identity.Host + "\x00" + fmt.Sprintf("%d", identity.Port))
 	sum := sha256.Sum256(payload)
-	return "line_" + base64.RawURLEncoding.EncodeToString(sum[:12])
+	return "kuaifan_" + base64.RawURLEncoding.EncodeToString(sum[:12])
 }
 
-func (r *Refresher) now() time.Time { return r.clock() }
+func (driver *Driver) now() time.Time { return driver.clock() }
 
-// retry retries only failures that could be transient. It intentionally never
-// retries login rejection, business rejection, cryptographic data errors, or a
-// malformed server schema.
-func retry[T any](ctx context.Context, r *Refresher, call func() (T, error)) (T, error) {
+func retry[T any](ctx context.Context, driver *Driver, call func() (T, error)) (T, error) {
 	var zero T
-	for attempt := range r.attempts {
+	for attempt := range driver.attempts {
 		select {
 		case <-ctx.Done():
 			return zero, ctx.Err()
 		default:
 		}
 		value, err := call()
-		if err == nil || !retryable(err) || attempt+1 == r.attempts {
+		if err == nil || !retryable(err) || attempt+1 == driver.attempts {
 			return value, err
 		}
-		delay := retryDelay(r, attempt)
+		delay := retryDelay(driver, attempt)
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -601,9 +479,8 @@ func retry[T any](ctx context.Context, r *Refresher, call func() (T, error)) (T,
 
 func retryable(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, ErrLoginRejected) || errors.Is(err, ErrBusinessStatus) ||
-		errors.Is(err, ErrSchema) || errors.Is(err, ErrInvalidEnvelope) ||
-		errors.Is(err, ErrInvalidPadding) || errors.Is(err, ErrMalformedCiphertext) ||
+		errors.Is(err, ErrLoginRejected) || errors.Is(err, ErrBusinessStatus) || errors.Is(err, ErrSchema) ||
+		errors.Is(err, ErrInvalidEnvelope) || errors.Is(err, ErrInvalidPadding) || errors.Is(err, ErrMalformedCiphertext) ||
 		errors.Is(err, ErrResponseTooLarge) || errors.Is(err, ErrUnsupportedCipher) || errors.Is(err, ErrInvalidLine) {
 		return false
 	}
@@ -615,17 +492,16 @@ func retryable(err error) bool {
 	return errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary())
 }
 
-func retryDelay(r *Refresher, attempt int) time.Duration {
-	base := r.backoff
+func retryDelay(driver *Driver, attempt int) time.Duration {
+	base := driver.backoff
 	for range attempt {
-		if base >= r.maxBackoff/2 {
-			base = r.maxBackoff
+		if base >= driver.maxBackoff/2 {
+			base = driver.maxBackoff
 			break
 		}
 		base *= 2
 	}
-	// Full jitter prevents synchronized retries. It cannot expose credentials.
-	jitter, err := wireprofile.RandomInt(r.clients[0].random, int(base/time.Millisecond)+1)
+	jitter, err := wireprofile.RandomInt(driver.clients[0].random, int(base/time.Millisecond)+1)
 	if err != nil {
 		return base
 	}

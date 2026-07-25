@@ -11,13 +11,15 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 
-	"github.com/kfadapter/kfadapter/internal/kuaifan/wifiin"
+	"github.com/kfadapter/kfadapter/internal/provider"
 )
 
 const (
@@ -43,7 +45,6 @@ var (
 	ErrOperationInProgress           = errors.New("service operation already in progress")
 	ErrNoOperation                   = errors.New("no service operation in progress")
 	ErrSelectorUnknown               = errors.New("unknown selector")
-	ErrSelectorTombstoned            = errors.New("selector is tombstoned")
 )
 
 // ServiceState is the externally visible lifecycle state. State transitions are
@@ -96,34 +97,21 @@ const (
 	UDPHealthUnknown     UDPHealth = "unknown"
 )
 
-// ClientProfile identifies the provider control profile whose authority admits
-// a node. Empty profile values are interpreted as iOS only for schema-v4 state
-// migration and test fixtures; newly aggregated nodes always set one explicitly.
-type ClientProfile string
-
-const (
-	ClientProfileIOS     ClientProfile = "ios"
-	ClientProfileWindows ClientProfile = "windows"
-)
-
-func (p ClientProfile) Valid() bool {
-	return p == ClientProfileIOS || p == ClientProfileWindows
-}
-
-// Node is a validated upstream metadata record. It contains no tunnel
-// password, token, authority material, or provider extension.
+// Node is validated, secret-free metadata for one provider-owned upstream.
+// AuthorityID resolves only within the matching provider snapshot.
 type Node struct {
-	ID            string        `json:"id"`
-	Selector      string        `json:"selector"`
-	Provider      string        `json:"provider"`
-	ClientProfile ClientProfile `json:"clientProfile"`
-	Host          string        `json:"host"`
-	Port          uint16        `json:"port"`
-	Name          string        `json:"name"`
-	Group         string        `json:"group"`
-	Model         string        `json:"model,omitempty"`
-	Weight        int           `json:"weight,omitempty"`
-	Auto          bool          `json:"auto,omitempty"`
+	ID          string            `json:"id"`
+	Selector    string            `json:"selector"`
+	Provider    provider.ID       `json:"provider"`
+	Protocol    provider.Protocol `json:"protocol"`
+	AuthorityID string            `json:"-"`
+	Host        string            `json:"host"`
+	Port        uint16            `json:"port"`
+	Name        string            `json:"name"`
+	Group       string            `json:"group"`
+	Model       string            `json:"model,omitempty"`
+	Weight      int               `json:"weight,omitempty"`
+	Auto        bool              `json:"auto,omitempty"`
 
 	Eligible  bool          `json:"eligible"`
 	Excluded  bool          `json:"excluded"`
@@ -133,136 +121,36 @@ type Node struct {
 	ProbedAt  time.Time     `json:"probedAt,omitempty"`
 }
 
-// EffectiveClientProfile maps legacy empty values to the original iOS client.
-func (n Node) EffectiveClientProfile() ClientProfile {
-	if n.ClientProfile == "" {
-		return ClientProfileIOS
-	}
-	return n.ClientProfile
-}
-
-// TunnelEligible reports whether a node can be selected by the baseline data
-// plane. Excluded records are presentation history only and never affect local
-// tunnel selection.
+// TunnelEligible reports whether a generic provider transport can accept the
+// node. Protocol-specific validation belongs to that transport.
 func (n Node) TunnelEligible() bool {
-	return n.Eligible && n.EffectiveClientProfile().Valid() && n.Port != 0 && n.Host != "" && strings.EqualFold(n.Provider, "WIFIIN")
+	return n.Eligible && n.Provider.Valid() && n.Protocol.Valid() && n.AuthorityID != "" && n.Port != 0 && n.Host != ""
 }
 
-// SelectorBuilder derives opaque selector references without making state
-// depend on the selector implementation. selector.Registry implements it.
+// SelectorBuilder derives opaque selector references without depending on the
+// selector implementation.
 type SelectorBuilder interface {
-	Build(generation uint64, nodes []Node) (map[string]NodeRef, error)
+	Build(nodes []Node) (map[string]NodeRef, error)
 }
 
-// NodeRef is a generation-bound selector resolution record. Tombstones never
-// include a replacement node, preventing accidental remapping.
+// NodeRef resolves a selector to one live node in an immutable snapshot.
 type NodeRef struct {
-	NodeID         string    `json:"nodeId,omitempty"`
-	Generation     uint64    `json:"generation"`
-	Tombstoned     bool      `json:"tombstoned,omitempty"`
-	TombstoneUntil time.Time `json:"tombstoneUntil,omitempty"`
-}
-
-// IsTombstoned reports whether a selector is an active tombstone at now.
-func (r NodeRef) IsTombstoned(now time.Time) bool {
-	return r.Tombstoned && (r.TombstoneUntil.IsZero() || now.Before(r.TombstoneUntil))
-}
-
-// SessionSecrets contain one client profile's provider authority material.
-// They are persisted only in the permission-protected SQLite state database.
-type SessionSecrets struct {
-	UserID            string `json:"-"`
-	LoginToken        string `json:"-"`
-	ProviderToken     string `json:"-"`
-	TunnelPassword    string `json:"-"`
-	TunnelMethod      string `json:"-"`
-	ProviderExtension string `json:"-"`
-}
-
-// Valid reports whether the session fields are non-empty and bounded.
-func (s SessionSecrets) Valid() bool {
-	return validSessionField(s.UserID, maxSessionFieldBytes) &&
-		validSessionField(s.LoginToken, maxSessionFieldBytes) &&
-		validSessionField(s.ProviderToken, maxSessionFieldBytes) &&
-		validSessionField(s.TunnelPassword, maxSessionFieldBytes) &&
-		validSessionField(s.TunnelMethod, maxSessionFieldBytes) &&
-		validSessionField(s.ProviderExtension, maxProviderExtensionBytes)
-}
-
-func validSessionField(value string, limit int) bool {
-	return value != "" && len(value) <= limit && utf8.ValidString(value) && strings.IndexByte(value, 0) < 0
-}
-
-func validPersistedSession(profile ClientProfile, session SessionSecrets) bool {
-	if !profile.Valid() || !session.Valid() || session.TunnelMethod != "aes-256-cfb" || !wifiin.ValidProviderExtensionForProfile(string(profile), session.ProviderExtension) {
-		return false
-	}
-	parts := strings.Split(session.ProviderExtension, "|")
-	return len(parts) == 7 && parts[1] == session.ProviderToken && parts[4] == session.UserID
-}
-
-// Clone returns an independent SessionSecrets value. String contents are
-// immutable in Go, so copying does not create a mutable alias.
-func (s SessionSecrets) Clone() SessionSecrets { return s }
-
-// Wipe clears references held by this value.
-func (s *SessionSecrets) Wipe() {
-	if s != nil {
-		*s = SessionSecrets{}
-	}
-}
-
-// ClientSessions keeps the independent iOS and Windows authorities together
-// while preserving their profile boundary.
-type ClientSessions struct {
-	IOS     SessionSecrets `json:"-"`
-	Windows SessionSecrets `json:"-"`
-}
-
-func (s ClientSessions) Valid() bool {
-	if !s.IOS.Valid() {
-		return false
-	}
-	return s.Windows == (SessionSecrets{}) || s.Windows.Valid() && s.Windows.UserID == s.IOS.UserID
-}
-
-func (s ClientSessions) UserID() string {
-	if !s.Valid() {
-		return ""
-	}
-	return s.IOS.UserID
-}
-
-func (s ClientSessions) For(profile ClientProfile) (SessionSecrets, bool) {
-	switch profile {
-	case "", ClientProfileIOS:
-		return s.IOS.Clone(), s.IOS.Valid()
-	case ClientProfileWindows:
-		return s.Windows.Clone(), s.Windows.Valid()
-	default:
-		return SessionSecrets{}, false
-	}
-}
-
-func (s *ClientSessions) Wipe() {
-	if s != nil {
-		s.IOS.Wipe()
-		s.Windows.Wipe()
-	}
+	NodeID string `json:"nodeId,omitempty"`
 }
 
 // AccountSummary deliberately has no raw account identifier. Display must be
 // produced with RedactAccount before publication.
 type AccountSummary struct {
-	Display   string    `json:"display"`
-	IsVIP     bool      `json:"isVip"`
-	VIPEndsAt time.Time `json:"vipEndsAt,omitempty"`
+	Display            string    `json:"display"`
+	Tier               string    `json:"tier"`
+	SubscriptionActive bool      `json:"subscriptionActive"`
+	SubscriptionEndsAt time.Time `json:"subscriptionEndsAt,omitempty"`
 }
 
 // NewAccountSummary is the safe construction path for browser-visible account
 // metadata. It never retains the supplied raw account identifier.
-func NewAccountSummary(account string, isVIP bool, vipEndsAt time.Time) AccountSummary {
-	return AccountSummary{Display: RedactAccount(account), IsVIP: isVIP, VIPEndsAt: vipEndsAt}
+func NewAccountSummary(account, tier string, subscriptionActive bool, subscriptionEndsAt time.Time) AccountSummary {
+	return AccountSummary{Display: RedactAccount(account), Tier: tier, SubscriptionActive: subscriptionActive, SubscriptionEndsAt: subscriptionEndsAt}
 }
 
 // RedactAccount returns a safe display form. It never returns the original
@@ -280,30 +168,96 @@ func RedactAccount(account string) string {
 	return string(local[0]) + "•••@" + account[at+1:]
 }
 
-// RuntimeSnapshot is a generation-pinned runtime view. RuntimeStore deep
-// copies it on publication and retrieval so no caller can mutate stored state.
+// RuntimeSnapshot is one atomic aggregate of independent provider accounts.
+// Each provider owns opaque refresh and tunnel authority state.
 type RuntimeSnapshot struct {
-	Generation uint64             `json:"generation"`
-	CreatedAt  time.Time          `json:"createdAt"`
-	ExpiresAt  time.Time          `json:"expiresAt"`
-	Account    AccountSummary     `json:"account"`
-	Sessions   ClientSessions     `json:"-"`
-	Nodes      []Node             `json:"nodes"`
-	Selectors  map[string]NodeRef `json:"selectors"`
+	Generation uint64                            `json:"generation"`
+	CreatedAt  time.Time                         `json:"createdAt"`
+	ExpiresAt  time.Time                         `json:"expiresAt"`
+	Providers  map[provider.ID]provider.Snapshot `json:"-"`
+	Nodes      []Node                            `json:"nodes"`
+	Selectors  map[string]NodeRef                `json:"selectors"`
 }
 
-// Clone deep-copies all mutable runtime fields.
+// Clone deep-copies all mutable runtime fields and opaque provider material.
 func (s *RuntimeSnapshot) Clone() *RuntimeSnapshot {
 	if s == nil {
 		return nil
 	}
 	clone := *s
+	clone.Providers = make(map[provider.ID]provider.Snapshot, len(s.Providers))
+	for id, snapshot := range s.Providers {
+		clone.Providers[id] = snapshot.Clone()
+	}
 	clone.Nodes = append([]Node(nil), s.Nodes...)
 	clone.Selectors = make(map[string]NodeRef, len(s.Selectors))
 	for selector, ref := range s.Selectors {
 		clone.Selectors[selector] = ref
 	}
 	return &clone
+}
+
+// Provider returns an independent snapshot for one configured account.
+func (s *RuntimeSnapshot) Provider(id provider.ID) (provider.Snapshot, bool) {
+	if s == nil {
+		return provider.Snapshot{}, false
+	}
+	snapshot, available := s.Providers[id]
+	if !available {
+		return provider.Snapshot{}, false
+	}
+	return snapshot.Clone(), true
+}
+
+// Authority resolves one node's opaque tunnel authority.
+func (s *RuntimeSnapshot) Authority(node Node) (provider.Authority, bool) {
+	if s == nil {
+		return provider.Authority{}, false
+	}
+	snapshot, available := s.Providers[node.Provider]
+	if !available {
+		return provider.Authority{}, false
+	}
+	authority, available := snapshot.Authorities[node.AuthorityID]
+	if !available || authority.Protocol != node.Protocol {
+		return provider.Authority{}, false
+	}
+	return authority.Clone(), true
+}
+
+// AccountBindingID is the canonical composite identity for every active
+// provider account. It is used only as input to keyed account binding.
+func (s *RuntimeSnapshot) AccountBindingID() string {
+	if s == nil || len(s.Providers) == 0 {
+		return ""
+	}
+	ids := make([]string, 0, len(s.Providers))
+	for id := range s.Providers {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(ids)
+	binding := make([]byte, 0, len(ids)*32)
+	for _, rawID := range ids {
+		snapshot := s.Providers[provider.ID(rawID)]
+		binding = strconv.AppendInt(binding, int64(len(rawID)), 10)
+		binding = append(binding, ':')
+		binding = append(binding, rawID...)
+		binding = strconv.AppendInt(binding, int64(len(snapshot.Account.UserID)), 10)
+		binding = append(binding, ':')
+		binding = append(binding, snapshot.Account.UserID...)
+	}
+	return string(binding)
+}
+
+// ProviderExpiresAt returns the latest provider expiry in the aggregate.
+func ProviderExpiresAt(providers map[provider.ID]provider.Snapshot) time.Time {
+	var latest time.Time
+	for _, snapshot := range providers {
+		if snapshot.ExpiresAt.After(latest) {
+			latest = snapshot.ExpiresAt
+		}
+	}
+	return latest
 }
 
 // NodeByID returns a copy of the node identified by its opaque ID.
@@ -319,20 +273,13 @@ func (s *RuntimeSnapshot) NodeByID(id string) (Node, bool) {
 	return Node{}, false
 }
 
-// ResolveSelector resolves a selector in this pinned snapshot and explicitly
-// distinguishes a tombstone from an unknown selector.
-func (s *RuntimeSnapshot) ResolveSelector(selector string, now time.Time) (Node, NodeRef, error) {
+// ResolveSelector resolves a selector in this pinned snapshot.
+func (s *RuntimeSnapshot) ResolveSelector(selector string, _ time.Time) (Node, NodeRef, error) {
 	if s == nil {
 		return Node{}, NodeRef{}, ErrSelectorUnknown
 	}
 	ref, ok := s.Selectors[selector]
-	if !ok {
-		return Node{}, NodeRef{}, ErrSelectorUnknown
-	}
-	if ref.IsTombstoned(now) {
-		return Node{}, ref, ErrSelectorTombstoned
-	}
-	if ref.Tombstoned {
+	if !ok || ref.NodeID == "" {
 		return Node{}, NodeRef{}, ErrSelectorUnknown
 	}
 	node, ok := s.NodeByID(ref.NodeID)
@@ -342,8 +289,8 @@ func (s *RuntimeSnapshot) ResolveSelector(selector string, now time.Time) (Node,
 	return node, ref, nil
 }
 
-// ValidateRuntimeSnapshot checks the invariants state can enforce without
-// importing the selector package.
+// ValidateRuntimeSnapshot checks provider-neutral aggregate invariants without
+// interpreting any driver's opaque refresh or transport authority state.
 func ValidateRuntimeSnapshot(snapshot *RuntimeSnapshot) error {
 	if snapshot == nil || snapshot.Generation == 0 || snapshot.CreatedAt.IsZero() || snapshot.ExpiresAt.IsZero() {
 		return fmt.Errorf("%w: missing generation, creation time, or expiry", ErrInvalidSnapshot)
@@ -354,16 +301,26 @@ func ValidateRuntimeSnapshot(snapshot *RuntimeSnapshot) error {
 	if len(snapshot.Nodes) > maxRuntimeNodes || len(snapshot.Selectors) > maxRuntimeSelectorRefs {
 		return fmt.Errorf("%w: runtime snapshot exceeds selector bounds", ErrInvalidSnapshot)
 	}
-	if time.Now().Before(snapshot.ExpiresAt) && !snapshot.Sessions.Valid() {
-		return fmt.Errorf("%w: incomplete usable client sessions", ErrInvalidSnapshot)
+	for id, providerSnapshot := range snapshot.Providers {
+		if providerSnapshot.Provider != id || !providerSnapshot.Valid() || !providerSnapshot.ExpiresAt.After(snapshot.CreatedAt) || providerSnapshot.ExpiresAt.Sub(snapshot.CreatedAt) > maxSessionLifetime {
+			return fmt.Errorf("%w: invalid provider snapshot", ErrInvalidSnapshot)
+		}
+	}
+	if len(snapshot.Providers) != 0 && !ProviderExpiresAt(snapshot.Providers).Equal(snapshot.ExpiresAt) {
+		return fmt.Errorf("%w: aggregate expiry mismatch", ErrInvalidSnapshot)
 	}
 	ids := make(map[string]struct{}, len(snapshot.Nodes))
 	for _, node := range snapshot.Nodes {
 		if err := ValidateNode(node); err != nil {
 			return fmt.Errorf("%w: incomplete node", ErrInvalidSnapshot)
 		}
-		if _, available := snapshot.Sessions.For(node.EffectiveClientProfile()); time.Now().Before(snapshot.ExpiresAt) && !available {
-			return fmt.Errorf("%w: node has no client authority", ErrInvalidSnapshot)
+		providerSnapshot, providerAvailable := snapshot.Providers[node.Provider]
+		if providerAvailable {
+			if !nodeMatchesProviderSnapshot(node, providerSnapshot) {
+				return fmt.Errorf("%w: node differs from provider snapshot", ErrInvalidSnapshot)
+			}
+		} else if len(snapshot.Providers) != 0 {
+			return fmt.Errorf("%w: node has no provider snapshot", ErrInvalidSnapshot)
 		}
 		if _, exists := ids[node.ID]; exists {
 			return fmt.Errorf("%w: duplicate node id", ErrInvalidSnapshot)
@@ -371,26 +328,25 @@ func ValidateRuntimeSnapshot(snapshot *RuntimeSnapshot) error {
 		ids[node.ID] = struct{}{}
 	}
 	for selector, ref := range snapshot.Selectors {
-		if selector == "" {
-			return fmt.Errorf("%w: empty selector", ErrInvalidSnapshot)
-		}
-		if ref.Generation == 0 {
-			return fmt.Errorf("%w: selector has no credential generation", ErrInvalidSnapshot)
-		}
-		if ref.Tombstoned {
-			if ref.NodeID != "" || ref.TombstoneUntil.IsZero() {
-				return fmt.Errorf("%w: malformed selector tombstone", ErrInvalidSnapshot)
-			}
-			continue
-		}
-		if ref.NodeID == "" {
-			return fmt.Errorf("%w: selector has no node", ErrInvalidSnapshot)
+		if selector == "" || ref.NodeID == "" {
+			return fmt.Errorf("%w: invalid selector reference", ErrInvalidSnapshot)
 		}
 		if _, exists := ids[ref.NodeID]; !exists {
 			return fmt.Errorf("%w: selector references absent node", ErrInvalidSnapshot)
 		}
 	}
 	return nil
+}
+
+func nodeMatchesProviderSnapshot(node Node, snapshot provider.Snapshot) bool {
+	for _, source := range snapshot.Nodes {
+		if source.ID == node.ID {
+			return source.AuthorityID == node.AuthorityID && source.Protocol == node.Protocol && source.Host == node.Host && source.Port == node.Port &&
+				source.Name == node.Name && source.Group == node.Group && source.Model == node.Model && source.Weight == node.Weight &&
+				source.Auto == node.Auto && source.Eligible == node.Eligible
+		}
+	}
+	return false
 }
 
 // Preferences are durable, non-secret user choices. ExcludedNodeIDs does not
@@ -425,28 +381,21 @@ type PersistedNode struct {
 }
 
 // LastGoodState lets the subscription service retain a structurally valid
-// rendered body during a control-plane outage. FetchedAt and FetchedBodyHash
-// describe the exact successfully fetched active subscription response body.
+// rendered body during a control-plane outage.
 type LastGoodState struct {
-	Generation           uint64
 	CreatedAt            time.Time
 	Nodes                []PersistedNode
 	RenderedSubscription string
-	FetchedGeneration    uint64
-	FetchedAt            time.Time
-	FetchedBodyHash      []byte
 }
 
 func (l LastGoodState) clone() LastGoodState {
 	l.Nodes = append([]PersistedNode(nil), l.Nodes...)
-	l.FetchedBodyHash = append([]byte(nil), l.FetchedBodyHash...)
 	return l
 }
 
-// SubscriptionGeneration contains account-bound selector and proxy credential
+// SubscriptionAuthority contains account-bound selector and proxy credential
 // keys. AccountBinding is the stable, non-reversible subscription path token.
-type SubscriptionGeneration struct {
-	Generation     uint64
+type SubscriptionAuthority struct {
 	SelectorKey    []byte
 	ProxyAuthKey   []byte
 	AccountBinding []byte
@@ -455,7 +404,7 @@ type SubscriptionGeneration struct {
 
 const accountBindingDomain = "kfadapter/subscription-account/v2\x00"
 
-func (g SubscriptionGeneration) clone() SubscriptionGeneration {
+func (g SubscriptionAuthority) clone() SubscriptionAuthority {
 	g.SelectorKey = append([]byte(nil), g.SelectorKey...)
 	g.ProxyAuthKey = append([]byte(nil), g.ProxyAuthKey...)
 	g.AccountBinding = append([]byte(nil), g.AccountBinding...)
@@ -464,7 +413,7 @@ func (g SubscriptionGeneration) clone() SubscriptionGeneration {
 
 // AccountBindingString returns the raw Base64url stable subscription token.
 // It is empty until the installation has an access token and logged-in account.
-func (g SubscriptionGeneration) AccountBindingString() string {
+func (g SubscriptionAuthority) AccountBindingString() string {
 	if len(g.AccountBinding) != sha256.Size {
 		return ""
 	}
@@ -564,7 +513,7 @@ func (v *AccessTokenVerifier) VerifyAccessToken(token string) bool {
 
 func canonicalProviderUserID(userID string) (string, error) {
 	canonical := strings.TrimSpace(userID)
-	if canonical == "" || len(canonical) > 1024 || !utf8.ValidString(canonical) || strings.IndexByte(canonical, 0) >= 0 {
+	if canonical == "" || !utf8.ValidString(canonical) || strings.IndexByte(canonical, 0) >= 0 {
 		return "", ErrAccountChanged
 	}
 	return canonical, nil
@@ -602,7 +551,7 @@ func wipeBytes(value []byte) {
 type PersistentState struct {
 	InstallationID      string
 	AccessTokenVerifier *AccessTokenVerifier
-	Subscription        SubscriptionGeneration
+	Subscription        SubscriptionAuthority
 	Preferences         Preferences
 	LastGood            LastGoodState
 	ActiveSession       *RuntimeSnapshot `json:"-"`
@@ -667,35 +616,35 @@ func NewPersistentState() (PersistentState, error) {
 	if err != nil {
 		return PersistentState{}, err
 	}
-	generation, err := newSubscriptionGeneration(1, time.Now().UTC())
+	authority, err := newSubscriptionAuthority(time.Now().UTC())
 	if err != nil {
 		return PersistentState{}, err
 	}
 	return PersistentState{
 		InstallationID: installation,
-		Subscription:   generation,
+		Subscription:   authority,
 		Preferences:    Preferences{ExcludedNodeIDs: make(map[string]bool)},
 	}, nil
 }
 
-func newSubscriptionGeneration(number uint64, activatedAt time.Time) (SubscriptionGeneration, error) {
+func newSubscriptionAuthority(activatedAt time.Time) (SubscriptionAuthority, error) {
 	selectorKey, err := randomBytes(32)
 	if err != nil {
-		return SubscriptionGeneration{}, err
+		return SubscriptionAuthority{}, err
 	}
 	proxyKey, err := randomBytes(32)
 	if err != nil {
 		wipeBytes(selectorKey)
-		return SubscriptionGeneration{}, err
+		return SubscriptionAuthority{}, err
 	}
-	return SubscriptionGeneration{Generation: number, SelectorKey: selectorKey, ProxyAuthKey: proxyKey, ActivatedAt: activatedAt.UTC()}, nil
+	return SubscriptionAuthority{SelectorKey: selectorKey, ProxyAuthKey: proxyKey, ActivatedAt: activatedAt.UTC()}, nil
 }
 
 // EnsureSubscriptionAccountBinding keeps credentials stable for the same
 // account. A changed account receives fresh selector/proxy keys, a new binding,
 // and no credential-bearing cached subscription state.
 func EnsureSubscriptionAccountBinding(p *PersistentState, userID string, now time.Time) (bool, error) {
-	if p == nil || !p.AccessTokenInitialized() || validateSubscriptionGeneration(p.Subscription) != nil {
+	if p == nil || !p.AccessTokenInitialized() || validateSubscriptionAuthority(p.Subscription) != nil {
 		return false, ErrAccountChanged
 	}
 	binding, err := p.DeriveAccountBinding(userID)
@@ -710,7 +659,7 @@ func EnsureSubscriptionAccountBinding(p *PersistentState, userID string, now tim
 	if subtle.ConstantTimeCompare(p.Subscription.AccountBinding, binding) == 1 {
 		return false, nil
 	}
-	next, err := newSubscriptionGeneration(p.Subscription.Generation+1, now)
+	next, err := newSubscriptionAuthority(now)
 	if err != nil {
 		return false, err
 	}
@@ -746,7 +695,7 @@ func ValidatePersistentState(p PersistentState) error {
 	if p.AccessTokenVerifier != nil && validateAccessTokenVerifier(p.AccessTokenVerifier) != nil {
 		return fmt.Errorf("invalid access token verifier")
 	}
-	if err := validateSubscriptionGeneration(p.Subscription); err != nil {
+	if err := validateSubscriptionAuthority(p.Subscription); err != nil {
 		return err
 	}
 	if len(p.Subscription.AccountBinding) != 0 && p.AccessTokenVerifier == nil {
@@ -759,52 +708,37 @@ func ValidatePersistentState(p PersistentState) error {
 		if p.ActiveSession != nil {
 			return fmt.Errorf("unbound subscription retains active session")
 		}
-	} else if err := validateLastGoodState(p.LastGood, p.Subscription.Generation); err != nil {
+	} else if err := validateLastGoodState(p.LastGood); err != nil {
 		return err
 	}
 	if p.ActiveSession != nil {
 		if err := ValidateRuntimeSnapshot(p.ActiveSession); err != nil {
 			return fmt.Errorf("invalid active session: %w", err)
 		}
-		if !validPersistedSession(ClientProfileIOS, p.ActiveSession.Sessions.IOS) || !p.MatchesAccount(p.ActiveSession.Sessions.UserID()) {
-			return fmt.Errorf("active session does not match durable account binding")
-		}
-		if p.ActiveSession.Sessions.Windows != (SessionSecrets{}) && !validPersistedSession(ClientProfileWindows, p.ActiveSession.Sessions.Windows) {
-			return fmt.Errorf("active Windows session is invalid")
-		}
-		for _, reference := range p.ActiveSession.Selectors {
-			if reference.Generation != p.Subscription.Generation {
-				return fmt.Errorf("active session selector has stale subscription generation")
-			}
+		if !p.MatchesAccount(p.ActiveSession.AccountBindingID()) {
+			return fmt.Errorf("active providers do not match durable account binding")
 		}
 	}
 	return validatePreferences(p.Preferences)
 }
 
-func validateSubscriptionGeneration(g SubscriptionGeneration) error {
-	if g.Generation == 0 || g.ActivatedAt.IsZero() || len(g.SelectorKey) != sha256.Size || len(g.ProxyAuthKey) != sha256.Size || (len(g.AccountBinding) != 0 && len(g.AccountBinding) != sha256.Size) {
-		return fmt.Errorf("invalid subscription generation")
+func validateSubscriptionAuthority(g SubscriptionAuthority) error {
+	if g.ActivatedAt.IsZero() || len(g.SelectorKey) != sha256.Size || len(g.ProxyAuthKey) != sha256.Size || (len(g.AccountBinding) != 0 && len(g.AccountBinding) != sha256.Size) {
+		return fmt.Errorf("invalid subscription credential epoch")
 	}
 	return nil
 }
 
 func lastGoodStateEmpty(lastGood LastGoodState) bool {
-	return lastGood.Generation == 0 && lastGood.CreatedAt.IsZero() && len(lastGood.Nodes) == 0 && lastGood.RenderedSubscription == "" && lastGood.FetchedGeneration == 0 && lastGood.FetchedAt.IsZero() && len(lastGood.FetchedBodyHash) == 0
+	return lastGood.CreatedAt.IsZero() && len(lastGood.Nodes) == 0 && lastGood.RenderedSubscription == ""
 }
 
-func validateLastGoodState(lastGood LastGoodState, activeGeneration uint64) error {
+func validateLastGoodState(lastGood LastGoodState) error {
 	if lastGoodStateEmpty(lastGood) {
 		return nil
 	}
-	if lastGood.Generation != activeGeneration || lastGood.CreatedAt.IsZero() || len(lastGood.Nodes) == 0 || lastGood.RenderedSubscription == "" {
+	if lastGood.CreatedAt.IsZero() || len(lastGood.Nodes) == 0 || lastGood.RenderedSubscription == "" {
 		return fmt.Errorf("incomplete last-good state")
-	}
-	if len(lastGood.FetchedBodyHash) != 0 && len(lastGood.FetchedBodyHash) != sha256.Size {
-		return fmt.Errorf("invalid last-good fetch hash")
-	}
-	hasFetch := !lastGood.FetchedAt.IsZero()
-	if hasFetch != (len(lastGood.FetchedBodyHash) == sha256.Size) || hasFetch != (lastGood.FetchedGeneration != 0) || (hasFetch && (lastGood.FetchedGeneration > lastGood.Generation || lastGood.FetchedAt.Before(lastGood.CreatedAt))) {
-		return fmt.Errorf("incomplete last-good fetch metadata")
 	}
 	if err := validatePersistedNodes(lastGood.Nodes); err != nil {
 		return err
@@ -821,9 +755,8 @@ func validatePersistedNodes(nodes []PersistedNode) error {
 		if persisted.Selector == "" {
 			return fmt.Errorf("invalid persisted node selector")
 		}
-		node := Node{ID: persisted.ID, Provider: persisted.Provider, Host: persisted.Host, Port: persisted.Port, Eligible: persisted.Eligible}
-		if err := ValidateNode(node); err != nil {
-			return err
+		if persisted.ID == "" || !provider.ID(persisted.Provider).Valid() || persisted.Host == "" || persisted.Port == 0 {
+			return fmt.Errorf("invalid persisted node")
 		}
 		if _, exists := ids[persisted.ID]; exists {
 			return fmt.Errorf("duplicate persisted node id")
@@ -836,7 +769,7 @@ func validatePersistedNodes(nodes []PersistedNode) error {
 // ValidateNode checks the non-secret structural fields shared by runtime and
 // persisted nodes. Provider compatibility remains an eligibility decision.
 func ValidateNode(node Node) error {
-	if node.ID == "" || node.Provider == "" || node.Host == "" || node.Port == 0 || strings.IndexByte(node.Provider, 0) >= 0 || strings.IndexByte(node.Host, 0) >= 0 {
+	if node.ID == "" || !node.Provider.Valid() || !node.Protocol.Valid() || node.AuthorityID == "" || node.Host == "" || node.Port == 0 || strings.IndexByte(string(node.Provider), 0) >= 0 || strings.IndexByte(string(node.Protocol), 0) >= 0 || strings.IndexByte(node.Host, 0) >= 0 {
 		return fmt.Errorf("invalid node")
 	}
 	return nil
@@ -852,7 +785,7 @@ func validateRenderedSubscription(body string, nodes []PersistedNode) error {
 	}
 	eligible, unexcludedEligible := 0, 0
 	for _, node := range nodes {
-		if node.Eligible && strings.EqualFold(node.Provider, "WIFIIN") {
+		if node.Eligible {
 			eligible++
 			if !node.Excluded {
 				unexcludedEligible++

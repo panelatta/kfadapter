@@ -1,20 +1,13 @@
 package socks
 
 import (
-	"context"
-	"crypto/cipher"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"sync/atomic"
 	"syscall"
-
-	"github.com/kfadapter/kfadapter/internal/kuaifan/wifiin"
 )
-
-const maxUDPDatagramSize = 1<<16 - 1
 
 type udpAssociation struct {
 	conn     *net.UDPConn
@@ -41,7 +34,6 @@ func newUDPAssociation(client net.Conn, requested target) (*udpAssociation, erro
 	if !requestedIP.IsUnspecified() && requestedIP != clientIP {
 		return nil, errBadAddress
 	}
-
 	local, ok := client.LocalAddr().(*net.TCPAddr)
 	if !ok || local == nil {
 		return nil, errors.New("socks: UDP association requires a TCP listener address")
@@ -66,106 +58,44 @@ func newUDPAssociation(client net.Conn, requested target) (*udpAssociation, erro
 	return association, nil
 }
 
-func (a *udpAssociation) acceptSource(address *net.UDPAddr) bool {
+func (association *udpAssociation) acceptSource(address *net.UDPAddr) bool {
 	if address == nil || address.Port < 1 || address.Port > 65535 {
 		return false
 	}
 	ip, ok := netip.AddrFromSlice(address.IP)
-	if !ok || ip.Unmap() != a.clientIP {
+	if !ok || ip.Unmap() != association.clientIP {
 		return false
 	}
-	if endpoint := a.endpoint.Load(); endpoint != nil {
+	if endpoint := association.endpoint.Load(); endpoint != nil {
 		return address.Port == endpoint.Port
 	}
 	copyAddress := &net.UDPAddr{IP: append(net.IP(nil), address.IP...), Port: address.Port, Zone: address.Zone}
-	return a.endpoint.CompareAndSwap(nil, copyAddress)
+	return association.endpoint.CompareAndSwap(nil, copyAddress)
 }
 
-func (s *Server) relayUDPAssociation(ctx context.Context, control net.Conn, upstream net.Conn, handshake *wifiin.HandshakeReader, header *wifiin.OutboundHeader, key []byte, association *udpAssociation) error {
-	lazyInbound, err := wifiin.NewLazyInboundReader(handshake, key, upstream, s.handshakeTimeout)
-	if err != nil {
-		return fmt.Errorf("socks: configure delayed WIFIIN UOT IV: %w", err)
-	}
-	plaintextWriter := &outboundCFBWriter{
-		writer:  &cipher.StreamWriter{S: header.Stream, W: upstream},
-		inbound: lazyInbound,
-		conn:    upstream,
-	}
-	uotWriter, err := wifiin.NewUOTWriter(plaintextWriter)
-	if err != nil {
-		return err
-	}
-	uotReader, err := wifiin.NewUOTReader(lazyInbound)
-	if err != nil {
-		return err
-	}
+func (association *udpAssociation) FlowID() uint16      { return association.flowID }
+func (association *udpAssociation) LocalAddr() net.Addr { return association.conn.LocalAddr() }
+func (association *udpAssociation) Close() error        { return association.conn.Close() }
 
-	results := make(chan error, 3)
-	go func() { results <- watchUDPControl(control) }()
-	go func() { results <- association.clientToUOT(uotWriter) }()
-	go func() { results <- association.uotToClient(uotReader) }()
-
-	err = <-results
-	_ = association.conn.Close()
-	_ = upstream.Close()
-	_ = control.Close()
-	if ctx.Err() != nil {
-		return ctx.Err()
+func (association *udpAssociation) ReadPacket(packet []byte) (int, error) {
+	for {
+		n, _, flags, source, err := association.conn.ReadMsgUDP(packet, nil)
+		if err != nil {
+			return 0, fmt.Errorf("socks: read client UDP datagram: %w", err)
+		}
+		if flags&syscall.MSG_TRUNC == 0 && association.acceptSource(source) {
+			return n, nil
+		}
 	}
-	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+}
+
+func (association *udpAssociation) WritePacket(packet []byte) error {
+	endpoint := association.endpoint.Load()
+	if endpoint == nil {
 		return nil
 	}
-	return err
-}
-
-func watchUDPControl(control net.Conn) error {
-	var discard [256]byte
-	for {
-		_, err := control.Read(discard[:])
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return err
-		}
+	if _, err := association.conn.WriteToUDP(packet, endpoint); err != nil {
+		return fmt.Errorf("socks: write client UDP datagram: %w", err)
 	}
-}
-
-func (a *udpAssociation) clientToUOT(writer *wifiin.UOTWriter) error {
-	packet := make([]byte, maxUDPDatagramSize)
-	for {
-		n, _, flags, source, err := a.conn.ReadMsgUDP(packet, nil)
-		if err != nil {
-			return fmt.Errorf("socks: read client UDP datagram: %w", err)
-		}
-		if flags&syscall.MSG_TRUNC != 0 || !a.acceptSource(source) {
-			continue
-		}
-		if err := writer.WriteSOCKSDatagram(a.flowID, packet[:n]); err != nil {
-			if errors.Is(err, wifiin.ErrInvalidUDPDatagram) || errors.Is(err, wifiin.ErrFragmentedUDP) || errors.Is(err, wifiin.ErrUnsupportedUDPAddress) {
-				continue
-			}
-			return err
-		}
-	}
-}
-
-func (a *udpAssociation) uotToClient(reader *wifiin.UOTReader) error {
-	packet := make([]byte, maxUDPDatagramSize)
-	for {
-		n, flowID, err := reader.ReadSOCKSDatagram(packet)
-		if err != nil {
-			return fmt.Errorf("socks: read WIFIIN UOT datagram: %w", err)
-		}
-		if flowID != a.flowID {
-			continue
-		}
-		endpoint := a.endpoint.Load()
-		if endpoint == nil {
-			continue
-		}
-		if _, err := a.conn.WriteToUDP(packet[:n], endpoint); err != nil {
-			return fmt.Errorf("socks: write client UDP datagram: %w", err)
-		}
-	}
+	return nil
 }

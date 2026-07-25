@@ -1,4 +1,4 @@
-// kfadapter is the container-only local KuaiFan-to-SOCKS adapter runtime.
+// kfadapter is the container-only local multi-provider SOCKS adapter runtime.
 package main
 
 import (
@@ -22,6 +22,9 @@ import (
 	"github.com/kfadapter/kfadapter/internal/config"
 	"github.com/kfadapter/kfadapter/internal/kuaifan"
 	"github.com/kfadapter/kfadapter/internal/lifecycle"
+	"github.com/kfadapter/kfadapter/internal/provider"
+	providercoordinator "github.com/kfadapter/kfadapter/internal/provider/coordinator"
+	"github.com/kfadapter/kfadapter/internal/quickfox"
 	"github.com/kfadapter/kfadapter/internal/selector"
 	"github.com/kfadapter/kfadapter/internal/socks"
 	"github.com/kfadapter/kfadapter/internal/state"
@@ -217,15 +220,49 @@ func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string) (resul
 		return nil, err
 	}
 	dialer := &net.Dialer{Timeout: cfg.Proxy.DialTimeout.Value()}
+	location, err := configuredLocation()
+	if err != nil {
+		return nil, err
+	}
+	kuaifanConfig := kuaifan.Config{Location: location, RequestTimeout: cfg.Provider.RequestTimeout.Value()}
+	iosClient, err := kuaifan.NewIOSClient(kuaifanConfig)
+	if err != nil {
+		return nil, err
+	}
+	windowsClient, err := kuaifan.NewWindowsClient(kuaifanConfig)
+	if err != nil {
+		return nil, err
+	}
+	kuaifanDriver, err := kuaifan.NewDriver(kuaifan.DriverConfig{
+		IOSClient: iosClient, WindowsClient: windowsClient, AuthorityLifetime: 24 * time.Hour, MaxAttempts: 3,
+	})
+	if err != nil {
+		return nil, err
+	}
+	quickfoxClient, err := quickfox.NewClient(quickfox.Config{Location: location, RequestTimeout: cfg.Provider.RequestTimeout.Value()})
+	if err != nil {
+		return nil, err
+	}
+	quickfoxDriver, err := quickfox.NewDriver(quickfox.DriverConfig{Client: quickfoxClient, AuthorityLifetime: 24 * time.Hour})
+	if err != nil {
+		return nil, err
+	}
+	providers, err := provider.NewRegistry(
+		[]provider.Driver{kuaifanDriver, quickfoxDriver},
+		[]provider.Transport{kuaifan.NewTransport(), quickfox.NewTransport()},
+	)
+	if err != nil {
+		return nil, err
+	}
 	mutationMu := &sync.Mutex{}
 	socksServer, err := socks.New(socks.Config{
-		Snapshots: manager, Selectors: registry, DialContext: dialer.DialContext,
+		Snapshots: manager, Selectors: registry, Providers: providers, DialContext: dialer.DialContext,
 		HandshakeTimeout: cfg.Proxy.HandshakeTimeout.Value(),
 	})
 	if err != nil {
 		return nil, err
 	}
-	coordinator, err := app.NewSelectorCoordinator(socksServer, registry, time.Now)
+	selectorCoordinator, err := app.NewSelectorCoordinator(socksServer, registry, time.Now)
 	if err != nil {
 		return nil, err
 	}
@@ -237,37 +274,23 @@ func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string) (resul
 	if err != nil {
 		return nil, err
 	}
-	location, err := configuredLocation()
-	if err != nil {
-		return nil, err
-	}
-	providerConfig := kuaifan.Config{Location: location, RequestTimeout: cfg.Provider.RequestTimeout.Value()}
-	iosClient, err := kuaifan.NewIOSClient(providerConfig)
-	if err != nil {
-		return nil, err
-	}
-	windowsClient, err := kuaifan.NewWindowsClient(providerConfig)
-	if err != nil {
-		return nil, err
-	}
 	var runtimeFacade *app.Runtime
-	refresher, err := kuaifan.NewRefresher(kuaifan.RefresherConfig{
-		IOSClient: iosClient, WindowsClient: windowsClient, Manager: manager, SelectorBuilder: coordinator,
+	providerCoordinator, err := providercoordinator.New(providercoordinator.Config{
+		Providers: providers, Manager: manager, SelectorBuilder: selectorCoordinator,
 		CommitSnapshot: func(snapshot *state.RuntimeSnapshot) error {
 			if runtimeFacade == nil {
 				return errors.New("runtime snapshot committer unavailable")
 			}
 			return runtimeFacade.CommitControlSnapshotLocked(snapshot)
 		},
-		AuthorityLifetime: 24 * time.Hour, MaxAttempts: 3,
 	})
 	if err != nil {
 		return nil, err
 	}
 	startedAt := time.Now().UTC()
 	runtimeFacade, err = app.NewRuntime(app.RuntimeConfig{
-		Manager: manager, Store: store, Refresher: refresher, Subscriptions: subscriptionService,
-		Selectors: coordinator, MutationMu: mutationMu, SocksAddress: proxyAddress, HTTPAddress: managementAddress,
+		Manager: manager, Store: store, Providers: providerCoordinator, Subscriptions: subscriptionService,
+		Selectors: selectorCoordinator, MutationMu: mutationMu, SocksAddress: proxyAddress, HTTPAddress: managementAddress,
 		Version: version, StartedAt: startedAt,
 		RefreshEvery: cfg.Provider.RefreshInterval.Value(), ProbeTimeout: cfg.Proxy.DialTimeout.Value(),
 	})

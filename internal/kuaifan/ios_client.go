@@ -8,12 +8,11 @@ import (
 	"strings"
 
 	wireprofile "github.com/kfadapter/kfadapter/internal/kuaifan/profile"
-	"github.com/kfadapter/kfadapter/internal/state"
 )
 
 type iosClientProfile struct{ wire wireprofile.IOS }
 
-func (p iosClientProfile) id() state.ClientProfile        { return state.ClientProfileIOS }
+func (p iosClientProfile) id() wireprofile.ID             { return wireprofile.IOSID }
 func (p iosClientProfile) userAgent() string              { return p.wire.UserAgent() }
 func (p iosClientProfile) configFields() any              { return p.wire.ConfigFields() }
 func (p iosClientProfile) requiresPostLoginRefresh() bool { return p.wire.RequiresPostLoginRefresh() }

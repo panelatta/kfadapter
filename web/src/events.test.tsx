@@ -25,7 +25,7 @@ function renderAuthenticatedConsole(pathname = "/") {
       return Promise.resolve(response(currentStatus));
     }
     if (path.endsWith("/nodes")) return Promise.resolve(response({ nodes: currentNodes }));
-    if (path.endsWith("/subscription/url")) return Promise.resolve(response({ url: currentConsumerURL, generation: 7 }));
+    if (path.endsWith("/subscription/url")) return Promise.resolve(response({ url: currentConsumerURL }));
     if (path === "/api/v1/access/logout" && init?.method === "POST") return Promise.resolve(response(null, 204));
     throw new Error(`Unexpected request: ${path}`);
   });
@@ -61,8 +61,8 @@ describe("named server-sent events", () => {
     const source = console.eventSource();
 
     await act(async () => {
-      source.emit("state", JSON.stringify({ state: "degraded", generation: 8 }));
-      source.emit("refresh", JSON.stringify({ state: "degraded", generation: 8, complete: true }));
+      source.emit("state", JSON.stringify({ state: "degraded" }));
+      source.emit("refresh", JSON.stringify({ state: "degraded", complete: true }));
       source.emit("probe", JSON.stringify({ nodeId: "n-east", health: "degraded", tcpLatencyMs: 84, probedAt: "2026-07-15T10:00:00Z" }));
     });
 

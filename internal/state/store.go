@@ -15,11 +15,13 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/kfadapter/kfadapter/internal/provider"
 )
 
 const (
 	sqliteStateFileName     = "state.db"
-	sqliteSchemaVersion     = 5
+	sqliteSchemaVersion     = 8
 	MaxPersistentStateBytes = 10 << 20
 	maxSQLiteStateBytes     = MaxPersistentStateBytes + 8<<20
 	maxBrowserSessions      = 4096
@@ -27,10 +29,26 @@ const (
 
 var sqliteSchemaTables = map[string]int{
 	"schema_version": 0, "state_metadata": 1, "access_token_verifier": 2,
+	"subscription_authority": 3, "preferences": 4, "excluded_node_ids": 5,
+	"last_good": 6, "last_good_nodes": 7, "active_session": 8,
+	"active_session_providers": 9, "active_session_authorities": 10,
+	"active_session_nodes": 11, "active_session_selectors": 12, "browser_sessions": 13,
+}
+
+var sqliteSchemaV5Tables = map[string]int{
+	"schema_version": 0, "state_metadata": 1, "access_token_verifier": 2,
 	"subscription_generation": 3, "preferences": 4, "excluded_node_ids": 5,
 	"last_good": 6, "last_good_nodes": 7, "active_session": 8,
 	"active_session_nodes": 9, "active_session_selectors": 10, "browser_sessions": 11,
 	"active_session_windows": 12, "active_session_node_profiles": 13,
+}
+
+var sqliteSchemaV6Tables = map[string]int{
+	"schema_version": 0, "state_metadata": 1, "access_token_verifier": 2,
+	"subscription_generation": 3, "preferences": 4, "excluded_node_ids": 5,
+	"last_good": 6, "last_good_nodes": 7, "active_session": 8,
+	"active_session_providers": 9, "active_session_authorities": 10,
+	"active_session_nodes": 11, "active_session_selectors": 12, "browser_sessions": 13,
 }
 
 var sqliteSchemaV4Tables = map[string]int{
@@ -495,6 +513,39 @@ var sqliteSchemaStatements = []string{
 	`CREATE TABLE schema_version (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)`,
 	`CREATE TABLE state_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), installation_id TEXT NOT NULL)`,
 	`CREATE TABLE access_token_verifier (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES state_metadata(id) ON DELETE CASCADE, memory_kib INTEGER NOT NULL, iterations INTEGER NOT NULL, parallelism INTEGER NOT NULL, salt BLOB NOT NULL, hash BLOB NOT NULL)`,
+	`CREATE TABLE subscription_authority (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES state_metadata(id) ON DELETE CASCADE, selector_key BLOB NOT NULL, proxy_auth_key BLOB NOT NULL, account_binding BLOB, activated_at_ns INTEGER NOT NULL)`,
+	`CREATE TABLE preferences (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES state_metadata(id) ON DELETE CASCADE, reveal_endpoints INTEGER NOT NULL, refresh_policy TEXT NOT NULL)`,
+	`CREATE TABLE excluded_node_ids (node_id TEXT PRIMARY KEY, preference_id INTEGER NOT NULL REFERENCES preferences(id) ON DELETE CASCADE)`,
+	`CREATE TABLE last_good (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES state_metadata(id) ON DELETE CASCADE, created_at_ns INTEGER, rendered_subscription TEXT NOT NULL)`,
+	`CREATE TABLE last_good_nodes (position INTEGER PRIMARY KEY, last_good_id INTEGER NOT NULL REFERENCES last_good(id) ON DELETE CASCADE, node_id TEXT NOT NULL, selector TEXT NOT NULL, provider TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, name TEXT NOT NULL, group_name TEXT NOT NULL, eligible INTEGER NOT NULL, excluded INTEGER NOT NULL)`,
+	`CREATE TABLE active_session (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES state_metadata(id) ON DELETE CASCADE, generation INTEGER NOT NULL, created_at_ns INTEGER NOT NULL, expires_at_ns INTEGER NOT NULL)`,
+	`CREATE TABLE active_session_providers (provider_id TEXT PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES active_session(id) ON DELETE CASCADE, expires_at_ns INTEGER NOT NULL, user_id TEXT NOT NULL, account_display TEXT NOT NULL, account_tier TEXT NOT NULL, subscription_active INTEGER NOT NULL, subscription_ends_at_ns INTEGER, refresh_state BLOB NOT NULL)`,
+	`CREATE TABLE active_session_authorities (provider_id TEXT NOT NULL REFERENCES active_session_providers(provider_id) ON DELETE CASCADE, authority_id TEXT NOT NULL, protocol TEXT NOT NULL, authority BLOB NOT NULL, PRIMARY KEY (provider_id, authority_id))`,
+	`CREATE TABLE active_session_nodes (position INTEGER PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES active_session(id) ON DELETE CASCADE, node_id TEXT NOT NULL, selector TEXT NOT NULL, provider_id TEXT NOT NULL REFERENCES active_session_providers(provider_id) ON DELETE CASCADE, protocol TEXT NOT NULL, authority_id TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL, name TEXT NOT NULL, group_name TEXT NOT NULL, model TEXT NOT NULL, weight INTEGER NOT NULL, auto INTEGER NOT NULL, eligible INTEGER NOT NULL, excluded INTEGER NOT NULL, health TEXT NOT NULL, udp_health TEXT NOT NULL, tcp_rtt_ns INTEGER NOT NULL, probed_at_ns INTEGER)`,
+	`CREATE TABLE active_session_selectors (selector TEXT PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES active_session(id) ON DELETE CASCADE, node_id TEXT NOT NULL)`,
+	`CREATE TABLE browser_sessions (token TEXT PRIMARY KEY, csrf TEXT NOT NULL, expires_at_ns INTEGER NOT NULL)`,
+}
+
+// sqliteSchemaV7Statements is retained solely to validate and atomically
+// migrate historical databases. New installations use the v8 definition.
+var sqliteSchemaV7Statements = func() []string {
+	statements := append([]string(nil), sqliteSchemaStatements...)
+	statements[3] = `CREATE TABLE subscription_generation (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES state_metadata(id) ON DELETE CASCADE, generation INTEGER NOT NULL, selector_key BLOB NOT NULL, proxy_auth_key BLOB NOT NULL, account_binding BLOB, activated_at_ns INTEGER NOT NULL)`
+	statements[6] = `CREATE TABLE last_good (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES state_metadata(id) ON DELETE CASCADE, generation INTEGER NOT NULL, created_at_ns INTEGER, rendered_subscription TEXT NOT NULL, fetched_generation INTEGER NOT NULL, fetched_at_ns INTEGER, fetched_body_hash BLOB)`
+	statements[12] = `CREATE TABLE active_session_selectors (selector TEXT PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES active_session(id) ON DELETE CASCADE, node_id TEXT NOT NULL, generation INTEGER NOT NULL, tombstoned INTEGER NOT NULL, tombstone_until_ns INTEGER)`
+	return statements
+}()
+
+var sqliteSchemaV6Statements = func() []string {
+	statements := append([]string(nil), sqliteSchemaV7Statements...)
+	statements[9] = `CREATE TABLE active_session_providers (provider_id TEXT PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES active_session(id) ON DELETE CASCADE, expires_at_ns INTEGER NOT NULL, user_id TEXT NOT NULL, account_display TEXT NOT NULL, account_is_vip INTEGER NOT NULL, account_vip_ends_at_ns INTEGER, refresh_state BLOB NOT NULL)`
+	return statements
+}()
+
+var sqliteSchemaV5Statements = []string{
+	`CREATE TABLE schema_version (id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)`,
+	`CREATE TABLE state_metadata (id INTEGER PRIMARY KEY CHECK (id = 1), installation_id TEXT NOT NULL)`,
+	`CREATE TABLE access_token_verifier (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES state_metadata(id) ON DELETE CASCADE, memory_kib INTEGER NOT NULL, iterations INTEGER NOT NULL, parallelism INTEGER NOT NULL, salt BLOB NOT NULL, hash BLOB NOT NULL)`,
 	`CREATE TABLE subscription_generation (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES state_metadata(id) ON DELETE CASCADE, generation INTEGER NOT NULL, selector_key BLOB NOT NULL, proxy_auth_key BLOB NOT NULL, account_binding BLOB, activated_at_ns INTEGER NOT NULL)`,
 	`CREATE TABLE preferences (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES state_metadata(id) ON DELETE CASCADE, reveal_endpoints INTEGER NOT NULL, refresh_policy TEXT NOT NULL)`,
 	`CREATE TABLE excluded_node_ids (node_id TEXT PRIMARY KEY, preference_id INTEGER NOT NULL REFERENCES preferences(id) ON DELETE CASCADE)`,
@@ -516,12 +567,42 @@ func migrateSQLiteSchema(db *sql.DB) error {
 	if version == sqliteSchemaVersion {
 		return nil
 	}
-	if version != 4 {
+	if version == 4 {
+		if err := validateSQLiteSchemaDefinition(db, 4, sqliteSchemaV4Tables, sqliteSchemaV5Statements[:len(sqliteSchemaV4Tables)]); err != nil {
+			return err
+		}
+		if err := migrateSQLiteV4ToV5(db); err != nil {
+			return err
+		}
+		version = 5
+	}
+	if version == 5 {
+		if err := validateSQLiteSchemaDefinition(db, 5, sqliteSchemaV5Tables, sqliteSchemaV5Statements); err != nil {
+			return err
+		}
+		if err := migrateSQLiteV5ToV6(db); err != nil {
+			return err
+		}
+		version = 6
+	}
+	if version != 6 && version != 7 {
 		return corruptDatabase(errors.New("unsupported SQLite schema version"))
 	}
-	if err := validateSQLiteSchemaDefinition(db, 4, sqliteSchemaV4Tables, sqliteSchemaStatements[:len(sqliteSchemaV4Tables)]); err != nil {
+	if version == 6 {
+		if err := validateSQLiteSchemaDefinition(db, 6, sqliteSchemaV6Tables, sqliteSchemaV6Statements); err != nil {
+			return err
+		}
+		if err := migrateSQLiteV6ToV7(db); err != nil {
+			return err
+		}
+	}
+	if err := validateSQLiteSchemaDefinition(db, 7, sqliteSchemaV6Tables, sqliteSchemaV7Statements); err != nil {
 		return err
 	}
+	return migrateSQLiteV7ToV8(db)
+}
+
+func migrateSQLiteV4ToV5(db *sql.DB) error {
 	if err := configureSQLiteDurability(db); err != nil {
 		return corruptDatabase(err)
 	}
@@ -530,15 +611,131 @@ func migrateSQLiteSchema(db *sql.DB) error {
 		return corruptDatabase(err)
 	}
 	defer tx.Rollback()
-	for _, statement := range sqliteSchemaStatements[len(sqliteSchemaV4Tables):] {
+	for _, statement := range sqliteSchemaV5Statements[len(sqliteSchemaV4Tables):] {
 		if _, err := tx.Exec(statement); err != nil {
 			return corruptDatabase(err)
 		}
 	}
-	if _, err := tx.Exec("INSERT INTO active_session_node_profiles (position, client_profile) SELECT position, ? FROM active_session_nodes", ClientProfileIOS); err != nil {
+	if _, err := tx.Exec("INSERT INTO active_session_node_profiles (position, client_profile) SELECT position, 'ios' FROM active_session_nodes"); err != nil {
 		return corruptDatabase(err)
 	}
-	if _, err := tx.Exec("UPDATE schema_version SET version = ? WHERE id = 1", sqliteSchemaVersion); err != nil {
+	if _, err := tx.Exec("UPDATE schema_version SET version = 5 WHERE id = 1"); err != nil {
+		return corruptDatabase(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return corruptDatabase(err)
+	}
+	return nil
+}
+
+func migrateSQLiteV5ToV6(db *sql.DB) error {
+	if err := configureSQLiteDurability(db); err != nil {
+		return corruptDatabase(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return corruptDatabase(err)
+	}
+	defer tx.Rollback()
+	// The v5 authority schema was inseparable from one provider account. A v6
+	// migration securely discards only that renewable authority while retaining
+	// access control, preferences, browser sessions, and last-good metadata.
+	for _, table := range []string{"active_session_node_profiles", "active_session_windows", "active_session_selectors", "active_session_nodes", "active_session"} {
+		if _, err := tx.Exec("DROP TABLE " + table); err != nil {
+			return corruptDatabase(err)
+		}
+	}
+	for _, statement := range sqliteSchemaV6Statements[8:13] {
+		if _, err := tx.Exec(statement); err != nil {
+			return corruptDatabase(err)
+		}
+	}
+	if _, err := tx.Exec("UPDATE schema_version SET version = 6 WHERE id = 1"); err != nil {
+		return corruptDatabase(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return corruptDatabase(err)
+	}
+	return nil
+}
+
+func migrateSQLiteV6ToV7(db *sql.DB) error {
+	if err := configureSQLiteDurability(db); err != nil {
+		return corruptDatabase(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return corruptDatabase(err)
+	}
+	defer tx.Rollback()
+	// v6 stored one provider-neutral VIP bit that could not distinguish
+	// QuickFox's Standard, VIP, and SVIP tiers. Discard renewable provider
+	// authority and account-bound output rather than granting stale eligibility.
+	for _, table := range []string{"active_session_selectors", "active_session_nodes", "active_session_authorities", "active_session_providers", "active_session"} {
+		if _, err := tx.Exec("DROP TABLE " + table); err != nil {
+			return corruptDatabase(err)
+		}
+	}
+	if _, err := tx.Exec("DELETE FROM last_good_nodes"); err != nil {
+		return corruptDatabase(err)
+	}
+	if _, err := tx.Exec("UPDATE last_good SET generation = 0, created_at_ns = NULL, rendered_subscription = '', fetched_generation = 0, fetched_at_ns = NULL, fetched_body_hash = NULL WHERE id = 1"); err != nil {
+		return corruptDatabase(err)
+	}
+	if _, err := tx.Exec("UPDATE subscription_generation SET account_binding = NULL WHERE id = 1"); err != nil {
+		return corruptDatabase(err)
+	}
+	for _, statement := range sqliteSchemaV7Statements[8:13] {
+		if _, err := tx.Exec(statement); err != nil {
+			return corruptDatabase(err)
+		}
+	}
+	if _, err := tx.Exec("UPDATE schema_version SET version = 7 WHERE id = 1"); err != nil {
+		return corruptDatabase(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return corruptDatabase(err)
+	}
+	return nil
+}
+
+func migrateSQLiteV7ToV8(db *sql.DB) error {
+	if err := configureSQLiteDurability(db); err != nil {
+		return corruptDatabase(err)
+	}
+	selectorKey, err := randomBytes(32)
+	if err != nil {
+		return err
+	}
+	defer wipeBytes(selectorKey)
+	proxyKey, err := randomBytes(32)
+	if err != nil {
+		return err
+	}
+	defer wipeBytes(proxyKey)
+	tx, err := db.Begin()
+	if err != nil {
+		return corruptDatabase(err)
+	}
+	defer tx.Rollback()
+	// Historical provider IDs and selector derivations cannot be safely converted.
+	for _, table := range []string{"active_session_selectors", "active_session_nodes", "active_session_authorities", "active_session_providers", "active_session", "last_good_nodes", "last_good", "subscription_generation"} {
+		if _, err := tx.Exec("DROP TABLE " + table); err != nil {
+			return corruptDatabase(err)
+		}
+	}
+	for _, index := range []int{3, 6, 7, 8, 9, 10, 11, 12} {
+		if _, err := tx.Exec(sqliteSchemaStatements[index]); err != nil {
+			return corruptDatabase(err)
+		}
+	}
+	if _, err := tx.Exec("INSERT INTO subscription_authority (id, selector_key, proxy_auth_key, account_binding, activated_at_ns) VALUES (1, ?, ?, NULL, ?)", selectorKey, proxyKey, nanos(time.Now().UTC())); err != nil {
+		return corruptDatabase(err)
+	}
+	if _, err := tx.Exec("INSERT INTO last_good (id, created_at_ns, rendered_subscription) VALUES (1, NULL, '')"); err != nil {
+		return corruptDatabase(err)
+	}
+	if _, err := tx.Exec("UPDATE schema_version SET version = 8 WHERE id = 1"); err != nil {
 		return corruptDatabase(err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -815,7 +1012,7 @@ func replacePersistentStateTx(tx *sql.Tx, state PersistentState) error {
 		}
 	}
 	subscription := state.Subscription
-	if _, err := tx.Exec("INSERT INTO subscription_generation (id, generation, selector_key, proxy_auth_key, account_binding, activated_at_ns) VALUES (1, ?, ?, ?, ?, ?)", subscription.Generation, subscription.SelectorKey, subscription.ProxyAuthKey, nullBytes(subscription.AccountBinding), nanos(subscription.ActivatedAt)); err != nil {
+	if _, err := tx.Exec("INSERT INTO subscription_authority (id, selector_key, proxy_auth_key, account_binding, activated_at_ns) VALUES (1, ?, ?, ?, ?)", subscription.SelectorKey, subscription.ProxyAuthKey, nullBytes(subscription.AccountBinding), nanos(subscription.ActivatedAt)); err != nil {
 		return corruptDatabase(err)
 	}
 	if _, err := tx.Exec("INSERT INTO preferences (id, reveal_endpoints, refresh_policy) VALUES (1, ?, ?)", boolInt(state.Preferences.RevealEndpoints), state.Preferences.RefreshPolicy); err != nil {
@@ -832,7 +1029,9 @@ func replacePersistentStateTx(tx *sql.Tx, state PersistentState) error {
 		}
 	}
 	lastGood := state.LastGood
-	if _, err := tx.Exec("INSERT INTO last_good (id, generation, created_at_ns, rendered_subscription, fetched_generation, fetched_at_ns, fetched_body_hash) VALUES (1, ?, ?, ?, ?, ?, ?)", lastGood.Generation, nullableNanos(lastGood.CreatedAt), lastGood.RenderedSubscription, lastGood.FetchedGeneration, nullableNanos(lastGood.FetchedAt), nullBytes(lastGood.FetchedBodyHash)); err != nil {
+	// Fetch-proof columns remain in the v7 schema for compatibility; phase 2
+	// drops them in the v8 schema.
+	if _, err := tx.Exec("INSERT INTO last_good (id, created_at_ns, rendered_subscription) VALUES (1, ?, ?)", nullableNanos(lastGood.CreatedAt), lastGood.RenderedSubscription); err != nil {
 		return corruptDatabase(err)
 	}
 	for index, node := range lastGood.Nodes {
@@ -852,20 +1051,34 @@ func insertActiveSessionTx(tx *sql.Tx, snapshot *RuntimeSnapshot) error {
 	if snapshot == nil {
 		return nil
 	}
-	ios := snapshot.Sessions.IOS
-	if _, err := tx.Exec("INSERT INTO active_session (id, generation, created_at_ns, expires_at_ns, account_display, account_is_vip, account_vip_ends_at_ns, session_user_id, session_login_token, session_provider_token, session_tunnel_password, session_tunnel_method, session_provider_extension) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", snapshot.Generation, nanos(snapshot.CreatedAt), nanos(snapshot.ExpiresAt), snapshot.Account.Display, boolInt(snapshot.Account.IsVIP), nullableNanos(snapshot.Account.VIPEndsAt), ios.UserID, ios.LoginToken, ios.ProviderToken, ios.TunnelPassword, ios.TunnelMethod, ios.ProviderExtension); err != nil {
+	if _, err := tx.Exec("INSERT INTO active_session (id, generation, created_at_ns, expires_at_ns) VALUES (1, ?, ?, ?)", snapshot.Generation, nanos(snapshot.CreatedAt), nanos(snapshot.ExpiresAt)); err != nil {
 		return corruptDatabase(err)
 	}
-	if windows := snapshot.Sessions.Windows; windows != (SessionSecrets{}) {
-		if _, err := tx.Exec("INSERT INTO active_session_windows (id, session_user_id, session_login_token, session_provider_token, session_tunnel_password, session_tunnel_method, session_provider_extension) VALUES (1, ?, ?, ?, ?, ?, ?)", windows.UserID, windows.LoginToken, windows.ProviderToken, windows.TunnelPassword, windows.TunnelMethod, windows.ProviderExtension); err != nil {
+	providerIDs := make([]string, 0, len(snapshot.Providers))
+	for id := range snapshot.Providers {
+		providerIDs = append(providerIDs, string(id))
+	}
+	sort.Strings(providerIDs)
+	for _, rawID := range providerIDs {
+		providerSnapshot := snapshot.Providers[provider.ID(rawID)]
+		account := providerSnapshot.Account
+		if _, err := tx.Exec("INSERT INTO active_session_providers (provider_id, session_id, expires_at_ns, user_id, account_display, account_tier, subscription_active, subscription_ends_at_ns, refresh_state) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?)", rawID, nanos(providerSnapshot.ExpiresAt), account.UserID, account.Display, account.Tier, boolInt(account.SubscriptionActive), nullableNanos(account.SubscriptionEndsAt), providerSnapshot.RefreshState); err != nil {
 			return corruptDatabase(err)
+		}
+		authorityIDs := make([]string, 0, len(providerSnapshot.Authorities))
+		for authorityID := range providerSnapshot.Authorities {
+			authorityIDs = append(authorityIDs, authorityID)
+		}
+		sort.Strings(authorityIDs)
+		for _, authorityID := range authorityIDs {
+			authority := providerSnapshot.Authorities[authorityID]
+			if _, err := tx.Exec("INSERT INTO active_session_authorities (provider_id, authority_id, protocol, authority) VALUES (?, ?, ?, ?)", rawID, authorityID, string(authority.Protocol), authority.Data); err != nil {
+				return corruptDatabase(err)
+			}
 		}
 	}
 	for index, node := range snapshot.Nodes {
-		if _, err := tx.Exec("INSERT INTO active_session_nodes (position, session_id, node_id, selector, provider, host, port, name, group_name, model, weight, auto, eligible, excluded, health, udp_health, tcp_rtt_ns, probed_at_ns) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", index, node.ID, node.Selector, node.Provider, node.Host, node.Port, node.Name, node.Group, node.Model, node.Weight, boolInt(node.Auto), boolInt(node.Eligible), boolInt(node.Excluded), string(node.Health), string(node.UDPHealth), int64(node.TCPRTT), nullableNanos(node.ProbedAt)); err != nil {
-			return corruptDatabase(err)
-		}
-		if _, err := tx.Exec("INSERT INTO active_session_node_profiles (position, client_profile) VALUES (?, ?)", index, node.EffectiveClientProfile()); err != nil {
+		if _, err := tx.Exec("INSERT INTO active_session_nodes (position, session_id, node_id, selector, provider_id, protocol, authority_id, host, port, name, group_name, model, weight, auto, eligible, excluded, health, udp_health, tcp_rtt_ns, probed_at_ns) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", index, node.ID, node.Selector, string(node.Provider), string(node.Protocol), node.AuthorityID, node.Host, node.Port, node.Name, node.Group, node.Model, node.Weight, boolInt(node.Auto), boolInt(node.Eligible), boolInt(node.Excluded), string(node.Health), string(node.UDPHealth), int64(node.TCPRTT), nullableNanos(node.ProbedAt)); err != nil {
 			return corruptDatabase(err)
 		}
 	}
@@ -876,7 +1089,7 @@ func insertActiveSessionTx(tx *sql.Tx, snapshot *RuntimeSnapshot) error {
 	sort.Strings(selectors)
 	for _, selector := range selectors {
 		reference := snapshot.Selectors[selector]
-		if _, err := tx.Exec("INSERT INTO active_session_selectors (selector, session_id, node_id, generation, tombstoned, tombstone_until_ns) VALUES (?, 1, ?, ?, ?, ?)", selector, reference.NodeID, reference.Generation, boolInt(reference.Tombstoned), nullableNanos(reference.TombstoneUntil)); err != nil {
+		if _, err := tx.Exec("INSERT INTO active_session_selectors (selector, session_id, node_id) VALUES (?, 1, ?)", selector, reference.NodeID); err != nil {
 			return corruptDatabase(err)
 		}
 	}
@@ -901,16 +1114,12 @@ func loadPersistentStateTx(tx *sql.Tx) (PersistentState, error) {
 		}
 		state.AccessTokenVerifier = &AccessTokenVerifier{Parameters: Argon2idParameters{MemoryKiB: uint32(memory), Iterations: uint32(iterations), Parallelism: uint8(parallelism)}, Salt: append([]byte(nil), salt...), Hash: append([]byte(nil), hash...)}
 	}
-	var generation int64
 	var selectorKey, proxyKey, binding []byte
 	var activated int64
-	if err := tx.QueryRow("SELECT generation, selector_key, proxy_auth_key, account_binding, activated_at_ns FROM subscription_generation WHERE id = 1").Scan(&generation, &selectorKey, &proxyKey, &binding, &activated); err != nil {
+	if err := tx.QueryRow("SELECT selector_key, proxy_auth_key, account_binding, activated_at_ns FROM subscription_authority WHERE id = 1").Scan(&selectorKey, &proxyKey, &binding, &activated); err != nil {
 		return PersistentState{}, corruptDatabase(err)
 	}
-	if generation < 0 {
-		return PersistentState{}, corruptDatabase(errors.New("negative subscription generation"))
-	}
-	state.Subscription = SubscriptionGeneration{Generation: uint64(generation), SelectorKey: append([]byte(nil), selectorKey...), ProxyAuthKey: append([]byte(nil), proxyKey...), AccountBinding: append([]byte(nil), binding...), ActivatedAt: time.Unix(0, activated).UTC()}
+	state.Subscription = SubscriptionAuthority{SelectorKey: append([]byte(nil), selectorKey...), ProxyAuthKey: append([]byte(nil), proxyKey...), AccountBinding: append([]byte(nil), binding...), ActivatedAt: time.Unix(0, activated).UTC()}
 	var reveal int64
 	if err := tx.QueryRow("SELECT reveal_endpoints, refresh_policy FROM preferences WHERE id = 1").Scan(&reveal, &state.Preferences.RefreshPolicy); err != nil {
 		return PersistentState{}, corruptDatabase(err)
@@ -961,19 +1170,11 @@ func loadPersistentStateTx(tx *sql.Tx) (PersistentState, error) {
 
 func loadLastGoodTx(tx *sql.Tx) (LastGoodState, error) {
 	var state LastGoodState
-	var createdAt, fetchedAt sql.NullInt64
-	var fetchedGeneration int64
-	var fetchedHash []byte
-	if err := tx.QueryRow("SELECT generation, created_at_ns, rendered_subscription, fetched_generation, fetched_at_ns, fetched_body_hash FROM last_good WHERE id = 1").Scan(&state.Generation, &createdAt, &state.RenderedSubscription, &fetchedGeneration, &fetchedAt, &fetchedHash); err != nil {
+	var createdAt sql.NullInt64
+	if err := tx.QueryRow("SELECT created_at_ns, rendered_subscription FROM last_good WHERE id = 1").Scan(&createdAt, &state.RenderedSubscription); err != nil {
 		return LastGoodState{}, corruptDatabase(err)
 	}
-	if fetchedGeneration < 0 {
-		return LastGoodState{}, corruptDatabase(errors.New("negative fetched generation"))
-	}
 	state.CreatedAt = timeFromNullable(createdAt)
-	state.FetchedGeneration = uint64(fetchedGeneration)
-	state.FetchedAt = timeFromNullable(fetchedAt)
-	state.FetchedBodyHash = append([]byte(nil), fetchedHash...)
 	rows, err := tx.Query("SELECT node_id, selector, provider, host, port, name, group_name, eligible, excluded FROM last_good_nodes WHERE last_good_id = 1 ORDER BY position")
 	if err != nil {
 		return LastGoodState{}, corruptDatabase(err)
@@ -1007,90 +1208,144 @@ func loadLastGoodTx(tx *sql.Tx) (LastGoodState, error) {
 func loadActiveSessionTx(tx *sql.Tx) (*RuntimeSnapshot, error) {
 	var snapshot RuntimeSnapshot
 	var created, expires int64
-	var vipEnds sql.NullInt64
-	var isVIP int64
-	err := tx.QueryRow("SELECT generation, created_at_ns, expires_at_ns, account_display, account_is_vip, account_vip_ends_at_ns, session_user_id, session_login_token, session_provider_token, session_tunnel_password, session_tunnel_method, session_provider_extension FROM active_session WHERE id = 1").Scan(&snapshot.Generation, &created, &expires, &snapshot.Account.Display, &isVIP, &vipEnds, &snapshot.Sessions.IOS.UserID, &snapshot.Sessions.IOS.LoginToken, &snapshot.Sessions.IOS.ProviderToken, &snapshot.Sessions.IOS.TunnelPassword, &snapshot.Sessions.IOS.TunnelMethod, &snapshot.Sessions.IOS.ProviderExtension)
+	err := tx.QueryRow("SELECT generation, created_at_ns, expires_at_ns FROM active_session WHERE id = 1").Scan(&snapshot.Generation, &created, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, corruptDatabase(err)
 	}
-	var errBool error
-	if snapshot.Account.IsVIP, errBool = intBool(isVIP); errBool != nil {
-		return nil, corruptDatabase(errBool)
-	}
 	snapshot.CreatedAt = time.Unix(0, created).UTC()
 	snapshot.ExpiresAt = time.Unix(0, expires).UTC()
-	snapshot.Account.VIPEndsAt = timeFromNullable(vipEnds)
-	err = tx.QueryRow("SELECT session_user_id, session_login_token, session_provider_token, session_tunnel_password, session_tunnel_method, session_provider_extension FROM active_session_windows WHERE id = 1").Scan(&snapshot.Sessions.Windows.UserID, &snapshot.Sessions.Windows.LoginToken, &snapshot.Sessions.Windows.ProviderToken, &snapshot.Sessions.Windows.TunnelPassword, &snapshot.Sessions.Windows.TunnelMethod, &snapshot.Sessions.Windows.ProviderExtension)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, corruptDatabase(err)
-	}
-	rows, err := tx.Query("SELECT n.node_id, n.selector, n.provider, p.client_profile, n.host, n.port, n.name, n.group_name, n.model, n.weight, n.auto, n.eligible, n.excluded, n.health, n.udp_health, n.tcp_rtt_ns, n.probed_at_ns FROM active_session_nodes n JOIN active_session_node_profiles p ON p.position = n.position WHERE n.session_id = 1 ORDER BY n.position")
+	snapshot.Providers = make(map[provider.ID]provider.Snapshot)
+	providerRows, err := tx.Query("SELECT provider_id, expires_at_ns, user_id, account_display, account_tier, subscription_active, subscription_ends_at_ns, refresh_state FROM active_session_providers WHERE session_id = 1 ORDER BY provider_id")
 	if err != nil {
 		return nil, corruptDatabase(err)
 	}
-	for rows.Next() {
+	for providerRows.Next() {
+		var rawID, userID, display, tier string
+		var providerExpires, activeValue int64
+		var subscriptionEnds sql.NullInt64
+		var refreshState []byte
+		if err := providerRows.Scan(&rawID, &providerExpires, &userID, &display, &tier, &activeValue, &subscriptionEnds, &refreshState); err != nil {
+			providerRows.Close()
+			return nil, corruptDatabase(err)
+		}
+		active, err := intBool(activeValue)
+		if err != nil {
+			providerRows.Close()
+			return nil, corruptDatabase(err)
+		}
+		id := provider.ID(rawID)
+		if _, duplicate := snapshot.Providers[id]; duplicate {
+			providerRows.Close()
+			return nil, corruptDatabase(errors.New("duplicate provider session"))
+		}
+		snapshot.Providers[id] = provider.Snapshot{
+			Provider: id, ExpiresAt: time.Unix(0, providerExpires).UTC(), RefreshState: append([]byte(nil), refreshState...),
+			Account:     provider.Account{UserID: userID, Display: display, Tier: tier, SubscriptionActive: active, SubscriptionEndsAt: timeFromNullable(subscriptionEnds)},
+			Authorities: make(map[string]provider.Authority),
+		}
+	}
+	if err := providerRows.Close(); err != nil {
+		return nil, corruptDatabase(err)
+	}
+	if err := providerRows.Err(); err != nil {
+		return nil, corruptDatabase(err)
+	}
+	authorityRows, err := tx.Query("SELECT provider_id, authority_id, protocol, authority FROM active_session_authorities ORDER BY provider_id, authority_id")
+	if err != nil {
+		return nil, corruptDatabase(err)
+	}
+	for authorityRows.Next() {
+		var rawID, authorityID, rawProtocol string
+		var authorityData []byte
+		if err := authorityRows.Scan(&rawID, &authorityID, &rawProtocol, &authorityData); err != nil {
+			authorityRows.Close()
+			return nil, corruptDatabase(err)
+		}
+		id := provider.ID(rawID)
+		providerSnapshot, available := snapshot.Providers[id]
+		if !available {
+			authorityRows.Close()
+			return nil, corruptDatabase(errors.New("authority references absent provider"))
+		}
+		if _, duplicate := providerSnapshot.Authorities[authorityID]; duplicate {
+			authorityRows.Close()
+			return nil, corruptDatabase(errors.New("duplicate provider authority"))
+		}
+		providerSnapshot.Authorities[authorityID] = provider.Authority{Protocol: provider.Protocol(rawProtocol), Data: append([]byte(nil), authorityData...)}
+		snapshot.Providers[id] = providerSnapshot
+	}
+	if err := authorityRows.Close(); err != nil {
+		return nil, corruptDatabase(err)
+	}
+	if err := authorityRows.Err(); err != nil {
+		return nil, corruptDatabase(err)
+	}
+	nodeRows, err := tx.Query("SELECT node_id, selector, provider_id, protocol, authority_id, host, port, name, group_name, model, weight, auto, eligible, excluded, health, udp_health, tcp_rtt_ns, probed_at_ns FROM active_session_nodes WHERE session_id = 1 ORDER BY position")
+	if err != nil {
+		return nil, corruptDatabase(err)
+	}
+	for nodeRows.Next() {
 		var node Node
+		var rawProvider, rawProtocol string
 		var port, auto, eligible, excluded, rtt int64
 		var probed sql.NullInt64
 		var health, udp string
-		if err := rows.Scan(&node.ID, &node.Selector, &node.Provider, &node.ClientProfile, &node.Host, &port, &node.Name, &node.Group, &node.Model, &node.Weight, &auto, &eligible, &excluded, &health, &udp, &rtt, &probed); err != nil {
-			rows.Close()
+		if err := nodeRows.Scan(&node.ID, &node.Selector, &rawProvider, &rawProtocol, &node.AuthorityID, &node.Host, &port, &node.Name, &node.Group, &node.Model, &node.Weight, &auto, &eligible, &excluded, &health, &udp, &rtt, &probed); err != nil {
+			nodeRows.Close()
 			return nil, corruptDatabase(err)
 		}
 		if port < 0 || port > 65535 {
-			rows.Close()
+			nodeRows.Close()
 			return nil, corruptDatabase(errors.New("invalid active node port"))
 		}
-		var err error
-		if node.Auto, err = intBool(auto); err != nil {
-			rows.Close()
-			return nil, corruptDatabase(err)
+		var conversionErr error
+		if node.Auto, conversionErr = intBool(auto); conversionErr != nil {
+			nodeRows.Close()
+			return nil, corruptDatabase(conversionErr)
 		}
-		if node.Eligible, err = intBool(eligible); err != nil {
-			rows.Close()
-			return nil, corruptDatabase(err)
+		if node.Eligible, conversionErr = intBool(eligible); conversionErr != nil {
+			nodeRows.Close()
+			return nil, corruptDatabase(conversionErr)
 		}
-		if node.Excluded, err = intBool(excluded); err != nil {
-			rows.Close()
-			return nil, corruptDatabase(err)
+		if node.Excluded, conversionErr = intBool(excluded); conversionErr != nil {
+			nodeRows.Close()
+			return nil, corruptDatabase(conversionErr)
 		}
+		node.Provider, node.Protocol = provider.ID(rawProvider), provider.Protocol(rawProtocol)
 		node.Port, node.Health, node.UDPHealth, node.TCPRTT, node.ProbedAt = uint16(port), NodeHealth(health), UDPHealth(udp), time.Duration(rtt), timeFromNullable(probed)
 		snapshot.Nodes = append(snapshot.Nodes, node)
+		providerSnapshot, available := snapshot.Providers[node.Provider]
+		if !available {
+			nodeRows.Close()
+			return nil, corruptDatabase(errors.New("node references absent provider"))
+		}
+		providerSnapshot.Nodes = append(providerSnapshot.Nodes, provider.Node{
+			ID: node.ID, AuthorityID: node.AuthorityID, Protocol: node.Protocol, Host: node.Host, Port: node.Port,
+			Name: node.Name, Group: node.Group, Model: node.Model, Weight: node.Weight, Auto: node.Auto, Eligible: node.Eligible,
+		})
+		snapshot.Providers[node.Provider] = providerSnapshot
 	}
-	if err := rows.Close(); err != nil {
+	if err := nodeRows.Close(); err != nil {
 		return nil, corruptDatabase(err)
 	}
-	if err := rows.Err(); err != nil {
+	if err := nodeRows.Err(); err != nil {
 		return nil, corruptDatabase(err)
 	}
 	snapshot.Selectors = make(map[string]NodeRef)
-	selectorRows, err := tx.Query("SELECT selector, node_id, generation, tombstoned, tombstone_until_ns FROM active_session_selectors WHERE session_id = 1")
+	selectorRows, err := tx.Query("SELECT selector, node_id FROM active_session_selectors WHERE session_id = 1")
 	if err != nil {
 		return nil, corruptDatabase(err)
 	}
 	for selectorRows.Next() {
 		var selector string
 		var reference NodeRef
-		var generation, tombstoned int64
-		var until sql.NullInt64
-		if err := selectorRows.Scan(&selector, &reference.NodeID, &generation, &tombstoned, &until); err != nil {
+		if err := selectorRows.Scan(&selector, &reference.NodeID); err != nil {
 			selectorRows.Close()
 			return nil, corruptDatabase(err)
 		}
-		if generation < 0 {
-			selectorRows.Close()
-			return nil, corruptDatabase(errors.New("negative selector generation"))
-		}
-		var err error
-		if reference.Tombstoned, err = intBool(tombstoned); err != nil {
-			selectorRows.Close()
-			return nil, corruptDatabase(err)
-		}
-		reference.Generation = uint64(generation)
-		reference.TombstoneUntil = timeFromNullable(until)
 		if _, duplicate := snapshot.Selectors[selector]; duplicate {
 			selectorRows.Close()
 			return nil, corruptDatabase(errors.New("duplicate active selector"))

@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/kfadapter/kfadapter/internal/endpoint"
 )
@@ -41,12 +40,8 @@ type Link struct {
 // Metadata is safe for the ordinary authenticated browser API. It intentionally
 // contains neither the stable URL token nor derived SOCKS credentials.
 type Metadata struct {
-	Active                bool      `json:"active"`
-	Generation            uint64    `json:"generation"`
-	NodeCount             int       `json:"nodeCount"`
-	LastFetchedAt         time.Time `json:"lastFetchedAt,omitempty"`
-	LastFetchedGeneration uint64    `json:"lastFetchedGeneration,omitempty"`
-	ReloadRecommended     bool      `json:"reloadRecommended"`
+	Active    bool `json:"active"`
+	NodeCount int  `json:"nodeCount"`
 }
 
 // Render emits padded Base64 of deterministic newline-delimited SOCKS5 links.

@@ -35,23 +35,26 @@ func (e publicError) Code() string    { return "access_error" }
 func (e publicError) HTTPStatus() int { return e.status }
 
 type fakeBackend struct {
-	mu                  sync.Mutex
-	accessInitialized   bool
-	accessToken         string
-	accessSetupCalls    int
-	accessLoginCalls    int
-	accessSetupStarted  chan<- struct{}
-	accessSetupRelease  <-chan struct{}
-	nodes               []Node
-	nodeDetails         NodeDetails
-	nodeDetailsCalls    int
-	nodeDetailsID       string
-	accountLoginCalls   int
-	accountLoginStarted chan<- struct{}
-	accountLoginRelease <-chan struct{}
-	logoutCalls         int
-	events              chan Event
-	subscribed          chan struct{}
+	mu                   sync.Mutex
+	accessInitialized    bool
+	accessToken          string
+	accessSetupCalls     int
+	accessLoginCalls     int
+	accessSetupStarted   chan<- struct{}
+	accessSetupRelease   <-chan struct{}
+	nodes                []Node
+	nodeDetails          NodeDetails
+	nodeDetailsCalls     int
+	nodeDetailsID        string
+	accountLoginCalls    int
+	accountLoginProvider string
+	accountLoginStarted  chan<- struct{}
+	accountLoginRelease  <-chan struct{}
+	logoutCalls          int
+	logoutProvider       string
+	refreshProvider      string
+	events               chan Event
+	subscribed           chan struct{}
 }
 
 func (f *fakeBackend) AccessStatus(context.Context) (AccessStatus, error) {
@@ -92,7 +95,7 @@ func (f *fakeBackend) AccessLogin(_ context.Context, token string) error {
 }
 
 func (f *fakeBackend) Status(context.Context) (Status, error) {
-	return Status{State: "ready", Account: &Account{Display: "person@example.com"}}, nil
+	return Status{State: "ready", Providers: []string{"kuaifan"}, Accounts: map[string]Account{"kuaifan": {Provider: "kuaifan", Display: "person@example.com", Tier: "Standard"}}}, nil
 }
 func (f *fakeBackend) Nodes(context.Context) ([]Node, error) {
 	f.mu.Lock()
@@ -109,6 +112,7 @@ func (f *fakeBackend) NodeDetails(_ context.Context, id string) (NodeDetails, er
 func (f *fakeBackend) Login(_ context.Context, input LoginInput) (Account, error) {
 	f.mu.Lock()
 	f.accountLoginCalls++
+	f.accountLoginProvider = input.Provider
 	started, release := f.accountLoginStarted, f.accountLoginRelease
 	f.mu.Unlock()
 	if started != nil {
@@ -120,15 +124,21 @@ func (f *fakeBackend) Login(_ context.Context, input LoginInput) (Account, error
 	if input.Account == "fail@example.com" {
 		return Account{}, errors.New("rejected")
 	}
-	return Account{Display: input.Account}, nil
+	return Account{Provider: input.Provider, Display: input.Account}, nil
 }
-func (f *fakeBackend) Logout(context.Context) error {
+func (f *fakeBackend) Logout(_ context.Context, provider string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logoutCalls++
+	f.logoutProvider = provider
 	return nil
 }
-func (f *fakeBackend) Refresh(context.Context) error { return nil }
+func (f *fakeBackend) Refresh(_ context.Context, provider string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshProvider = provider
+	return nil
+}
 func (f *fakeBackend) Probe(context.Context, string) (ProbeResult, error) {
 	return ProbeResult{Health: "healthy", ProbedAt: time.Now().UTC()}, nil
 }
@@ -158,7 +168,7 @@ type fakeSubscriptions struct {
 func newFakeSubscriptions() *fakeSubscriptions {
 	return &fakeSubscriptions{
 		binding:  base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
-		metadata: SubscriptionMetadata{Active: true, Generation: 7, NodeCount: 1},
+		metadata: SubscriptionMetadata{Active: true, NodeCount: 1},
 	}
 }
 
@@ -169,7 +179,7 @@ func (s *fakeSubscriptions) SubscriptionURL(_ context.Context, baseURL, _ string
 	s.mu.Lock()
 	s.urlCalls++
 	s.mu.Unlock()
-	return SubscriptionURL{URL: strings.TrimRight(baseURL, "/") + "/sub/" + s.binding, Generation: s.metadata.Generation}, nil
+	return SubscriptionURL{URL: strings.TrimRight(baseURL, "/") + "/sub/" + s.binding}, nil
 }
 func (s *fakeSubscriptions) ServeSubscription(w http.ResponseWriter, _ *http.Request, binding, _ string) {
 	if binding != s.binding {
@@ -541,7 +551,7 @@ func TestAccountLogoutPreservesBrowserAccess(t *testing.T) {
 	api := newTestAPI(t, backend, newFakeSubscriptions())
 	cookie, csrf := establish(t, api)
 
-	missingCSRF := request(api, http.MethodPost, "/api/v1/auth/logout", `{}`, cookie, testOrigin)
+	missingCSRF := request(api, http.MethodPost, "/api/v1/auth/logout", `{"provider":"kuaifan"}`, cookie, testOrigin)
 	if missingCSRF.Code != http.StatusForbidden {
 		t.Fatalf("account logout without csrf = %d", missingCSRF.Code)
 	}
@@ -552,20 +562,22 @@ func TestAccountLogoutPreservesBrowserAccess(t *testing.T) {
 		t.Fatalf("account logout backend calls without csrf = %d", logoutCalls)
 	}
 
-	logout := requestWithCSRF(api, http.MethodPost, "/api/v1/auth/logout", `{}`, cookie, csrf)
+	logout := requestWithCSRF(api, http.MethodPost, "/api/v1/auth/logout", `{"provider":"kuaifan"}`, cookie, csrf)
 	if logout.Code != http.StatusNoContent || logout.Header().Get("Cache-Control") != "no-store" || logout.Header().Get("Set-Cookie") != "" {
 		t.Fatalf("account logout = %d %#v", logout.Code, logout.Header())
 	}
 	backend.mu.Lock()
 	logoutCalls = backend.logoutCalls
+	logoutProvider := backend.logoutProvider
 	backend.mu.Unlock()
-	if logoutCalls != 1 {
-		t.Fatalf("account logout backend calls = %d", logoutCalls)
+	if logoutCalls != 1 || logoutProvider != "kuaifan" {
+		t.Fatalf("account logout backend = calls:%d provider:%q", logoutCalls, logoutProvider)
 	}
 	accessStatus := request(api, http.MethodGet, "/api/v1/access/status", "", cookie, "")
 	assertAccessStatus(t, accessStatus, true, true, true)
-	if status := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); status.Code != http.StatusOK {
-		t.Fatalf("status after account logout = %d", status.Code)
+	status := request(api, http.MethodGet, "/api/v1/status", "", cookie, "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"providers":["kuaifan"]`) || !strings.Contains(status.Body.String(), `"accounts":{"kuaifan"`) || !strings.Contains(status.Body.String(), `"tier":"Standard","subscriptionActive":false`) || strings.Contains(status.Body.String(), "person@example.com") || strings.Contains(status.Body.String(), "subscriptionEndsAt") {
+		t.Fatalf("provider status after account logout = %d: %s", status.Code, status.Body.String())
 	}
 }
 
@@ -574,17 +586,23 @@ func TestAuthenticatedMutationsAccountLoginAndAccessLock(t *testing.T) {
 	api := newTestAPI(t, backend, newFakeSubscriptions())
 	cookie, csrf := establish(t, api)
 
-	missingCSRF := request(api, http.MethodPost, "/api/v1/control/refresh", `{}`, cookie, testOrigin)
+	missingCSRF := request(api, http.MethodPost, "/api/v1/control/refresh", `{"provider":"kuaifan"}`, cookie, testOrigin)
 	if missingCSRF.Code != http.StatusForbidden {
 		t.Fatalf("mutation without csrf = %d", missingCSRF.Code)
 	}
-	refreshed := requestWithCSRF(api, http.MethodPost, "/api/v1/control/refresh", `{}`, cookie, csrf)
+	refreshed := requestWithCSRF(api, http.MethodPost, "/api/v1/control/refresh", `{"provider":"kuaifan"}`, cookie, csrf)
 	if refreshed.Code != http.StatusAccepted {
 		t.Fatalf("refresh = %d: %s", refreshed.Code, refreshed.Body.String())
 	}
-	accountLogin := requestWithCSRF(api, http.MethodPost, "/api/v1/auth/login", `{"account":"person@example.com","password":"password"}`, cookie, csrf)
+	accountLogin := requestWithCSRF(api, http.MethodPost, "/api/v1/auth/login", `{"provider":"kuaifan","account":"person@example.com","password":"password"}`, cookie, csrf)
 	if accountLogin.Code != http.StatusOK || strings.Contains(accountLogin.Body.String(), "person@example.com") {
 		t.Fatalf("account login = %d: %s", accountLogin.Code, accountLogin.Body.String())
+	}
+	backend.mu.Lock()
+	loginProvider, refreshProvider := backend.accountLoginProvider, backend.refreshProvider
+	backend.mu.Unlock()
+	if loginProvider != "kuaifan" || refreshProvider != "kuaifan" {
+		t.Fatalf("provider-keyed mutations routed login=%q refresh=%q", loginProvider, refreshProvider)
 	}
 	otherLogin := request(api, http.MethodPost, "/api/v1/access/login", `{"token":"`+validTestToken+`"}`, nil, testOrigin)
 	if otherLogin.Code != http.StatusOK {
@@ -622,7 +640,7 @@ func TestAccessLockCompletesDuringProviderLogin(t *testing.T) {
 
 	loginResponses := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		loginResponses <- requestWithCSRF(api, http.MethodPost, "/api/v1/auth/login", `{"account":"person@example.com","password":"password"}`, cookie, csrf)
+		loginResponses <- requestWithCSRF(api, http.MethodPost, "/api/v1/auth/login", `{"provider":"kuaifan","account":"person@example.com","password":"password"}`, cookie, csrf)
 	}()
 	select {
 	case <-started:
@@ -748,7 +766,7 @@ func TestNodeDetailsReturnsOnlyLocalCredentials(t *testing.T) {
 		ID: "node-alpha", Name: "Alpha", Group: "Core", Provider: "WIFIIN",
 		UpstreamHost: "upstream.example.test", UpstreamPort: 443,
 		SocksAddress: "127.0.0.1:10808", SocksUsername: "local-selector", SocksPassword: "local-password",
-		Health: "healthy", TCPLatencyMS: 17, Generation: 42,
+		Health: "healthy", TCPLatencyMS: 17,
 	}
 	backend := &fakeBackend{nodeDetails: expected}
 	api := newTestAPI(t, backend, newFakeSubscriptions())
@@ -769,7 +787,7 @@ func TestNodeDetailsReturnsOnlyLocalCredentials(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	if len(raw) != 12 {
+	if len(raw) != 11 {
 		t.Fatalf("node details response fields = %#v", raw)
 	}
 	for _, field := range []string{"loginToken", "providerToken", "tunnelPassword", "tunnelMethod", "providerExtension", "selector", "endpoint", "excluded", "activeConnections"} {
@@ -826,7 +844,7 @@ func TestStableSubscriptionURLAndRemovedRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := testOrigin + "/sub/" + subscriptions.binding
-	if result.URL != expected || result.Generation != 7 {
+	if result.URL != expected {
 		t.Fatalf("stable URL = %#v", result)
 	}
 	metadata := request(api, http.MethodGet, "/api/v1/subscription", "", cookie, "")

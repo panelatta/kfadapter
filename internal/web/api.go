@@ -94,8 +94,8 @@ type Backend interface {
 	Nodes(context.Context) ([]Node, error)
 	NodeDetails(context.Context, string) (NodeDetails, error)
 	Login(context.Context, LoginInput) (Account, error)
-	Logout(context.Context) error
-	Refresh(context.Context) error
+	Logout(context.Context, string) error
+	Refresh(context.Context, string) error
 	Probe(context.Context, string) (ProbeResult, error)
 	Diagnostics(context.Context) (any, error)
 }
@@ -123,8 +123,7 @@ type AccessStatus struct {
 
 // SubscriptionURL is a reusable, account-bound subscription endpoint.
 type SubscriptionURL struct {
-	URL        string `json:"url"`
-	Generation uint64 `json:"generation"`
+	URL string `json:"url"`
 }
 
 // Status is the browser-safe operational state.
@@ -132,7 +131,8 @@ type Status struct {
 	State        string               `json:"state"`
 	Version      string               `json:"version,omitempty"`
 	Deployment   Deployment           `json:"deployment"`
-	Account      *Account             `json:"account,omitempty"`
+	Providers    []string             `json:"providers"`
+	Accounts     map[string]Account   `json:"accounts,omitempty"`
 	ControlPlane ControlPlaneStatus   `json:"controlPlane"`
 	DataPlane    DataPlaneStatus      `json:"dataPlane"`
 	Nodes        NodeCounts           `json:"nodes"`
@@ -145,13 +145,16 @@ type Deployment struct {
 }
 
 type Account struct {
-	Display   string    `json:"display,omitempty"`
-	IsVIP     bool      `json:"isVip"`
-	VIPEndsAt time.Time `json:"vipEndsAt,omitempty"`
+	Provider           string     `json:"provider"`
+	Display            string     `json:"display,omitempty"`
+	Tier               string     `json:"tier"`
+	SubscriptionActive bool       `json:"subscriptionActive"`
+	SubscriptionEndsAt *time.Time `json:"subscriptionEndsAt,omitempty"`
 }
 
 // LoginInput carries provider credentials transiently to the runtime.
 type LoginInput struct {
+	Provider string
 	Account  string
 	Password string
 }
@@ -198,7 +201,6 @@ type NodeDetails struct {
 	SocksPassword string `json:"socksPassword"`
 	Health        string `json:"health"`
 	TCPLatencyMS  int    `json:"tcpLatencyMs"`
-	Generation    uint64 `json:"generation"`
 }
 
 // ProbeResult reports the latest bounded TCP probe for one node.
@@ -212,12 +214,8 @@ type ProbeResult struct {
 // SubscriptionMetadata intentionally excludes subscription URLs and selector
 // credentials. It matches the metadata shown by the Subscription screen.
 type SubscriptionMetadata struct {
-	Active                bool      `json:"active"`
-	Generation            uint64    `json:"generation"`
-	NodeCount             int       `json:"nodeCount"`
-	LastFetchedAt         time.Time `json:"lastFetchedAt,omitempty"`
-	LastFetchedGeneration uint64    `json:"lastFetchedGeneration,omitempty"`
-	ReloadRecommended     bool      `json:"reloadRecommended"`
+	Active    bool `json:"active"`
+	NodeCount int  `json:"nodeCount"`
 }
 
 // Event is a coarse, browser-safe SSE event. Data is validated and bounded by
@@ -535,7 +533,9 @@ func (a *API) status(w http.ResponseWriter, r *http.Request) {
 		a.writeBackendError(w, err, "status_unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	status.Account = redactAccount(status.Account)
+	for id, account := range status.Accounts {
+		status.Accounts[id] = *redactAccount(&account)
+	}
 	status.Version = firstNonEmpty(status.Version, a.config.Version)
 	if status.Deployment.StartedAt.IsZero() {
 		status.Deployment.StartedAt = a.config.StartedAt
@@ -591,6 +591,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request, token string) {
 		return
 	}
 	var body struct {
+		Provider string `json:"provider"`
 		Account  string `json:"account"`
 		Password string `json:"password"`
 	}
@@ -599,7 +600,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request, token string) {
 		return
 	}
 	defer clearString(&body.Password)
-	if !validEmail(body.Account) || body.Password == "" {
+	if !validProviderID(body.Provider) || !validEmail(body.Account) || body.Password == "" {
 		a.writeProblem(w, http.StatusBadRequest, "invalid_login", "Invalid login", "")
 		return
 	}
@@ -619,7 +620,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request, token string) {
 	}
 	successful, countedFailure := false, false
 	defer func() { a.sessions.finishLogin(token, successful, countedFailure) }()
-	account, err := a.backend.Login(r.Context(), LoginInput{Account: body.Account, Password: body.Password})
+	account, err := a.backend.Login(r.Context(), LoginInput{Provider: body.Provider, Account: body.Account, Password: body.Password})
 	if err != nil {
 		countedFailure = loginFailureCounts(err)
 		a.writeBackendError(w, err, "login_failed", http.StatusUnauthorized)
@@ -634,11 +635,18 @@ func (a *API) accountLogout(w http.ResponseWriter, r *http.Request) {
 		a.backendUnavailable(w)
 		return
 	}
-	if err := a.requireEmptyJSON(w, r); err != nil {
+	var body struct {
+		Provider string `json:"provider"`
+	}
+	if err := readJSONBody(w, r, a.config.JSONBodyLimit, &body); err != nil {
 		a.writeBodyError(w, err)
 		return
 	}
-	if err := a.backend.Logout(r.Context()); err != nil {
+	if !validProviderID(body.Provider) {
+		a.writeProblem(w, http.StatusBadRequest, "invalid_provider", "Invalid provider", "")
+		return
+	}
+	if err := a.backend.Logout(r.Context(), body.Provider); err != nil {
 		a.writeBackendError(w, err, "logout_failed", http.StatusServiceUnavailable)
 		return
 	}
@@ -667,11 +675,18 @@ func (a *API) refresh(w http.ResponseWriter, r *http.Request) {
 		a.backendUnavailable(w)
 		return
 	}
-	if err := a.requireEmptyJSON(w, r); err != nil {
+	var body struct {
+		Provider string `json:"provider"`
+	}
+	if err := readJSONBody(w, r, a.config.JSONBodyLimit, &body); err != nil {
 		a.writeBodyError(w, err)
 		return
 	}
-	if err := a.backend.Refresh(r.Context()); err != nil {
+	if body.Provider != "" && !validProviderID(body.Provider) {
+		a.writeProblem(w, http.StatusBadRequest, "invalid_provider", "Invalid provider", "")
+		return
+	}
+	if err := a.backend.Refresh(r.Context(), body.Provider); err != nil {
 		a.writeBackendError(w, err, "refresh_failed", http.StatusServiceUnavailable)
 		return
 	}
@@ -1031,6 +1046,19 @@ func stateChanging(method string) bool {
 	default:
 		return false
 	}
+}
+
+func validProviderID(value string) bool {
+	if len(value) == 0 || len(value) > 32 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validEmail(value string) bool {

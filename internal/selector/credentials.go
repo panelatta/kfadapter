@@ -9,10 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"sort"
 	"strings"
 	"time"
 
+	"github.com/kfadapter/kfadapter/internal/provider"
 	"github.com/kfadapter/kfadapter/internal/state"
 	"golang.org/x/net/idna"
 )
@@ -23,35 +23,21 @@ const (
 	selectorBytes  = 12
 	passwordBytes  = 18
 
-	// DefaultTombstoneGrace keeps removed selectors as explicit failures long
-	// enough for consumers to reload an updated subscription.
-	DefaultTombstoneGrace = 24 * time.Hour
-	// MaxLiveSelectorsPerGeneration bounds active selector references.
-	MaxLiveSelectorsPerGeneration = 4096
-	// MaxTombstonesPerGeneration bounds removed selector references.
-	MaxTombstonesPerGeneration = 8192
-	maxPreviousSelectors       = 2 * (MaxLiveSelectorsPerGeneration + MaxTombstonesPerGeneration)
+	// MaxLiveSelectors bounds active selector references in one immutable epoch.
+	MaxLiveSelectors = 4096
 )
 
 var (
-	ErrInvalidIdentity   = errors.New("invalid node identity")
-	ErrInvalidKey        = errors.New("invalid selector key")
-	ErrUnknownGeneration = errors.New("unknown selector generation")
-	ErrDuplicateNodeID   = errors.New("duplicate node id")
-	ErrTooManyNodes      = errors.New("too many live selector nodes")
-	ErrTooManySelectors  = errors.New("too many prior selector references")
+	ErrInvalidIdentity = errors.New("invalid node identity")
+	ErrInvalidKey      = errors.New("invalid selector key")
+	ErrDuplicateNodeID = errors.New("duplicate node id")
+	ErrTooManyNodes    = errors.New("too many live selector nodes")
 )
 
-var lookupIDNA = idna.New(
-	idna.MapForLookup(),
-	idna.StrictDomainName(true),
-	idna.ValidateForRegistration(),
-	idna.VerifyDNSLength(true),
-)
+var lookupIDNA = idna.New(idna.MapForLookup(), idna.StrictDomainName(true), idna.ValidateForRegistration(), idna.VerifyDNSLength(true))
 
-// NodeIdentity is the stable logical line and upstream endpoint that determine
-// a selector. Display metadata deliberately does not participate in credential
-// derivation.
+// NodeIdentity carries a stable node ID and its route. Only NodeID participates
+// in selector derivation; the route remains available to callers that need it.
 type NodeIdentity struct {
 	NodeID   string
 	Provider string
@@ -59,7 +45,7 @@ type NodeIdentity struct {
 	Port     int
 }
 
-// CanonicalIdentity is a validated normal form suitable for fingerprints.
+// CanonicalIdentity is a normalized route used by provider node-ID builders.
 type CanonicalIdentity struct {
 	NodeID   string
 	Provider string
@@ -67,14 +53,11 @@ type CanonicalIdentity struct {
 	Port     uint16
 }
 
-// Canonicalize normalizes a logical ID, provider, host, and port. An empty
-// logical ID is permitted only while constructing a new group-scoped line ID;
-// credential derivation requires a non-empty logical ID.
 func Canonicalize(identity NodeIdentity) (CanonicalIdentity, error) {
 	if len(identity.NodeID) > 256 || strings.IndexByte(identity.NodeID, 0) >= 0 {
 		return CanonicalIdentity{}, fmt.Errorf("%w: invalid logical node id", ErrInvalidIdentity)
 	}
-	provider, err := canonicalProvider(identity.Provider)
+	providerID, err := canonicalProvider(identity.Provider)
 	if err != nil {
 		return CanonicalIdentity{}, err
 	}
@@ -85,25 +68,15 @@ func Canonicalize(identity NodeIdentity) (CanonicalIdentity, error) {
 	if identity.Port < 1 || identity.Port > 65535 {
 		return CanonicalIdentity{}, fmt.Errorf("%w: port out of range", ErrInvalidIdentity)
 	}
-	return CanonicalIdentity{NodeID: identity.NodeID, Provider: provider, Host: host, Port: uint16(identity.Port)}, nil
+	return CanonicalIdentity{NodeID: identity.NodeID, Provider: providerID, Host: host, Port: uint16(identity.Port)}, nil
 }
 
-func canonicalProvider(provider string) (string, error) {
-	if provider == "" {
-		return "", fmt.Errorf("%w: empty provider", ErrInvalidIdentity)
+func canonicalProvider(raw string) (string, error) {
+	canonical := strings.ToLower(strings.TrimSpace(raw))
+	if !provider.ID(canonical).Valid() {
+		return "", fmt.Errorf("%w: invalid provider id", ErrInvalidIdentity)
 	}
-	var builder strings.Builder
-	builder.Grow(len(provider))
-	for _, value := range []byte(provider) {
-		if value > 0x7f || value == 0 || value <= ' ' || value == 0x7f {
-			return "", fmt.Errorf("%w: provider is not printable ASCII", ErrInvalidIdentity)
-		}
-		if value >= 'a' && value <= 'z' {
-			value -= 'a' - 'A'
-		}
-		builder.WriteByte(value)
-	}
-	return builder.String(), nil
+	return canonical, nil
 }
 
 func canonicalHost(host string) (string, error) {
@@ -124,39 +97,27 @@ func canonicalHost(host string) (string, error) {
 	return ascii, nil
 }
 
-// Fingerprint serializes the current logical-node credential input.
-func (i CanonicalIdentity) Fingerprint() []byte {
-	return []byte("credential\x00" + i.NodeID + "\x00" + i.Provider + "\x00" + i.Host + "\x00" + fmt.Sprintf("%d", i.Port))
-}
+// Credentials are the opaque username/password placed in a SOCKS URL.
+type Credentials struct{ Selector, Password string }
 
-// Credentials are the opaque username/password placed in a logical SOCKS URL.
-type Credentials struct {
-	Selector string
-	Password string
-}
+func validNodeID(id string) bool { return id != "" && len(id) <= 256 && strings.IndexByte(id, 0) < 0 }
 
-// Derive creates HMAC-derived selector and password credentials.
+// Derive creates credentials from the complete stable NodeID only.
 func Derive(identity NodeIdentity, selectorKey, proxyAuthKey []byte) (Credentials, error) {
-	canonical, err := Canonicalize(identity)
-	if err != nil {
-		return Credentials{}, err
-	}
-	return DeriveCanonical(canonical, selectorKey, proxyAuthKey)
+	return DeriveNodeID(identity.NodeID, selectorKey, proxyAuthKey)
 }
 
-// DeriveCanonical is Derive for a previously canonical identity.
-func DeriveCanonical(identity CanonicalIdentity, selectorKey, proxyAuthKey []byte) (Credentials, error) {
-	if identity.NodeID == "" {
+func DeriveNodeID(nodeID string, selectorKey, proxyAuthKey []byte) (Credentials, error) {
+	if !validNodeID(nodeID) {
 		return Credentials{}, ErrInvalidIdentity
 	}
 	if len(selectorKey) != sha256.Size || len(proxyAuthKey) != sha256.Size {
 		return Credentials{}, ErrInvalidKey
 	}
-	selectorMAC := mac(selectorKey, identity.Fingerprint())
+	selectorMAC := mac(selectorKey, []byte("selector\x00"+nodeID))
 	selector := selectorPrefix + base64.RawURLEncoding.EncodeToString(selectorMAC[:selectorBytes])
 	passwordMAC := mac(proxyAuthKey, []byte("selector-password\x00"+selector))
-	password := passwordPrefix + base64.RawURLEncoding.EncodeToString(passwordMAC[:passwordBytes])
-	return Credentials{Selector: selector, Password: password}, nil
+	return Credentials{Selector: selector, Password: passwordPrefix + base64.RawURLEncoding.EncodeToString(passwordMAC[:passwordBytes])}, nil
 }
 
 func mac(key, message []byte) []byte {
@@ -165,213 +126,82 @@ func mac(key, message []byte) []byte {
 	return result.Sum(nil)
 }
 
-// Registry derives and authenticates exactly one immutable credential
-// generation. Account cutover constructs a replacement registry and the
-// runtime swaps that pointer atomically with its SOCKS authority.
-type Registry struct {
-	generation generation
-}
+// Registry derives and authenticates exactly one immutable key epoch.
+type Registry struct{ selectorKey, proxyAuthKey [sha256.Size]byte }
 
-type generation struct {
-	generation   uint64
-	selectorKey  [sha256.Size]byte
-	proxyAuthKey [sha256.Size]byte
-}
-
-// NewRegistry constructs a registry for one persisted subscription generation.
-// There is deliberately no pending or expiring credential authority.
-func NewRegistry(source state.SubscriptionGeneration) (*Registry, error) {
-	current, err := makeGeneration(source)
-	if err != nil {
-		return nil, err
-	}
-	return &Registry{generation: *current}, nil
-}
-
-func makeGeneration(source state.SubscriptionGeneration) (*generation, error) {
-	if source.Generation == 0 || len(source.SelectorKey) != sha256.Size || len(source.ProxyAuthKey) != sha256.Size {
+func NewRegistry(source state.SubscriptionAuthority) (*Registry, error) {
+	if len(source.SelectorKey) != sha256.Size || len(source.ProxyAuthKey) != sha256.Size {
 		return nil, ErrInvalidKey
 	}
-	result := &generation{generation: source.Generation}
-	copy(result.selectorKey[:], source.SelectorKey)
-	copy(result.proxyAuthKey[:], source.ProxyAuthKey)
-	return result, nil
+	registry := &Registry{}
+	copy(registry.selectorKey[:], source.SelectorKey)
+	copy(registry.proxyAuthKey[:], source.ProxyAuthKey)
+	return registry, nil
 }
 
-// Generations returns the sole active generation in authentication priority.
-func (r *Registry) Generations() []uint64 {
+func (r *Registry) Credentials(identity NodeIdentity) (Credentials, bool) {
 	if r == nil {
-		return nil
-	}
-	return []uint64{r.generation.generation}
-}
-
-// Credentials derives credentials only for the current generation.
-func (r *Registry) Credentials(want uint64, identity NodeIdentity) (Credentials, bool) {
-	keys := r.load(want)
-	if keys == nil {
 		return Credentials{}, false
 	}
-	credential, err := Derive(identity, keys.selectorKey[:], keys.proxyAuthKey[:])
+	credential, err := DeriveNodeID(identity.NodeID, r.selectorKey[:], r.proxyAuthKey[:])
 	return credential, err == nil
 }
 
-// Authenticate verifies fixed-format credentials in constant time. A
-// successful response always names the sole generation that created it.
-func (r *Registry) Authenticate(selector, password string) (uint64, bool) {
+func (r *Registry) Authenticate(selector, password string) bool {
 	return r.AuthenticateAt(selector, password, time.Now())
 }
-
-// AuthenticateAt is retained for clock-controlled callers; one-current
-// authority has no expiry branch.
-func (r *Registry) AuthenticateAt(selector, password string, _ time.Time) (uint64, bool) {
-	keys := r.load(0)
-	if keys == nil || !validSelector(selector) || !validPassword(password) {
-		return 0, false
+func (r *Registry) AuthenticateAt(selector, password string, _ time.Time) bool {
+	if r == nil || !validSelector(selector) || !validPassword(password) {
+		return false
 	}
-	expectedMAC := mac(keys.proxyAuthKey[:], []byte("selector-password\x00"+selector))
+	expectedMAC := mac(r.proxyAuthKey[:], []byte("selector-password\x00"+selector))
 	expected := passwordPrefix + base64.RawURLEncoding.EncodeToString(expectedMAC[:passwordBytes])
-	if subtle.ConstantTimeCompare([]byte(password), []byte(expected)) != 1 {
-		return 0, false
-	}
-	return keys.generation, true
+	return subtle.ConstantTimeCompare([]byte(password), []byte(expected)) == 1
 }
 
-// Resolve authenticates then resolves against a caller-pinned runtime
-// snapshot. A credential from any superseded generation cannot resolve.
 func (r *Registry) Resolve(snapshot *state.RuntimeSnapshot, selector, password string, now time.Time) (state.Node, state.NodeRef, error) {
-	generation, authenticated := r.AuthenticateAt(selector, password, now)
-	if !authenticated {
+	if !r.AuthenticateAt(selector, password, now) {
 		return state.Node{}, state.NodeRef{}, state.ErrSelectorUnknown
 	}
-	node, ref, err := snapshot.ResolveSelector(selector, now)
-	if err != nil || ref.Generation != generation {
-		return state.Node{}, ref, state.ErrSelectorUnknown
-	}
-	return node, ref, nil
+	return snapshot.ResolveSelector(selector, now)
 }
 
-// BuildResult is a complete immutable selector view for the current generation.
 type BuildResult struct {
 	Nodes     []state.Node
 	Selectors map[string]state.NodeRef
 }
 
-// BuildWithTombstones creates deterministic selectors and carries only this
-// generation's prior selector state forward. An active tombstone always wins
-// over a reappearing selector, and a selector never remaps to another node ID.
-func (r *Registry) BuildWithTombstones(want uint64, nodes []state.Node, previous map[string]state.NodeRef, now time.Time) (BuildResult, error) {
-	keys := r.load(want)
-	if keys == nil {
-		return BuildResult{}, ErrUnknownGeneration
+// Build derives live selectors deterministically from current node identities.
+func (r *Registry) Build(nodes []state.Node) (BuildResult, error) {
+	if r == nil {
+		return BuildResult{}, ErrInvalidKey
 	}
-	if len(nodes) > MaxLiveSelectorsPerGeneration {
+	if len(nodes) > MaxLiveSelectors {
 		return BuildResult{}, ErrTooManyNodes
 	}
-	if len(previous) > maxPreviousSelectors {
-		return BuildResult{}, ErrTooManySelectors
-	}
 	selected := make([]state.Node, 0, len(nodes))
+	selectors := make(map[string]state.NodeRef, len(nodes))
 	ids := make(map[string]struct{}, len(nodes))
-	activeIndex := make(map[string]int, len(nodes))
-	for _, source := range nodes {
-		if source.ID == "" {
+	for _, node := range nodes {
+		if !validNodeID(node.ID) {
 			return BuildResult{}, ErrDuplicateNodeID
 		}
-		if _, duplicate := ids[source.ID]; duplicate {
+		if _, duplicate := ids[node.ID]; duplicate {
 			return BuildResult{}, ErrDuplicateNodeID
 		}
-		ids[source.ID] = struct{}{}
-		identity, err := Canonicalize(NodeIdentity{NodeID: source.ID, Provider: source.Provider, Host: source.Host, Port: int(source.Port)})
-		if err != nil {
-			return BuildResult{}, err
+		ids[node.ID] = struct{}{}
+		credential, ok := r.Credentials(NodeIdentity{NodeID: node.ID})
+		if !ok {
+			return BuildResult{}, ErrInvalidIdentity
 		}
-		credential, err := DeriveCanonical(identity, keys.selectorKey[:], keys.proxyAuthKey[:])
-		if err != nil {
-			return BuildResult{}, err
-		}
-		if _, collision := activeIndex[credential.Selector]; collision {
+		if _, collision := selectors[credential.Selector]; collision {
 			return BuildResult{}, ErrDuplicateNodeID
 		}
-		source.Provider = identity.Provider
-		source.Host = identity.Host
-		source.Port = identity.Port
-		source.Selector = credential.Selector
-		activeIndex[source.Selector] = len(selected)
-		selected = append(selected, source)
+		node.Selector = credential.Selector
+		selected = append(selected, node)
+		selectors[credential.Selector] = state.NodeRef{NodeID: node.ID}
 	}
-	active := make([]bool, len(selected))
-	for index := range active {
-		active[index] = true
-	}
-	tombstones := make([]tombstone, 0, MaxTombstonesPerGeneration)
-	for name, ref := range previous {
-		if ref.Generation != want {
-			continue
-		}
-		index, reappeared := activeIndex[name]
-		if ref.Tombstoned {
-			if !ref.IsTombstoned(now) {
-				continue
-			}
-			if reappeared {
-				active[index] = false
-			}
-			ref.NodeID = ""
-			tombstones = append(tombstones, tombstone{selector: name, ref: ref})
-			continue
-		}
-		if reappeared && ref.NodeID == selected[index].ID {
-			continue
-		}
-		if reappeared {
-			active[index] = false
-		}
-		tombstones = append(tombstones, tombstone{selector: name, ref: state.NodeRef{Generation: want, Tombstoned: true, TombstoneUntil: now.UTC().Add(DefaultTombstoneGrace)}})
-	}
-	sort.Slice(tombstones, func(i, j int) bool {
-		if !tombstones[i].ref.TombstoneUntil.Equal(tombstones[j].ref.TombstoneUntil) {
-			return tombstones[i].ref.TombstoneUntil.Before(tombstones[j].ref.TombstoneUntil)
-		}
-		return tombstones[i].selector < tombstones[j].selector
-	})
-	if len(tombstones) > MaxTombstonesPerGeneration {
-		tombstones = tombstones[len(tombstones)-MaxTombstonesPerGeneration:]
-	}
-	result := BuildResult{Nodes: make([]state.Node, 0, len(selected)), Selectors: make(map[string]state.NodeRef, len(selected)+len(tombstones))}
-	for index, source := range selected {
-		if !active[index] {
-			continue
-		}
-		result.Nodes = append(result.Nodes, source)
-		result.Selectors[source.Selector] = state.NodeRef{NodeID: source.ID, Generation: want}
-	}
-	for _, entry := range tombstones {
-		result.Selectors[entry.selector] = entry.ref
-	}
-	return result, nil
-}
-
-type tombstone struct {
-	selector string
-	ref      state.NodeRef
-}
-
-// Build implements state.SelectorBuilder for callers that do not need prior
-// selector tombstones.
-func (r *Registry) Build(generation uint64, nodes []state.Node) (map[string]state.NodeRef, error) {
-	result, err := r.BuildWithTombstones(generation, nodes, nil, time.Now().UTC())
-	if err != nil {
-		return nil, err
-	}
-	return result.Selectors, nil
-}
-
-func (r *Registry) load(want uint64) *generation {
-	if r == nil || (want != 0 && r.generation.generation != want) {
-		return nil
-	}
-	return &r.generation
+	return BuildResult{Nodes: selected, Selectors: selectors}, nil
 }
 
 func validSelector(selector string) bool {
@@ -381,7 +211,6 @@ func validSelector(selector string) bool {
 	decoded, err := base64.RawURLEncoding.DecodeString(selector[len(selectorPrefix):])
 	return err == nil && len(decoded) == selectorBytes
 }
-
 func validPassword(password string) bool {
 	if len(password) != len(passwordPrefix)+base64.RawURLEncoding.EncodedLen(passwordBytes) || !strings.HasPrefix(password, passwordPrefix) {
 		return false

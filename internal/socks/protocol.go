@@ -1,4 +1,4 @@
-// Package socks provides the loopback-only SOCKS5 frontend for WIFIIN TCP.
+// Package socks provides the local SOCKS5 frontend for provider-dispatched transports.
 package socks
 
 import (

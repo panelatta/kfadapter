@@ -10,9 +10,11 @@ export type ServiceState =
 export type NodeHealth = "healthy" | "degraded" | "unhealthy" | "unknown";
 
 export interface AccountSummary {
+  provider: string;
   display: string;
-  isVip: boolean;
-  vipEndsAt?: string;
+  tier: string;
+  subscriptionActive: boolean;
+  subscriptionEndsAt?: string;
 }
 
 export interface StatusResponse {
@@ -22,7 +24,8 @@ export interface StatusResponse {
     mode: "container" | string;
     startedAt?: string;
   };
-  account?: AccountSummary;
+  providers: string[];
+  accounts?: Record<string, AccountSummary>;
   controlPlane: {
     lastRefreshAt?: string;
     nextRefreshAt?: string;
@@ -38,11 +41,7 @@ export interface StatusResponse {
   };
   subscription: {
     active: boolean;
-    generation: number;
     nodeCount: number;
-    lastFetchedAt?: string;
-    lastFetchedGeneration?: number;
-    reloadRecommended: boolean;
   };
 }
 
@@ -53,6 +52,7 @@ export interface NodeRecord {
   provider: string;
   health: NodeHealth;
   tcpLatencyMs?: number;
+  probeError?: string;
   udpHealth: "unavailable" | "healthy" | "unhealthy" | string;
   eligible: boolean;
   compatibilityError?: string;
@@ -70,7 +70,6 @@ export interface NodeDetails {
   socksPassword: string;
   health: NodeHealth;
   tcpLatencyMs?: number;
-  generation: number;
 }
 
 export interface NodesResponse {
@@ -79,16 +78,11 @@ export interface NodesResponse {
 
 export interface SubscriptionMetadata {
   active: boolean;
-  generation: number;
   nodeCount: number;
-  lastFetchedAt?: string;
-  lastFetchedGeneration?: number;
-  reloadRecommended: boolean;
 }
 
 export interface SubscriptionURLResponse {
   url: string;
-  generation: number;
 }
 
 
@@ -117,6 +111,6 @@ export interface ProbeResult {
 }
 
 export type EventMessage =
-  | { type: "state"; state: ServiceState; generation?: number }
-  | { type: "refresh"; state: ServiceState; generation?: number; complete: boolean }
+  | { type: "state"; state: ServiceState }
+  | { type: "refresh"; state: ServiceState; complete: boolean }
   | { type: "probe"; nodeId: string; health: NodeHealth; tcpLatencyMs?: number; probedAt: string };

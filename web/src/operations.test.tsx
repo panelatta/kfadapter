@@ -11,6 +11,8 @@ async function renderAt(path: string, inventory = nodes) {
   const api = makeApi(readyStatus(), inventory);
   render(<App api={api} />);
   await screen.findByRole("heading", { name: "Service status" });
+  await userEvent.click(screen.getByRole("button", { name: "KuaiFan" }));
+  await screen.findByRole("tree", { name: "Nodes by group" });
   await waitFor(() => expect(window.location.pathname).toBe("/"));
   return api;
 }
@@ -24,8 +26,10 @@ async function openGroup(name: string) {
 }
 
 describe("node inventory", () => {
-  it("uses canonical status routing and fetches safe SOCKS details only when opened", async () => {
+  it("shows upstream node details and copies a SOCKS5 URL only when opened", async () => {
     const api = await renderAt("/nodes");
+    const details = { ...chengduDetails, socksUsername: "local:user", socksPassword: "pass/word?value#" };
+    vi.mocked(api.nodeDetails).mockResolvedValue(details);
     expect(screen.getAllByText("Shanghai 01").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Chengdu 02").length).toBeGreaterThan(0);
     expect(screen.queryAllByText("Shanghai Archive")).toHaveLength(0);
@@ -33,7 +37,7 @@ describe("node inventory", () => {
     expect(api.nodeDetails).not.toHaveBeenCalled();
     await openGroup("West China");
     const detailButtons = screen.getAllByRole("button", { name: "Details for Chengdu 02" });
-    const probeButtons = screen.getAllByRole("button", { name: "Probe Chengdu 02" });
+    const probeButtons = screen.getAllByRole("button", { name: "Check TCP reachability for Chengdu 02" });
     expect(detailButtons.length).toBeGreaterThan(0);
     expect(probeButtons.length).toBeGreaterThan(0);
     expect(probeButtons[0].querySelector(".lucide-gauge")).toBeTruthy();
@@ -41,26 +45,31 @@ describe("node inventory", () => {
     await userEvent.hover(detailButtons[0]);
     expect(await screen.findByRole("tooltip", { name: "Details" })).toBeTruthy();
     await userEvent.hover(probeButtons[0]);
-    expect(await screen.findByRole("tooltip", { name: "Probe latency" })).toBeTruthy();
+    expect(await screen.findByRole("tooltip", { name: "Check TCP reachability" })).toBeTruthy();
 
     await userEvent.click(detailButtons[0]);
     expect(api.nodeDetails).toHaveBeenCalledOnce();
     expect(api.nodeDetails).toHaveBeenCalledWith("n-west");
     expect(await screen.findByRole("heading", { name: "Chengdu 02" })).toBeTruthy();
-    expect(screen.getAllByText(chengduDetails.socksAddress).length).toBeGreaterThan(0);
-    expect(screen.getByText(chengduDetails.socksUsername)).toBeTruthy();
-    expect(screen.getByText(chengduDetails.socksPassword)).toBeTruthy();
+    expect(screen.getByText(`${details.upstreamHost}:${details.upstreamPort}`)).toBeTruthy();
+    expect(screen.queryByText("Local SOCKS", { exact: true })).toBeNull();
+    expect(screen.queryByText("SOCKS username", { exact: true })).toBeNull();
+    expect(screen.queryByText("SOCKS password", { exact: true })).toBeNull();
     expect(screen.getByText("Latency", { exact: true })).toBeTruthy();
     expect(screen.queryByText("Active TCP", { exact: true })).toBeNull();
 
+    await userEvent.click(screen.getByRole("button", { name: "Copy SOCKS5 URL" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("socks5://local%3Auser:pass%2Fword%3Fvalue%23@127.0.0.1:10808");
+    expect(await screen.findByText("SOCKS5 URL copied.")).toBeTruthy();
+
     await userEvent.click(detailButtons[0]);
-    await waitFor(() => expect(screen.queryByText(chengduDetails.socksPassword)).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "Chengdu 02" })).toBeNull());
   });
 
   it("uses the accessible probe action and ignores stale details after close or lock", async () => {
     const api = await renderAt("/");
     await openGroup("West China");
-    await userEvent.click(screen.getAllByRole("button", { name: "Probe Chengdu 02" })[0]);
+    await userEvent.click(screen.getAllByRole("button", { name: "Check TCP reachability for Chengdu 02" })[0]);
     expect(api.probeNode).toHaveBeenCalledWith("n-west");
 
     const closedDetails = Promise.withResolvers<NodeDetails>();
@@ -74,7 +83,7 @@ describe("node inventory", () => {
     closedDetails.resolve(chengduDetails);
     await userEvent.click(detailButton);
     expect(await screen.findByText("Loading details")).toBeTruthy();
-    expect(screen.queryByText(chengduDetails.socksPassword)).toBeNull();
+    expect(screen.queryByText("SOCKS password", { exact: true })).toBeNull();
     await userEvent.click(detailButton);
 
     const sessionDetails = Promise.withResolvers<NodeDetails>();
@@ -83,25 +92,34 @@ describe("node inventory", () => {
     await userEvent.click(screen.getByRole("button", { name: "Lock console" }));
     expect(await screen.findByRole("heading", { name: "Unlock console" })).toBeTruthy();
     sessionDetails.resolve(chengduDetails);
-    await waitFor(() => expect(screen.queryByText(chengduDetails.socksPassword)).toBeNull());
+    await waitFor(() => expect(screen.queryByText("SOCKS password", { exact: true })).toBeNull());
     expect(api.clearSession).toHaveBeenCalled();
   });
 
-  it("marks a failed probe as Timeout in the row instead of raising an alert", async () => {
+  it("marks a timed-out TCP reachability check without raising an alert", async () => {
     const api = await renderAt("/");
-    vi.mocked(api.probeNode).mockRejectedValueOnce(new ApiError({ title: "Probe failed", status: 502, code: "probe_failed" }));
+    vi.mocked(api.probeNode).mockRejectedValueOnce(new ApiError({ title: "TCP reachability timed out", status: 504, code: "tcp_probe_timeout" }));
     await openGroup("West China");
-    expect(screen.getByLabelText("Latency 114 ms, Degraded")).toBeTruthy();
+    expect(screen.getByLabelText("TCP reachability 114 ms, Degraded")).toBeTruthy();
 
-    await userEvent.click(screen.getAllByRole("button", { name: "Probe Chengdu 02" })[0]);
+    await userEvent.click(screen.getAllByRole("button", { name: "Check TCP reachability for Chengdu 02" })[0]);
 
     expect(await screen.findByText("Timeout")).toBeTruthy();
-    expect(screen.getByLabelText("Latency Timeout, Unhealthy")).toBeTruthy();
+    expect(screen.getByLabelText("TCP reachability Timeout, Unhealthy")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
 
-    await userEvent.click(screen.getAllByRole("button", { name: "Probe Chengdu 02" })[0]);
-    expect(await screen.findByLabelText("Latency 84 ms, Healthy")).toBeTruthy();
+    await userEvent.click(screen.getAllByRole("button", { name: "Check TCP reachability for Chengdu 02" })[0]);
+    expect(await screen.findByLabelText("TCP reachability 84 ms, Healthy")).toBeTruthy();
     expect(screen.queryByText("Timeout")).toBeNull();
+  });
+
+  it("shows an ineligible node instead of mislabeling it as a timeout", async () => {
+    const api = await renderAt("/");
+    vi.mocked(api.probeNode).mockRejectedValueOnce(new ApiError({ title: "Node unavailable", status: 409, code: "node_ineligible" }));
+    await openGroup("West China");
+    await userEvent.click(screen.getAllByRole("button", { name: "Check TCP reachability for Chengdu 02" })[0]);
+    expect(await screen.findByText("Ineligible")).toBeTruthy();
+    expect(screen.getByLabelText("TCP reachability Ineligible, Unhealthy")).toBeTruthy();
   });
 
   it("prioritizes special groups and sorts China routes and their nodes", async () => {
@@ -147,7 +165,7 @@ describe("node inventory", () => {
     const probes = expectedNodeIDs.map(() => Promise.withResolvers<ProbeResult>());
     let probeIndex = 0;
     vi.mocked(api.probeNode).mockImplementation(() => probes[probeIndex++].promise);
-    const probeAll = screen.getByRole("button", { name: "Probe all nodes" }) as HTMLButtonElement;
+    const probeAll = screen.getByRole("button", { name: "Check TCP reachability for all nodes" }) as HTMLButtonElement;
 
     await userEvent.click(probeAll);
 
@@ -164,11 +182,26 @@ describe("node inventory", () => {
 describe("subscription URL", () => {
   it("copies the reusable URL from the canonical status page", async () => {
     await renderAt("/subscription");
+    await userEvent.click(screen.getByRole("button", { name: "Status" }));
     expect(await screen.findByText(currentConsumerURL)).toBeTruthy();
 
     await userEvent.click(screen.getByRole("button", { name: "Copy subscription link" }));
 
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(currentConsumerURL);
+    expect(await screen.findByText("Link copied.")).toBeTruthy();
+  });
+
+  it("falls back to the legacy copy command outside secure contexts", async () => {
+    const execCommand = vi.fn().mockReturnValue(true);
+    Object.defineProperty(document, "execCommand", { configurable: true, value: execCommand });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    window.history.replaceState(null, "", "/subscription");
+    render(<App api={makeApi(readyStatus())} />);
+    await screen.findByText(currentConsumerURL);
+
+    await userEvent.click(screen.getByRole("button", { name: "Copy subscription link" }));
+
+    expect(execCommand).toHaveBeenCalledWith("copy");
     expect(await screen.findByText("Link copied.")).toBeTruthy();
   });
 });

@@ -70,18 +70,13 @@ function parseNamedEvent(type: "state" | "refresh" | "probe", data: string): Eve
   }
   if (!isRecord(payload)) return null;
 
-  const generation = payload.generation;
-  if (generation !== undefined && !isNonnegativeSafeInteger(generation)) return null;
-
   if (type === "state") {
     if (typeof payload.state !== "string" || !serviceStates.includes(payload.state as ServiceState)) return null;
-    return generation === undefined ? { type, state: payload.state as ServiceState } : { type, state: payload.state as ServiceState, generation };
+    return { type, state: payload.state as ServiceState };
   }
   if (type === "refresh") {
     if (typeof payload.state !== "string" || !serviceStates.includes(payload.state as ServiceState) || typeof payload.complete !== "boolean") return null;
-    return generation === undefined
-      ? { type, state: payload.state as ServiceState, complete: payload.complete }
-      : { type, state: payload.state as ServiceState, complete: payload.complete, generation };
+    return { type, state: payload.state as ServiceState, complete: payload.complete };
   }
   if (type === "probe") {
     if (
@@ -153,15 +148,15 @@ export class ApiClient {
 
 
 
-  async login(account: string, password: string): Promise<LoginResponse> {
+  async login(provider: string, account: string, password: string): Promise<LoginResponse> {
     return this.request<LoginResponse>("/auth/login", {
       method: "POST",
-      body: { account, password },
+      body: { provider, account, password },
     });
   }
 
-  async logoutAccount(): Promise<void> {
-    await this.request<void>("/auth/logout", { method: "POST", body: {}, expectEmptyResponse: true });
+  async logoutAccount(provider: string): Promise<void> {
+    await this.request<void>("/auth/logout", { method: "POST", body: { provider }, expectEmptyResponse: true });
   }
 
   async lockConsole(): Promise<void> {
@@ -177,8 +172,8 @@ export class ApiClient {
     this.clearSession();
   }
 
-  async refresh(): Promise<void> {
-    await this.request<void>("/control/refresh", { method: "POST", body: {}, expectEmptyResponse: true });
+  async refresh(provider: string): Promise<void> {
+    await this.request<void>("/control/refresh", { method: "POST", body: { provider }, expectEmptyResponse: true });
   }
 
   async probeNode(id: string): Promise<ProbeResult> {

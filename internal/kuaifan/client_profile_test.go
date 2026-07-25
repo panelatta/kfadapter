@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	wireprofile "github.com/kfadapter/kfadapter/internal/kuaifan/profile"
-	"github.com/kfadapter/kfadapter/internal/state"
 )
 
 func TestWindowsLineValidationRetainsUnsupportedWSAsIneligible(t *testing.T) {
@@ -36,7 +35,7 @@ func TestConstructorsKeepProfileBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ios.Profile() != state.ClientProfileIOS || windows.Profile() != state.ClientProfileWindows {
+	if ios.Profile() != wireprofile.IOSID || windows.Profile() != wireprofile.WindowsID {
 		t.Fatalf("profiles = %q / %q", ios.Profile(), windows.Profile())
 	}
 }

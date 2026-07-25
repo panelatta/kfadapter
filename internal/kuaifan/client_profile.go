@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"net/url"
 
-	"github.com/kfadapter/kfadapter/internal/state"
+	wireprofile "github.com/kfadapter/kfadapter/internal/kuaifan/profile"
 )
 
 // EmailLogin is transient account input. InstallationID is protected random
@@ -17,7 +17,7 @@ type EmailLogin struct {
 }
 
 type providerProfile interface {
-	id() state.ClientProfile
+	id() wireprofile.ID
 	userAgent() string
 	configFields() any
 	requiresPostLoginRefresh() bool
@@ -29,7 +29,7 @@ type providerProfile interface {
 }
 
 // Profile returns the immutable control profile used by this client.
-func (c *Client) Profile() state.ClientProfile {
+func (c *Client) Profile() wireprofile.ID {
 	if c == nil || c.profile == nil {
 		return ""
 	}

@@ -49,50 +49,29 @@ func (c *SelectorCoordinator) Registry() *selector.Registry {
 }
 
 // Build implements state.SelectorBuilder.
-func (c *SelectorCoordinator) Build(generation uint64, nodes []state.Node) (map[string]state.NodeRef, error) {
+func (c *SelectorCoordinator) Build(nodes []state.Node) (map[string]state.NodeRef, error) {
 	registry := c.Registry()
 	if registry == nil {
-		return nil, selector.ErrUnknownGeneration
+		return nil, selector.ErrInvalidKey
 	}
-	return registry.Build(generation, nodes)
+	result, err := registry.Build(nodes)
+	if err != nil {
+		return nil, err
+	}
+	return result.Selectors, nil
 }
 
-// BuildWithTombstones retains removed selectors only within the current
-// account-derived credential generation.
-func (c *SelectorCoordinator) BuildWithTombstones(generation uint64, nodes []state.Node, previous map[string]state.NodeRef, now time.Time) (selector.BuildResult, error) {
-	registry := c.Registry()
-	if registry == nil {
-		return selector.BuildResult{}, selector.ErrUnknownGeneration
-	}
-	return registry.BuildWithTombstones(generation, nodes, previous, now)
-}
-
-// Generations reports the one credential generation accepted by this process.
-func (c *SelectorCoordinator) Generations() []uint64 {
-	registry := c.Registry()
-	if registry == nil {
-		return nil
-	}
-	return registry.Generations()
-}
-
-// InstallGeneration builds and installs a new immutable registry before the
-// caller publishes its matching snapshot. The returned rollback is idempotent.
-func (c *SelectorCoordinator) InstallGeneration(generation state.SubscriptionGeneration, snapshot *state.RuntimeSnapshot) (*state.RuntimeSnapshot, func(), error) {
+// InstallEpoch builds and installs a new immutable credential epoch before
+// the caller publishes its matching snapshot. The returned rollback is idempotent.
+func (c *SelectorCoordinator) InstallEpoch(authority state.SubscriptionAuthority, snapshot *state.RuntimeSnapshot) (*state.RuntimeSnapshot, func(), error) {
 	if c == nil || snapshot == nil {
 		return nil, nil, errors.New("app: selector installation requires coordinator and snapshot")
 	}
-	nextRegistry, err := selector.NewRegistry(generation)
+	nextRegistry, err := selector.NewRegistry(authority)
 	if err != nil {
 		return nil, nil, fmt.Errorf("app: build selector registry: %w", err)
 	}
-	previous := make(map[string]state.NodeRef)
-	for name, ref := range snapshot.Selectors {
-		if ref.Generation == generation.Generation {
-			previous[name] = ref
-		}
-	}
-	result, err := nextRegistry.BuildWithTombstones(generation.Generation, snapshot.Nodes, previous, c.now().UTC())
+	result, err := nextRegistry.Build(snapshot.Nodes)
 	if err != nil {
 		return nil, nil, fmt.Errorf("app: build selector snapshot: %w", err)
 	}

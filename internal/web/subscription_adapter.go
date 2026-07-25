@@ -23,22 +23,18 @@ func (a subscriptionAdapter) Metadata(context.Context) (SubscriptionMetadata, er
 	if err != nil {
 		return SubscriptionMetadata{}, err
 	}
-	return SubscriptionMetadata{
-		Active: metadata.Active, Generation: metadata.Generation, NodeCount: metadata.NodeCount,
-		LastFetchedAt: metadata.LastFetchedAt, LastFetchedGeneration: metadata.LastFetchedGeneration,
-		ReloadRecommended: metadata.ReloadRecommended,
-	}, nil
+	return SubscriptionMetadata{Active: metadata.Active, NodeCount: metadata.NodeCount}, nil
 }
 
 func (a subscriptionAdapter) SubscriptionURL(_ context.Context, baseURL, socksAddress string) (SubscriptionURL, error) {
 	if err := a.service.SetSocksAddress(socksAddress); err != nil {
 		return SubscriptionURL{}, err
 	}
-	url, generation, err := a.service.SubscriptionURL(baseURL)
+	url, err := a.service.SubscriptionURL(baseURL)
 	if err != nil {
 		return SubscriptionURL{}, err
 	}
-	return SubscriptionURL{URL: url, Generation: generation}, nil
+	return SubscriptionURL{URL: url}, nil
 }
 
 func (a subscriptionAdapter) ServeSubscription(w http.ResponseWriter, r *http.Request, binding, socksAddress string) {
