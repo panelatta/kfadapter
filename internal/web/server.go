@@ -1,11 +1,12 @@
 package web
 
 import (
+	"context"
 	"net"
 	"net/http"
+	"time"
 
 	"golang.org/x/net/netutil"
-	"time"
 )
 
 // NewHTTPServer constructs the production HTTP server around a validated API.
@@ -20,6 +21,7 @@ func NewHTTPServer(config Config, dependencies Dependencies) (*http.Server, *API
 	return &http.Server{
 		Addr:              api.config.Listen,
 		Handler:           api,
+		BaseContext:       func(net.Listener) context.Context { return api.requests },
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       api.config.ReadTimeout,
 		WriteTimeout:      api.config.WriteTimeout,
@@ -39,4 +41,12 @@ func (a *API) Listen() (net.Listener, error) {
 		return nil, err
 	}
 	return netutil.LimitListener(listener, a.config.MaxConnections), nil
+}
+
+// CancelRequests cancels the context of every in-flight request. Callers use it
+// when shutting down so long backend calls do not outlive the drain deadline.
+func (a *API) CancelRequests() {
+	if a != nil && a.cancelRequests != nil {
+		a.cancelRequests()
+	}
 }

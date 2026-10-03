@@ -69,7 +69,6 @@ func (driver *Driver) Login(ctx context.Context, credentials provider.Credential
 		return provider.Snapshot{}, provider.ErrInvalidInput
 	}
 	session, err := driver.client.Login(ctx, credentials.Account, credentials.Password, credentials.InstallationID)
-	credentials.Password = ""
 	if err != nil {
 		if errors.Is(err, ErrLoginRejected) {
 			return provider.Snapshot{}, provider.ErrLoginRejected
@@ -161,23 +160,25 @@ func (payload accountPayload) account(location *time.Location, now time.Time) (p
 	}
 	var subscriptionEndsAt time.Time
 	for _, period := range payload.VIPSubscription {
-		if period.Grade != 1 && period.Grade != 2 {
-			return provider.Account{}, ErrSchema
-		}
-		if period.EndTime == "" {
+		// Unknown grades and unparseable periods are ignored: a new provider
+		// tier must not make every login fail.
+		if (period.Grade != 1 && period.Grade != 2) || period.EndTime == "" {
 			continue
 		}
 		parsed, err := time.ParseInLocation("2006-01-02 15:04:05", period.EndTime, location)
 		if err != nil {
-			return provider.Account{}, ErrSchema
+			continue
 		}
 		if period.Grade == subscriptionGrade && parsed.After(subscriptionEndsAt) {
 			subscriptionEndsAt = parsed.UTC()
 		}
 	}
-	active := subscriptionGrade != 0
-	if active && !subscriptionEndsAt.After(now) {
-		return provider.Account{}, ErrSchema
+	active := subscriptionGrade != 0 && subscriptionEndsAt.After(now)
+	if !active {
+		// A paid flag without a current period is treated as a standard account,
+		// which only ever narrows node eligibility.
+		tier = standardTier
+		subscriptionEndsAt = time.Time{}
 	}
 	return provider.Account{
 		UserID: strconv.FormatInt(payload.UserID, 10), Display: provider.RedactAccount(identity), Tier: tier,
@@ -245,32 +246,42 @@ func nodesFromCatalog(groups []lineGroup, tier string) ([]provider.Node, error) 
 	seen := make(map[string]struct{}, 512)
 	regionCount := 0
 	lineCount := 0
+	valid := 0
 	for _, group := range groups {
-		if group.TypeID <= 0 || !validMetadata(group.TypeName) || len(group.Regions) > maxCatalogRegions-regionCount {
+		if len(group.Regions) > maxCatalogRegions-regionCount {
 			return nil, ErrInvalidLine
 		}
 		regionCount += len(group.Regions)
+		// Individually malformed, hidden, or unsupported groups, regions, and
+		// lines are skipped so one unexpected catalog entry cannot fail login.
+		if group.TypeID <= 0 || !validMetadata(group.TypeName) {
+			continue
+		}
 		for _, region := range group.Regions {
-			if !validMetadata(region.Name) || len(region.Lines) > maxCatalogLines-lineCount {
+			if len(region.Lines) > maxCatalogLines-lineCount {
 				return nil, ErrInvalidLine
 			}
 			lineCount += len(region.Lines)
+			if !validMetadata(region.Name) {
+				continue
+			}
 			for _, line := range region.Lines {
 				node, err := catalogNode(group, region, line, tier)
 				if err != nil {
-					return nil, err
+					continue
 				}
 				if _, duplicate := seen[node.ID]; duplicate {
-					return nil, ErrInvalidLine
+					continue
 				}
 				seen[node.ID] = struct{}{}
+				valid++
 				if node.Eligible {
 					nodes = append(nodes, node)
 				}
 			}
 		}
 	}
-	if lineCount == 0 || lineCount > maxCatalogLines {
+	if valid == 0 {
 		return nil, ErrInvalidLine
 	}
 	return nodes, nil

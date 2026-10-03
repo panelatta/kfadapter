@@ -136,3 +136,73 @@ func TestTransportRejectsDatagrams(t *testing.T) {
 		t.Fatal("RelayDatagrams unexpectedly succeeded")
 	}
 }
+
+func TestResolveTargetSkipsNonPublicAnswers(t *testing.T) {
+	transport := NewTransport()
+	answers := []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("10.0.0.8"), netip.MustParseAddr("100.64.1.1"), netip.MustParseAddr("34.160.111.145")}
+	transport.lookup = func(context.Context, string, string) ([]netip.Addr, error) { return answers, nil }
+	address, err := transport.resolveTarget(context.Background(), "example.com", time.Second)
+	if err != nil || address.String() != "34.160.111.145" {
+		t.Fatalf("resolved %v, %v", address, err)
+	}
+	answers = answers[:3]
+	if _, err := transport.resolveTarget(context.Background(), "localhost", time.Second); err == nil {
+		t.Fatal("private-only answers were accepted")
+	}
+	if _, err := transport.resolveTarget(context.Background(), "2001:db8::1", time.Second); !errors.Is(err, provider.ErrAddressUnsupported) {
+		t.Fatalf("IPv6 literal error = %v", err)
+	}
+	if address, err := transport.resolveTarget(context.Background(), "192.168.1.1", time.Second); err != nil || address.String() != "192.168.1.1" {
+		t.Fatalf("explicit literal target = %v, %v", address, err)
+	}
+}
+
+func TestRelayXORTransformsBothDirectionsAndHalfCloses(t *testing.T) {
+	clientApp, clientSide := net.Pipe()
+	upstreamSide, relay := net.Pipe()
+	done := make(chan error, 1)
+	go func() { done <- relayXOR(context.Background(), clientSide, upstreamSide) }()
+
+	go func() { _, _ = clientApp.Write([]byte("ping")) }()
+	encoded := make([]byte, 4)
+	if _, err := io.ReadFull(relay, encoded); err != nil {
+		t.Fatal(err)
+	}
+	for index, value := range []byte("ping") {
+		if encoded[index] != value^relayXORByte {
+			t.Fatalf("upstream bytes = %x", encoded)
+		}
+	}
+	reply := []byte("pong")
+	for index := range reply {
+		reply[index] ^= relayXORByte
+	}
+	go func() { _, _ = relay.Write(reply) }()
+	decoded := make([]byte, 4)
+	if _, err := io.ReadFull(clientApp, decoded); err != nil || string(decoded) != "pong" {
+		t.Fatalf("client bytes = %q, %v", decoded, err)
+	}
+	_ = relay.Close()
+	_ = clientApp.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay did not finish after both sides closed")
+	}
+}
+
+func TestRelayXORStopsOnCancellation(t *testing.T) {
+	clientApp, clientSide := net.Pipe()
+	upstreamSide, relay := net.Pipe()
+	defer clientApp.Close()
+	defer relay.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- relayXOR(ctx, clientSide, upstreamSide) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay ignored cancellation")
+	}
+}

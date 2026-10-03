@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"syscall"
 	"time"
 
 	wireprofile "github.com/kfadapter/kfadapter/internal/kuaifan/profile"
@@ -90,8 +92,6 @@ func (driver *Driver) Login(ctx context.Context, credentials provider.Credential
 	}
 	input := EmailLogin{Account: credentials.Account, Password: credentials.Password, InstallationID: credentials.InstallationID}
 	sessions, err := driver.loginBoth(ctx, input)
-	input.Password = ""
-	credentials.Password = ""
 	if err != nil {
 		if errors.Is(err, ErrLoginRejected) {
 			return provider.Snapshot{}, provider.ErrLoginRejected
@@ -134,9 +134,7 @@ func (driver *Driver) Refresh(ctx context.Context, current provider.Snapshot) (p
 
 func (driver *Driver) loginBoth(ctx context.Context, input EmailLogin) ([2]LoginSession, error) {
 	return parallelSessions(ctx, driver.clients, func(child context.Context, client *Client) (LoginSession, error) {
-		copyInput := input
-		session, err := client.Login(child, copyInput)
-		copyInput.Password = ""
+		session, err := client.Login(child, input)
 		if err != nil {
 			return LoginSession{}, err
 		}
@@ -393,16 +391,27 @@ func decodeTunnelAuthority(encoded []byte) (tunnelAuthority, error) {
 	return authority, nil
 }
 
+// mergeProfileNodes de-duplicates both profiles' catalogs. Each profile may
+// carry up to maxLines rows, so the union is trimmed to provider.MaxNodes,
+// keeping eligible nodes first, instead of failing the whole snapshot.
 func mergeProfileNodes(ios, windows []provider.Node) []provider.Node {
 	merged := make([]provider.Node, 0, len(ios)+len(windows))
 	seen := make(map[string]struct{}, len(ios)+len(windows))
-	for _, profileNodes := range [][]provider.Node{ios, windows} {
-		for _, node := range profileNodes {
-			if _, duplicate := seen[node.ID]; duplicate {
-				continue
+	for _, eligible := range []bool{true, false} {
+		for _, profileNodes := range [][]provider.Node{ios, windows} {
+			for _, node := range profileNodes {
+				if node.Eligible != eligible {
+					continue
+				}
+				if _, duplicate := seen[node.ID]; duplicate {
+					continue
+				}
+				if len(merged) == provider.MaxNodes {
+					return merged
+				}
+				seen[node.ID] = struct{}{}
+				merged = append(merged, node)
 			}
-			seen[node.ID] = struct{}{}
-			merged = append(merged, node)
 		}
 	}
 	return merged
@@ -478,7 +487,9 @@ func retry[T any](ctx context.Context, driver *Driver, call func() (T, error)) (
 }
 
 func retryable(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+	// A per-request timeout surfaces as DeadlineExceeded; the retry loop checks
+	// the caller's own context separately, so it is safe to retry here.
+	if err == nil || errors.Is(err, context.Canceled) ||
 		errors.Is(err, ErrLoginRejected) || errors.Is(err, ErrBusinessStatus) || errors.Is(err, ErrSchema) ||
 		errors.Is(err, ErrInvalidEnvelope) || errors.Is(err, ErrInvalidPadding) || errors.Is(err, ErrMalformedCiphertext) ||
 		errors.Is(err, ErrResponseTooLarge) || errors.Is(err, ErrUnsupportedCipher) || errors.Is(err, ErrInvalidLine) {
@@ -488,8 +499,15 @@ func retryable(err error) bool {
 	if errors.As(err, &status) {
 		return status.status == http.StatusRequestTimeout || status.status == http.StatusTooManyRequests || status.status >= http.StatusInternalServerError && status.status <= 599
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 	var networkErr net.Error
-	return errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary())
+	if errors.As(err, &networkErr) && networkErr.Timeout() {
+		return true
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
 func retryDelay(driver *Driver, attempt int) time.Duration {

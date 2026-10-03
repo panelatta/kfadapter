@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,9 +74,19 @@ func TestLoadAppliesLoopbackDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadCreatesDefaultConfigWhenMissing(t *testing.T) {
+func TestLoadDoesNotCreateMissingConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfg, err := Load(path)
+	if _, err := Load(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Load missing config = %v, want not-exist", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Load created %s", path)
+	}
+}
+
+func TestLoadOrCreateCreatesDefaultConfigWhenMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	cfg, err := LoadOrCreate(path)
 	if err != nil {
 		t.Fatalf("Load missing config: %v", err)
 	}
@@ -113,7 +124,7 @@ func TestLoadAcceptsAnyCanonicalNumericListener(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidListeners(t *testing.T) {
-	for _, listenAddr := range []string{"localhost", "127.0.0.1:10809", "0:0:0:0:0:0:0:1", " 127.0.0.1"} {
+	for _, listenAddr := range []string{"localhost", "127.0.0.1:10809", "0:0:0:0:0:0:0:1", " 127.0.0.1", "fe80::1%eth0"} {
 		t.Run(listenAddr, func(t *testing.T) {
 			_, err := Load(writeConfig(t, configWithListenAddr(t, listenAddr)))
 			if err == nil || !strings.Contains(err.Error(), "listenAddr") {

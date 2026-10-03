@@ -3,14 +3,26 @@ package state
 import (
 	"bytes"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/kfadapter/kfadapter/internal/provider"
 )
 
-func TestAccountBindingKeepsKeysForSameAccountAndRotatesOnCutover(t *testing.T) {
+func bindingIDFor(accounts map[provider.ID]string) string {
+	snapshot := &RuntimeSnapshot{Providers: make(map[provider.ID]provider.Snapshot, len(accounts))}
+	for id, userID := range accounts {
+		snapshot.Providers[id] = provider.Snapshot{Provider: id, Account: provider.Account{UserID: userID}}
+	}
+	return snapshot.AccountBindingID()
+}
+
+func boundPersistentState(t *testing.T) PersistentState {
+	t.Helper()
 	persistent, err := NewPersistentState()
 	if err != nil {
 		t.Fatal(err)
@@ -18,17 +30,167 @@ func TestAccountBindingKeepsKeysForSameAccountAndRotatesOnCutover(t *testing.T) 
 	if err := persistent.SetAccessToken("correct horse battery token"); err != nil {
 		t.Fatal(err)
 	}
+	return persistent
+}
+
+func TestAccountBindingKeepsKeysForSameAccountAndRotatesOnCutover(t *testing.T) {
+	persistent := boundPersistentState(t)
 	now := time.Now().UTC()
-	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, "account-a", now); err != nil || rotated {
+	accountA := bindingIDFor(map[provider.ID]string{"kuaifan": "account-a"})
+	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, accountA, now); err != nil || rotated {
 		t.Fatalf("first bind = %v, %v", rotated, err)
 	}
 	selectorKey := append([]byte(nil), persistent.Subscription.SelectorKey...)
 	proxyKey := append([]byte(nil), persistent.Subscription.ProxyAuthKey...)
-	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, "account-a", now.Add(time.Minute)); err != nil || rotated || !bytes.Equal(selectorKey, persistent.Subscription.SelectorKey) || !bytes.Equal(proxyKey, persistent.Subscription.ProxyAuthKey) {
+	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, accountA, now.Add(time.Minute)); err != nil || rotated || !bytes.Equal(selectorKey, persistent.Subscription.SelectorKey) || !bytes.Equal(proxyKey, persistent.Subscription.ProxyAuthKey) {
 		t.Fatalf("same account changed keys: %v, %v", rotated, err)
 	}
-	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, "account-b", now.Add(2*time.Minute)); err != nil || !rotated || bytes.Equal(selectorKey, persistent.Subscription.SelectorKey) || bytes.Equal(proxyKey, persistent.Subscription.ProxyAuthKey) {
+	accountB := bindingIDFor(map[provider.ID]string{"kuaifan": "account-b"})
+	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, accountB, now.Add(2*time.Minute)); err != nil || !rotated || bytes.Equal(selectorKey, persistent.Subscription.SelectorKey) || bytes.Equal(proxyKey, persistent.Subscription.ProxyAuthKey) {
 		t.Fatalf("cutover did not rotate both keys: %v, %v", rotated, err)
+	}
+}
+
+func TestAccountBindingIsStableAcrossProviderSetChanges(t *testing.T) {
+	persistent := boundPersistentState(t)
+	now := time.Now().UTC()
+	kuaifanOnly := bindingIDFor(map[provider.ID]string{"kuaifan": "k-1"})
+	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, kuaifanOnly, now); err != nil || rotated {
+		t.Fatalf("first bind = %v, %v", rotated, err)
+	}
+	selectorKey := append([]byte(nil), persistent.Subscription.SelectorKey...)
+	binding := append([]byte(nil), persistent.Subscription.AccountBinding...)
+	stable := func(step string) {
+		t.Helper()
+		if !bytes.Equal(selectorKey, persistent.Subscription.SelectorKey) || !bytes.Equal(binding, persistent.Subscription.AccountBinding) {
+			t.Fatalf("%s rotated credentials", step)
+		}
+	}
+	both := bindingIDFor(map[provider.ID]string{"kuaifan": "k-1", "quickfox": "q-1"})
+	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, both, now); err != nil || rotated {
+		t.Fatalf("adding provider = %v, %v", rotated, err)
+	}
+	stable("adding a provider")
+	if !persistent.MatchesAccount(both) || !persistent.MatchesAccount(kuaifanOnly) {
+		t.Fatal("roster does not admit active subsets")
+	}
+	// Logging out QuickFox, then logging the same QuickFox account back in.
+	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, kuaifanOnly, now); err != nil || rotated {
+		t.Fatalf("removing provider = %v, %v", rotated, err)
+	}
+	stable("removing a provider")
+	quickfoxOnly := bindingIDFor(map[provider.ID]string{"quickfox": "q-1"})
+	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, quickfoxOnly, now); err != nil || rotated {
+		t.Fatalf("re-login = %v, %v", rotated, err)
+	}
+	stable("re-login with the same account")
+	if persistent.MatchesAccount(bindingIDFor(map[provider.ID]string{"quickfox": "q-2"})) {
+		t.Fatal("roster admitted a different QuickFox account")
+	}
+	switched := bindingIDFor(map[provider.ID]string{"kuaifan": "k-1", "quickfox": "q-2"})
+	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, switched, now); err != nil || !rotated {
+		t.Fatalf("account switch = %v, %v", rotated, err)
+	}
+	if bytes.Equal(selectorKey, persistent.Subscription.SelectorKey) || bytes.Equal(binding, persistent.Subscription.AccountBinding) {
+		t.Fatal("account switch retained credentials")
+	}
+	if len(persistent.Subscription.AccountRoster) != 2 || !persistent.MatchesAccount(switched) {
+		t.Fatal("rotated roster does not describe the new accounts")
+	}
+}
+
+func TestLegacyCompositeBindingAdoptsRoster(t *testing.T) {
+	persistent := boundPersistentState(t)
+	now := time.Now().UTC()
+	both := bindingIDFor(map[provider.ID]string{"kuaifan": "k-1", "quickfox": "q-1"})
+	legacy, err := accountBindingFor(persistent.AccessTokenVerifier.Hash, both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistent.Subscription.AccountBinding = legacy
+	selectorKey := append([]byte(nil), persistent.Subscription.SelectorKey...)
+	if !persistent.MatchesAccount(both) {
+		t.Fatal("legacy binding not admitted")
+	}
+	if rotated, err := EnsureSubscriptionAccountBinding(&persistent, both, now); err != nil || rotated || len(persistent.Subscription.AccountRoster) != 2 {
+		t.Fatalf("legacy adoption = %v, %v, roster %d", rotated, err, len(persistent.Subscription.AccountRoster))
+	}
+	if !bytes.Equal(selectorKey, persistent.Subscription.SelectorKey) || !bytes.Equal(legacy, persistent.Subscription.AccountBinding) {
+		t.Fatal("legacy adoption rotated credentials")
+	}
+}
+
+func TestAccountRosterPersists(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.LoadOrCreate(); err != nil {
+		t.Fatal(err)
+	}
+	both := bindingIDFor(map[provider.ID]string{"kuaifan": "k-1", "quickfox": "q-1"})
+	saved, err := store.Update(func(candidate *PersistentState) error {
+		if err := candidate.SetAccessToken("correct horse battery token"); err != nil {
+			return err
+		}
+		_, err := EnsureSubscriptionAccountBinding(candidate, both, time.Now().UTC())
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !SameAccountRoster(saved.Subscription.AccountRoster, loaded.Subscription.AccountRoster) || len(loaded.Subscription.AccountRoster) != 2 || !loaded.MatchesAccount(both) {
+		t.Fatal("account roster did not round-trip")
+	}
+}
+
+func TestV8StoreMigratesToRosterSchema(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadOrCreate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "state.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{"DROP TABLE subscription_account_roster", "UPDATE schema_version SET version = 8 WHERE id = 1"} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.Load(); err != nil {
+		t.Fatalf("v8 migration failed: %v", err)
+	}
+	if err := ValidateSQLiteFile(path); err != nil {
+		t.Fatalf("migrated schema invalid: %v", err)
 	}
 }
 
@@ -169,7 +331,7 @@ func TestV7ToV8MigrationClearsRenewableAuthority(t *testing.T) {
 	}
 }
 
-func TestHistoricalSchemasMigrateToExactV8(t *testing.T) {
+func TestHistoricalSchemasMigrateToCurrentSchema(t *testing.T) {
 	fixtures := []struct {
 		version    int
 		statements []string
@@ -224,5 +386,105 @@ func TestHistoricalSchemasMigrateToExactV8(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestFutureDatedBrowserSessionsArePrunedNotCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.LoadOrCreate(); err != nil {
+		t.Fatal(err)
+	}
+	token := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	if err := store.SaveBrowserSession(token, token, time.Now().Add(time.Hour), 16); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a wall clock that stepped back by two days after the session was
+	// issued: the stored expiry is now far beyond the maximum lifetime.
+	if _, err := store.db.Exec("UPDATE browser_sessions SET expires_at_ns = ?", nanos(time.Now().Add(48*time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(); err != nil {
+		t.Fatalf("clock skew made state corrupt: %v", err)
+	}
+	restored := 0
+	if err := store.RestoreBrowserSessions(time.Now(), 16, func(string, string, time.Time) error { restored++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if restored != 0 {
+		t.Fatalf("restored %d future-dated sessions", restored)
+	}
+	if err := ValidateSQLiteFile(filepath.Join(dir, "state.db")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInterruptedFirstRunIsRecreated(t *testing.T) {
+	for name, prepare := range map[string]func(string) error{
+		"empty file": func(path string) error { return os.WriteFile(path, nil, 0o600) },
+		"schema-less database": func(path string) error {
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				return err
+			}
+			if _, err := db.Exec("PRAGMA user_version = 0"); err != nil {
+				return err
+			}
+			if _, err := db.Exec("VACUUM"); err != nil {
+				return err
+			}
+			if err := db.Close(); err != nil {
+				return err
+			}
+			return os.Chmod(path, 0o600)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Chmod(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := prepare(filepath.Join(dir, "state.db")); err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewSQLiteStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if _, err := store.LoadOrCreate(); err != nil {
+				t.Fatalf("interrupted first run was not recovered: %v", err)
+			}
+		})
+	}
+}
+
+func TestClosedStoreDoesNotReopen(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadOrCreate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(); !errors.Is(err, ErrStoreClosed) {
+		t.Fatalf("Load after Close = %v", err)
+	}
+	if err := store.Ping(); !errors.Is(err, ErrStoreClosed) {
+		t.Fatalf("Ping after Close = %v", err)
 	}
 }

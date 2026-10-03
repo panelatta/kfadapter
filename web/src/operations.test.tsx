@@ -12,13 +12,13 @@ async function renderAt(path: string, inventory = nodes) {
   render(<App api={api} />);
   await screen.findByRole("heading", { name: "Service status" });
   await userEvent.click(screen.getByRole("button", { name: "KuaiFan" }));
-  await screen.findByRole("tree", { name: "Nodes by group" });
+  await screen.findByRole("list", { name: "Nodes by group" });
   await waitFor(() => expect(window.location.pathname).toBe("/"));
   return api;
 }
 
 async function openGroup(name: string) {
-  const group = screen.getByRole("treeitem", { name: `${name} group` });
+  const group = screen.getByRole("group", { name: `${name} group` });
   expect((group as HTMLDetailsElement).open).toBe(false);
   await userEvent.click(within(group).getByText(name, { exact: true }));
   expect((group as HTMLDetailsElement).open).toBe(true);
@@ -27,7 +27,7 @@ async function openGroup(name: string) {
 
 describe("node inventory", () => {
   it("shows upstream node details and copies a SOCKS5 URL only when opened", async () => {
-    const api = await renderAt("/nodes");
+    const api = await renderAt("/");
     const details = { ...chengduDetails, socksUsername: "local:user", socksPassword: "pass/word?value#" };
     vi.mocked(api.nodeDetails).mockResolvedValue(details);
     expect(screen.getAllByText("Shanghai 01").length).toBeGreaterThan(0);
@@ -132,8 +132,8 @@ describe("node inventory", () => {
       { ...nodes[1], id: "china-alpha", name: "Alpha 01", group: "Alpha ➩ 中国" },
       { ...nodes[1], id: "china-mainland", name: "Mainland 01", group: "港澳台 ➩ 中国大陆" },
     ]);
-    const tree = screen.getByRole("tree", { name: "Nodes by group" });
-    expect([...tree.children].map((element) => element.getAttribute("aria-label"))).toEqual([
+    const tree = screen.getByRole("list", { name: "Nodes by group" });
+    expect(within(tree).getAllByRole("group").map((element) => element.getAttribute("aria-label"))).toEqual([
       "2026足球观赛专线 group",
       "优选直连线路 group",
       "音乐/视频APP专线 group",
@@ -142,11 +142,11 @@ describe("node inventory", () => {
       "Zulu ➩ 中国 group",
     ]);
 
-    const chinaGroup = within(tree).getByRole("treeitem", { name: "Alpha ➩ 中国 group" });
+    const chinaGroup = within(tree).getByRole("group", { name: "Alpha ➩ 中国 group" });
     expect((chinaGroup as HTMLDetailsElement).open).toBe(false);
     await userEvent.click(within(chinaGroup).getByText("Alpha ➩ 中国", { exact: true }));
     expect((chinaGroup as HTMLDetailsElement).open).toBe(true);
-    expect(within(chinaGroup).getAllByRole("treeitem").map((element) => element.getAttribute("aria-label"))).toEqual(["Alpha 01", "Zulu 02"]);
+    expect(within(chinaGroup).getAllByRole("listitem").map((element) => element.getAttribute("aria-label"))).toEqual(["Alpha 01", "Zulu 02"]);
     await userEvent.click(within(chinaGroup).getByText("Alpha ➩ 中国", { exact: true }));
     expect((chinaGroup as HTMLDetailsElement).open).toBe(false);
   });
@@ -181,7 +181,7 @@ describe("node inventory", () => {
 
 describe("subscription URL", () => {
   it("copies the reusable URL from the canonical status page", async () => {
-    await renderAt("/subscription");
+    await renderAt("/");
     await userEvent.click(screen.getByRole("button", { name: "Status" }));
     expect(await screen.findByText(currentConsumerURL)).toBeTruthy();
 
@@ -191,11 +191,27 @@ describe("subscription URL", () => {
     expect(await screen.findByText("Link copied.")).toBeTruthy();
   });
 
+  it("keeps the node details popover open when copying through the legacy fallback", async () => {
+    const execCommand = vi.fn().mockReturnValue(true);
+    Object.defineProperty(document, "execCommand", { configurable: true, value: execCommand });
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+    await renderAt("/");
+    await openGroup("West China");
+    await userEvent.click(screen.getAllByRole("button", { name: "Details for Chengdu 02" })[0]);
+    expect(await screen.findByRole("heading", { name: "Chengdu 02" })).toBeTruthy();
+    const copy = screen.getByRole("button", { name: "Copy SOCKS5 URL" });
+    await userEvent.click(copy);
+    expect(execCommand).toHaveBeenCalledWith("copy");
+    expect(await screen.findByText("SOCKS5 URL copied.")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Chengdu 02" })).toBeTruthy();
+    expect(document.activeElement).toBe(copy);
+  });
+
   it("falls back to the legacy copy command outside secure contexts", async () => {
     const execCommand = vi.fn().mockReturnValue(true);
     Object.defineProperty(document, "execCommand", { configurable: true, value: execCommand });
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
-    window.history.replaceState(null, "", "/subscription");
+    window.history.replaceState(null, "", "/");
     render(<App api={makeApi(readyStatus())} />);
     await screen.findByText(currentConsumerURL);
 

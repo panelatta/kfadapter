@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
-	"time"
 
 	"github.com/kfadapter/kfadapter/internal/provider"
 	"github.com/kfadapter/kfadapter/internal/state"
@@ -147,23 +146,15 @@ func (r *Registry) Credentials(identity NodeIdentity) (Credentials, bool) {
 	return credential, err == nil
 }
 
+// Authenticate verifies an RFC 1929 selector/password pair in constant time.
+// Credentials carry no expiry; revocation happens by rotating the registry.
 func (r *Registry) Authenticate(selector, password string) bool {
-	return r.AuthenticateAt(selector, password, time.Now())
-}
-func (r *Registry) AuthenticateAt(selector, password string, _ time.Time) bool {
 	if r == nil || !validSelector(selector) || !validPassword(password) {
 		return false
 	}
 	expectedMAC := mac(r.proxyAuthKey[:], []byte("selector-password\x00"+selector))
 	expected := passwordPrefix + base64.RawURLEncoding.EncodeToString(expectedMAC[:passwordBytes])
 	return subtle.ConstantTimeCompare([]byte(password), []byte(expected)) == 1
-}
-
-func (r *Registry) Resolve(snapshot *state.RuntimeSnapshot, selector, password string, now time.Time) (state.Node, state.NodeRef, error) {
-	if !r.AuthenticateAt(selector, password, now) {
-		return state.Node{}, state.NodeRef{}, state.ErrSelectorUnknown
-	}
-	return snapshot.ResolveSelector(selector, now)
 }
 
 type BuildResult struct {
@@ -184,7 +175,7 @@ func (r *Registry) Build(nodes []state.Node) (BuildResult, error) {
 	ids := make(map[string]struct{}, len(nodes))
 	for _, node := range nodes {
 		if !validNodeID(node.ID) {
-			return BuildResult{}, ErrDuplicateNodeID
+			return BuildResult{}, ErrInvalidIdentity
 		}
 		if _, duplicate := ids[node.ID]; duplicate {
 			return BuildResult{}, ErrDuplicateNodeID

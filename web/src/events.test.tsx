@@ -123,3 +123,38 @@ describe("named server-sent events", () => {
     expect([...unmountSource.listeners.values()].every((listeners) => listeners.size === 0)).toBe(true);
   });
 });
+
+describe("event stream recovery", () => {
+  it("recreates a stream the browser closed after a non-200 response", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const console = renderAuthenticatedConsole();
+      await screen.findByRole("heading", { name: "Service status" });
+      await waitFor(() => expect(console.eventSource()).toBeTruthy());
+      const first = console.eventSource();
+      const before = TestEventSource.instances.length;
+      act(() => first.reject());
+      expect(first.close).toHaveBeenCalled();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(TestEventSource.instances.length).toBe(before + 1);
+      const second = TestEventSource.instances[TestEventSource.instances.length - 1];
+      expect(second.closed).toBe(false);
+      expect(second.listeners.get("state")?.size).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets the browser retry a dropped connection without recreating it", async () => {
+    const console = renderAuthenticatedConsole();
+    await screen.findByRole("heading", { name: "Service status" });
+    await waitFor(() => expect(console.eventSource()).toBeTruthy());
+    await waitFor(() => expect(console.fetchMock.mock.calls.filter(([request]) => String(request).endsWith("/subscription/url")).length).toBe(1));
+    const before = TestEventSource.instances.length;
+    act(() => console.eventSource().fail());
+    expect(console.eventSource().close).not.toHaveBeenCalled();
+    expect(TestEventSource.instances.length).toBe(before);
+    // The failure triggers one authoritative reload; let it settle.
+    await waitFor(() => expect(console.fetchMock.mock.calls.filter(([request]) => String(request).endsWith("/subscription/url")).length).toBe(2));
+  });
+});

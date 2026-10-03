@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 )
 
 const (
@@ -70,6 +71,13 @@ func RandomInt(reader io.Reader, n int) (int, error) {
 		}
 	}
 	const sampleSpace = uint64(1) << 32
+	if uint64(n) > sampleSpace {
+		value, err := rand.Int(reader, big.NewInt(int64(n)))
+		if err != nil {
+			return 0, err
+		}
+		return int(value.Int64()), nil
+	}
 	limit := sampleSpace - sampleSpace%uint64(n)
 	for {
 		var sample [4]byte

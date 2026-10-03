@@ -5,7 +5,6 @@ import type {
   LoginResponse,
   NodeDetails,
   NodeHealth,
-  NodeRecord,
   NodesResponse,
   ProbeResult,
   ServiceState,
@@ -32,6 +31,9 @@ export class ApiError extends Error {
 }
 
 const API_ROOT = "/api/v1";
+const EVENT_SOURCE_CLOSED = 2;
+const EVENT_RETRY_INITIAL_MS = 1_000;
+const EVENT_RETRY_MAX_MS = 30_000;
 
 
 async function asProblem(response: Response): Promise<ApiError> {
@@ -137,7 +139,6 @@ export class ApiClient {
         tcpLatencyMs: node.tcpLatencyMs,
         udpHealth: node.udpHealth,
         eligible: node.eligible,
-        compatibilityError: node.compatibilityError,
       })),
     };
   }
@@ -189,9 +190,28 @@ export class ApiClient {
   }
 
 
+  /** Downloads the redacted diagnostics report as a JSON blob. */
+  async diagnostics(): Promise<Blob> {
+    const response = await fetch(`${API_ROOT}/diagnostics/export`, {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRF-Token": this.csrfToken },
+      body: "{}",
+    });
+    if (!response.ok) throw await asProblem(response);
+    return response.blob();
+  }
+
   events(onEvent: (event: EventMessage) => void, onFailure: () => void): () => void {
-    const stream = new EventSource(`${API_ROOT}/events`, { withCredentials: true });
+    // EventSource reconnects by itself after a dropped connection, but a non-200
+    // response (403, 429, 503) closes it permanently. Recreate closed streams
+    // with capped exponential backoff so live updates always recover.
     const names = ["state", "refresh", "probe"] as const;
+    let stream: EventSource | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retryDelay = EVENT_RETRY_INITIAL_MS;
+    let stopped = false;
     const listeners = names.map((type) => {
       const listener = (message: Event) => {
         const data = (message as MessageEvent<unknown>).data;
@@ -199,13 +219,39 @@ export class ApiClient {
         const event = parseNamedEvent(type, data);
         if (event) onEvent(event);
       };
-      stream.addEventListener(type, listener);
       return [type, listener] as const;
     });
-    stream.onerror = () => onFailure();
+    const detach = (current: EventSource) => {
+      for (const [type, listener] of listeners) current.removeEventListener(type, listener);
+      current.onopen = null;
+      current.onerror = null;
+      current.close();
+    };
+    const connect = () => {
+      retryTimer = null;
+      if (stopped) return;
+      const current = new EventSource(`${API_ROOT}/events`, { withCredentials: true });
+      stream = current;
+      for (const [type, listener] of listeners) current.addEventListener(type, listener);
+      current.onopen = () => {
+        retryDelay = EVENT_RETRY_INITIAL_MS;
+      };
+      current.onerror = () => {
+        if (stopped || stream !== current) return;
+        onFailure();
+        if (current.readyState !== EVENT_SOURCE_CLOSED) return;
+        detach(current);
+        stream = null;
+        retryTimer = setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, EVENT_RETRY_MAX_MS);
+      };
+    };
+    connect();
     return () => {
-      for (const [type, listener] of listeners) stream.removeEventListener(type, listener);
-      stream.close();
+      stopped = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      if (stream) detach(stream);
+      stream = null;
     };
   }
 

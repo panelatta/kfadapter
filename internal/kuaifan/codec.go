@@ -100,7 +100,7 @@ func (c Codec) Encode(plain []byte) ([]byte, error) {
 	return out, nil
 }
 
-// Decode decodes one strictly Base64 AES-CBC body and validates its PKCS#7
+// Decode decodes one standard-Base64 AES-CBC body and validates its PKCS#7
 // padding. The decrypted response is bounded to MaxPlaintextBytes.
 func (c Codec) Decode(body []byte) ([]byte, error) {
 	if len(body) == 0 || len(body) > base64.StdEncoding.EncodedLen(MaxPlaintextBytes+blockSize) {

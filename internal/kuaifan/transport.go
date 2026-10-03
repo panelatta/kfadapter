@@ -89,10 +89,13 @@ func (*Transport) RelayDatagrams(ctx context.Context, request provider.DatagramR
 	if err != nil {
 		return err
 	}
-	results := make(chan error, 3)
+	results := make(chan error, 4)
 	go func() { results <- watchControl(request.Control) }()
 	go func() { results <- packetsToUOT(request.Packets, uotWriter) }()
 	go func() { results <- uotToPackets(request.Packets, uotReader) }()
+	// Cancellation ends the association like a closed control connection.
+	stopWatch := context.AfterFunc(ctx, func() { results <- ctx.Err() })
+	defer stopWatch()
 	err = <-results
 	_ = request.Packets.Close()
 	_ = upstream.Close()
@@ -111,6 +114,9 @@ func openWIFIIN(ctx context.Context, dial provider.DialContextFunc, nodeHost str
 	upstream, err := dial(dialCtx, "tcp", net.JoinHostPort(nodeHost, strconv.Itoa(int(nodePort))))
 	cancel()
 	if ctx.Err() != nil {
+		if upstream != nil {
+			_ = upstream.Close()
+		}
 		return nil, nil, nil, nil, ctx.Err()
 	}
 	if err != nil {
@@ -125,6 +131,9 @@ func openWIFIIN(ctx context.Context, dial provider.DialContextFunc, nodeHost str
 	if err := upstream.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("kuaifan: set handshake deadline: %w", err)
 	}
+	// Abort a blocked handshake as soon as the caller gives up.
+	stopCancel := context.AfterFunc(ctx, func() { _ = upstream.Close() })
+	defer stopCancel()
 	keyArray := wifiin.DeriveKey(authority.Password)
 	key := append([]byte(nil), keyArray[:]...)
 	var header *wifiin.OutboundHeader
@@ -141,7 +150,14 @@ func openWIFIIN(ctx context.Context, dial provider.DialContextFunc, nodeHost str
 		err = handshake.ReadACK()
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, nil, nil, ctx.Err()
+		}
 		return nil, nil, nil, nil, fmt.Errorf("kuaifan: WIFIIN handshake: %w", err)
+	}
+	if !stopCancel() {
+		// Cancellation raced the handshake and has already closed upstream.
+		return nil, nil, nil, nil, ctx.Err()
 	}
 	if err := upstream.SetDeadline(time.Time{}); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) {
 		return nil, nil, nil, nil, fmt.Errorf("kuaifan: clear handshake deadline: %w", err)
@@ -170,6 +186,10 @@ func uotToPackets(packets provider.PacketIO, reader *wifiin.UOTReader) error {
 	packet := make([]byte, maxUDPDatagramSize)
 	for {
 		n, flowID, err := reader.ReadSOCKSDatagram(packet)
+		if errors.Is(err, wifiin.ErrUOTFrameTooLarge) {
+			// Drop one oversized datagram rather than the whole association.
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("kuaifan: read WIFIIN UOT datagram: %w", err)
 		}

@@ -216,7 +216,9 @@ upgrade_in_progress=1
 if ! compose stop kfadapter; then
     fail "could not stop the current service"
 fi
-if ! BACKUP_DIR="$BACKUP_DIR" "$SCRIPT_DIR/backup-state.sh" "$pre_upgrade_archive"; then
+# The service is stopped, so the rollback point is an offline copy; a service
+# that is somehow still running must fail here rather than be snapshotted live.
+if ! BACKUP_DIR="$BACKUP_DIR" "$SCRIPT_DIR/backup-state.sh" --offline "$pre_upgrade_archive"; then
     rollback_or_fail "could not create a protected pre-upgrade state backup"
 fi
 state_backup_ready=1

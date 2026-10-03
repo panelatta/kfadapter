@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"reflect"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -416,3 +419,43 @@ func validLineFields(host, groupID string) map[string]any {
 }
 
 func ioNopString(value string) io.ReadCloser { return io.NopCloser(bytes.NewBufferString(value)) }
+
+func TestRetryableTreatsPerRequestTimeoutsAsTransient(t *testing.T) {
+	timeout := &url.Error{Op: "Post", URL: "https://example.invalid", Err: context.DeadlineExceeded}
+	if !retryable(timeout) {
+		t.Fatal("per-request timeout is not retryable")
+	}
+	if retryable(context.Canceled) {
+		t.Fatal("cancellation is retryable")
+	}
+	if !retryable(&url.Error{Op: "Post", URL: "https://example.invalid", Err: syscall.ECONNRESET}) {
+		t.Fatal("connection reset is not retryable")
+	}
+	if retryable(fmt.Errorf("wrapped: %w", ErrSchema)) {
+		t.Fatal("schema error is retryable")
+	}
+}
+
+func TestMergeProfileNodesKeepsEligibleNodesWithinTheSnapshotCap(t *testing.T) {
+	makeNodes := func(prefix string, count int, eligible bool) []provider.Node {
+		nodes := make([]provider.Node, count)
+		for index := range nodes {
+			nodes[index] = provider.Node{ID: fmt.Sprintf("%s-%d", prefix, index), Eligible: eligible}
+		}
+		return nodes
+	}
+	ios := append(makeNodes("ios-ineligible", 3000, false), makeNodes("ios", 2000, true)...)
+	windows := makeNodes("windows", 2500, true)
+	merged := mergeProfileNodes(ios, windows)
+	if len(merged) != provider.MaxNodes {
+		t.Fatalf("merged = %d nodes", len(merged))
+	}
+	for _, node := range merged {
+		if !node.Eligible {
+			t.Fatal("an ineligible node displaced an eligible one")
+		}
+	}
+	if small := mergeProfileNodes(makeNodes("a", 2, true), makeNodes("a", 2, true)); len(small) != 2 {
+		t.Fatalf("duplicates were not merged: %d", len(small))
+	}
+}

@@ -141,7 +141,7 @@ type Status struct {
 
 type Deployment struct {
 	Mode      string    `json:"mode,omitempty"`
-	StartedAt time.Time `json:"startedAt,omitempty"`
+	StartedAt time.Time `json:"startedAt,omitzero"`
 }
 
 type Account struct {
@@ -160,8 +160,8 @@ type LoginInput struct {
 }
 
 type ControlPlaneStatus struct {
-	LastRefreshAt time.Time `json:"lastRefreshAt,omitempty"`
-	NextRefreshAt time.Time `json:"nextRefreshAt,omitempty"`
+	LastRefreshAt time.Time `json:"lastRefreshAt,omitzero"`
+	NextRefreshAt time.Time `json:"nextRefreshAt,omitzero"`
 }
 
 type DataPlaneStatus struct {
@@ -200,7 +200,7 @@ type NodeDetails struct {
 	SocksUsername string `json:"socksUsername"`
 	SocksPassword string `json:"socksPassword"`
 	Health        string `json:"health"`
-	TCPLatencyMS  int    `json:"tcpLatencyMs"`
+	TCPLatencyMS  int    `json:"tcpLatencyMs,omitempty"`
 }
 
 // ProbeResult reports the latest bounded TCP probe for one node.
@@ -237,6 +237,11 @@ type API struct {
 	socksPort     string
 	sessions      *sessionStore
 	sseSlots      chan struct{}
+
+	// requests is the parent of every request context; cancelRequests aborts
+	// in-flight handlers (for example a slow provider login) at shutdown.
+	requests       context.Context
+	cancelRequests context.CancelFunc
 }
 
 // NewAPI creates the browser handler for the configured listener.
@@ -297,12 +302,14 @@ func NewAPI(config Config, dependencies Dependencies) (*API, error) {
 	if err != nil {
 		return nil, fmt.Errorf("restore browser sessions: %w", err)
 	}
+	requests, cancelRequests := context.WithCancel(context.Background())
 	return &API{
 		config: config, backend: dependencies.Backend, subscriptions: dependencies.Subscriptions,
 		liveness: dependencies.Liveness, listenIP: listenIP, listenPort: listenPort, hostname: config.Hostname,
 		socksIP: socksIP, socksPort: socksPort,
 		sessions: sessions,
 		sseSlots: make(chan struct{}, config.SSEMaxClients),
+		requests: requests, cancelRequests: cancelRequests,
 	}, nil
 }
 
@@ -373,8 +380,14 @@ func (a *API) serveAPI(w http.ResponseWriter, r *http.Request) {
 		writeEmptyNotFound(w)
 		return
 	}
-	if !knownAPIPath(r.URL.Path) {
+	allowed := allowedAPIMethod(r.URL.Path)
+	if allowed == "" {
 		a.writeProblem(w, http.StatusNotFound, "not_found", "Not Found", "")
+		return
+	}
+	if r.Method != allowed {
+		w.Header().Set("Allow", allowed)
+		a.writeProblem(w, http.StatusMethodNotAllowed, "method_not_allowed", "Method Not Allowed", "")
 		return
 	}
 	token, session, ok := a.authenticate(r)
@@ -382,7 +395,7 @@ func (a *API) serveAPI(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, http.StatusUnauthorized, "not_authenticated", "Authentication required", "")
 		return
 	}
-	if r.URL.Path == "/api/v1/events" && !originAllowed(r.Header.Get("Origin"), "http://"+r.Host) {
+	if r.URL.Path == "/api/v1/events" && !eventStreamOriginAllowed(r) {
 		a.writeProblem(w, http.StatusForbidden, "invalid_origin", "Invalid Origin", "")
 		return
 	}
@@ -418,8 +431,6 @@ func (a *API) serveAPI(w http.ResponseWriter, r *http.Request) {
 		a.lock(w, r, token)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/control/refresh":
 		a.refresh(w, r)
-	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/subscription":
-		a.subscriptionMetadata(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/subscription/url":
 		a.subscriptionURL(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/events":
@@ -443,10 +454,11 @@ func (a *API) accessStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	response := struct {
 		Initialized   bool       `json:"initialized"`
+		SetupAllowed  bool       `json:"setupAllowed"`
 		Authenticated bool       `json:"authenticated"`
 		CSRFToken     string     `json:"csrfToken,omitempty"`
 		ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
-	}{Initialized: status.Initialized}
+	}{Initialized: status.Initialized, SetupAllowed: !status.Initialized && loopbackClient(r.RemoteAddr)}
 	if _, session, authenticated := a.authenticate(r); authenticated {
 		response.Authenticated = true
 		response.CSRFToken = session.csrf
@@ -463,6 +475,13 @@ func (a *API) access(w http.ResponseWriter, r *http.Request, setup bool) {
 	}
 	if !originAllowed(r.Header.Get("Origin"), "http://"+r.Host) {
 		a.writeProblem(w, http.StatusForbidden, "invalid_origin", "Invalid Origin", "")
+		return
+	}
+	// The first access token claims the installation for good. Only a client on
+	// the adapter host itself may make that claim, so another machine on the
+	// LAN cannot race the owner to a freshly deployed console.
+	if setup && !loopbackClient(r.RemoteAddr) {
+		a.writeProblem(w, http.StatusForbidden, "setup_requires_loopback", "Setup must be completed on the adapter host", "Open the console through 127.0.0.1 on the device running kfadapter, for example over an SSH port forward.")
 		return
 	}
 	var body struct {
@@ -658,10 +677,9 @@ func (a *API) lock(w http.ResponseWriter, r *http.Request, token string) {
 		a.writeBodyError(w, err)
 		return
 	}
-	if err := a.revokeBrowserSession(token); err != nil {
-		a.writeProblem(w, http.StatusServiceUnavailable, "session_unavailable", "Session unavailable", "")
-		return
-	}
+	// The session is revoked in memory even when its durable row cannot be
+	// deleted yet; that deletion is retried, and the browser loses the cookie.
+	_ = a.revokeBrowserSession(token)
 	clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -712,19 +730,6 @@ func (a *API) probe(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	a.writeJSON(w, http.StatusOK, result)
-}
-
-func (a *API) subscriptionMetadata(w http.ResponseWriter, r *http.Request) {
-	if a.subscriptions == nil {
-		a.writeProblem(w, http.StatusServiceUnavailable, "subscription_unavailable", "Subscription unavailable", "")
-		return
-	}
-	metadata, err := a.subscriptions.Metadata(r.Context())
-	if err != nil {
-		a.writeBackendError(w, err, "subscription_unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	a.writeJSON(w, http.StatusOK, metadata)
 }
 
 func (a *API) subscriptionURL(w http.ResponseWriter, r *http.Request) {
@@ -1031,12 +1036,23 @@ func subscriptionPath(requestPath string) (string, bool) {
 	return parts[2], true
 }
 
-func knownAPIPath(requestPath string) bool {
+// allowedAPIMethod returns the one method a known API path accepts.
+func allowedAPIMethod(requestPath string) string {
 	switch requestPath {
-	case "/api/v1/status", "/api/v1/nodes", "/api/v1/auth/login", "/api/v1/auth/logout", "/api/v1/access/logout", "/api/v1/control/refresh", "/api/v1/subscription", "/api/v1/subscription/url", "/api/v1/events", "/api/v1/diagnostics/export":
-		return true
+	case "/api/v1/status", "/api/v1/nodes", "/api/v1/subscription/url", "/api/v1/events", "/api/v1/access/status":
+		return http.MethodGet
+	case "/api/v1/auth/login", "/api/v1/auth/logout", "/api/v1/access/logout", "/api/v1/control/refresh", "/api/v1/diagnostics/export", "/api/v1/access/setup", "/api/v1/access/login":
+		return http.MethodPost
 	}
-	return strings.HasPrefix(requestPath, "/api/v1/nodes/") && (strings.HasSuffix(requestPath, "/details") || strings.HasSuffix(requestPath, "/probe"))
+	if strings.HasPrefix(requestPath, "/api/v1/nodes/") {
+		if strings.HasSuffix(requestPath, "/details") {
+			return http.MethodGet
+		}
+		if strings.HasSuffix(requestPath, "/probe") {
+			return http.MethodPost
+		}
+	}
+	return ""
 }
 
 func stateChanging(method string) bool {

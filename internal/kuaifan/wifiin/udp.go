@@ -19,6 +19,9 @@ var (
 	ErrFragmentedUDP         = errors.New("wifiin: fragmented SOCKS UDP datagram")
 	ErrUnsupportedUDPAddress = errors.New("wifiin: unsupported UDP address type")
 	ErrInvalidUOTFrame       = errors.New("wifiin: invalid UDP-over-TCP frame")
+	// ErrUOTFrameTooLarge reports one frame that cannot be expressed as a SOCKS
+	// datagram. The frame is consumed, so the stream stays in sync.
+	ErrUOTFrameTooLarge = errors.New("wifiin: UDP-over-TCP frame exceeds a SOCKS datagram")
 )
 
 // UOTWriter serializes SOCKS UDP datagrams into the verified WIFIIN
@@ -119,7 +122,7 @@ func (r *UOTReader) ReadSOCKSDatagram(dst []byte) (n int, flowID uint16, err err
 		}
 		outputLength := socksUDPHeaderSize + bodyLength - uotFlowIDSize
 		if len(dst) < outputLength {
-			return 0, 0, io.ErrShortBuffer
+			return 0, 0, ErrUOTFrameTooLarge
 		}
 		dst[0], dst[1], dst[2] = 0, 0, 0
 		copy(dst[socksUDPHeaderSize:socksUDPHeaderSize+addressLength], r.body[:addressLength])

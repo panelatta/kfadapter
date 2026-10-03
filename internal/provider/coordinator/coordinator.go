@@ -66,7 +66,6 @@ func (coordinator *Coordinator) Login(ctx context.Context, id provider.ID, crede
 		}
 	}
 	providerSnapshot, err := driver.Login(ctx, credentials)
-	credentials.Password = ""
 	if err != nil {
 		return provider.Account{}, err
 	}
@@ -82,9 +81,21 @@ func (coordinator *Coordinator) Login(ctx context.Context, id provider.ID, crede
 	return providerSnapshot.Account, nil
 }
 
-// Refresh refreshes one provider or all active providers when id is empty. All
-// selected results commit atomically; one failure retains the prior aggregate.
+// Refresh refreshes one provider or all active providers when id is empty.
+// Providers refresh independently: every successful result is published even
+// when another provider fails, and one provider's failure never cancels or
+// discards another's refresh. Failures are returned joined, each wrapped in a
+// RefreshError naming its provider.
 func (coordinator *Coordinator) Refresh(ctx context.Context, id provider.ID) error {
+	if current := coordinator.manager.Current(); current == nil || len(current.Providers) == 0 {
+		return provider.ErrNoSession
+	}
+	complete, err := coordinator.manager.Begin(state.OperationRefresh)
+	if err != nil {
+		return err
+	}
+	outcome := state.OutcomeFailed
+	defer func() { complete(outcome) }()
 	current := coordinator.manager.Current()
 	if current == nil || len(current.Providers) == 0 {
 		return provider.ErrNoSession
@@ -93,51 +104,66 @@ func (coordinator *Coordinator) Refresh(ctx context.Context, id provider.ID) err
 	if err != nil {
 		return err
 	}
-	complete, err := coordinator.manager.Begin(state.OperationRefresh)
-	if err != nil {
-		return err
-	}
-	outcome := state.OutcomeFailed
-	defer func() { complete(outcome) }()
-	type result struct {
-		id       provider.ID
-		snapshot provider.Snapshot
-		err      error
-	}
-	child, cancel := context.WithCancel(ctx)
-	defer cancel()
-	results := make(chan result, len(ids))
+	drivers := make(map[provider.ID]provider.Driver, len(ids))
 	for _, providerID := range ids {
 		driver, driverErr := coordinator.providers.Driver(providerID)
 		if driverErr != nil {
 			return driverErr
 		}
+		drivers[providerID] = driver
+	}
+	type result struct {
+		id       provider.ID
+		snapshot provider.Snapshot
+		err      error
+	}
+	results := make(chan result, len(ids))
+	for _, providerID := range ids {
+		driver := drivers[providerID]
 		previous := current.Providers[providerID].Clone()
 		go func() {
-			next, refreshErr := driver.Refresh(child, previous)
-			if refreshErr != nil {
-				cancel()
-			}
+			next, refreshErr := driver.Refresh(ctx, previous)
 			results <- result{id: providerID, snapshot: next, err: refreshErr}
 		}()
 	}
 	providers := cloneProviders(current.Providers)
+	var failures []error
+	refreshed := 0
 	for range ids {
 		result := <-results
-		if result.err != nil {
-			return result.err
+		if result.err == nil {
+			result.err = provider.ValidateSnapshot(result.snapshot, result.id, coordinator.now())
 		}
-		if err := provider.ValidateSnapshot(result.snapshot, result.id, coordinator.now()); err != nil {
-			return err
+		if result.err != nil {
+			failures = append(failures, &RefreshError{Provider: result.id, Err: result.err})
+			continue
 		}
 		providers[result.id] = result.snapshot.Clone()
+		refreshed++
 	}
-	if err := coordinator.publish(providers); err != nil {
-		return err
+	if refreshed > 0 {
+		if err := coordinator.publish(providers); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+	}
+	if len(failures) != 0 {
+		return errors.Join(failures...)
 	}
 	outcome = state.OutcomeSucceeded
 	return nil
 }
+
+// RefreshError reports one provider's refresh failure.
+type RefreshError struct {
+	Provider provider.ID
+	Err      error
+}
+
+func (e *RefreshError) Error() string {
+	return fmt.Sprintf("provider %s refresh: %v", e.Provider, e.Err)
+}
+
+func (e *RefreshError) Unwrap() error { return e.Err }
 
 // Logout removes only the selected provider account. Other providers and their
 // nodes remain active and are rebound atomically.
@@ -145,11 +171,9 @@ func (coordinator *Coordinator) Logout(_ context.Context, id provider.ID) error 
 	if !id.Valid() {
 		return provider.ErrUnknownProvider
 	}
-	current := coordinator.manager.Current()
-	if current == nil {
+	if current := coordinator.manager.Current(); current == nil {
 		return provider.ErrNoSession
-	}
-	if _, available := current.Providers[id]; !available {
+	} else if _, available := current.Providers[id]; !available {
 		return provider.ErrNoSession
 	}
 	complete, err := coordinator.manager.Begin(state.OperationRefresh)
@@ -158,6 +182,13 @@ func (coordinator *Coordinator) Logout(_ context.Context, id provider.ID) error 
 	}
 	outcome := state.OutcomeFailed
 	defer func() { complete(outcome) }()
+	current := coordinator.manager.Current()
+	if current == nil {
+		return provider.ErrNoSession
+	}
+	if _, available := current.Providers[id]; !available {
+		return provider.ErrNoSession
+	}
 	providers := cloneProviders(current.Providers)
 	delete(providers, id)
 	pruneUnusableProviders(providers, coordinator.now())
@@ -194,6 +225,9 @@ func (coordinator *Coordinator) Expire(now time.Time) (bool, error) {
 		return false, nil
 	}
 	if len(providers) == 0 {
+		// Expiry of the final provider is a terminal transition valid from any
+		// active state, so it does not take a refresh lease. Callers serialize
+		// Expire with every other account mutation.
 		if err := coordinator.commit(nil); err != nil {
 			return false, err
 		}
@@ -205,6 +239,15 @@ func (coordinator *Coordinator) Expire(now time.Time) (bool, error) {
 	}
 	outcome := state.OutcomeFailed
 	defer func() { complete(outcome) }()
+	// Re-read under the lease so a concurrent mutation cannot be overwritten.
+	if current = coordinator.manager.Current(); current == nil || len(current.Providers) == 0 {
+		return false, nil
+	}
+	providers = cloneProviders(current.Providers)
+	pruneUnusableProviders(providers, now)
+	if len(providers) == 0 || len(providers) == len(current.Providers) {
+		return false, nil
+	}
 	if err := coordinator.publish(providers); err != nil {
 		return false, err
 	}
@@ -236,18 +279,15 @@ func (coordinator *Coordinator) publish(providers map[provider.ID]provider.Snaps
 	if len(providers) == 0 {
 		return provider.ErrNoSession
 	}
-	current := coordinator.manager.Current()
 	generation := uint64(1)
-	var previous map[string]state.NodeRef
-	if current != nil {
+	if current := coordinator.manager.Current(); current != nil {
 		generation = current.Generation + 1
-		previous = current.Selectors
 	}
 	nodes, err := runtimeNodes(providers)
 	if err != nil {
 		return err
 	}
-	builtNodes, selectors, err := coordinator.buildSelectors(generation, nodes, previous)
+	builtNodes, selectors, err := coordinator.buildSelectors(nodes)
 	if err != nil {
 		return fmt.Errorf("provider coordinator: build selectors: %w", err)
 	}
@@ -318,7 +358,7 @@ func (coordinator *Coordinator) currentProviders() map[provider.ID]provider.Snap
 	return cloneProviders(current.Providers)
 }
 
-func (coordinator *Coordinator) buildSelectors(_ uint64, nodes []state.Node, _ map[string]state.NodeRef) ([]state.Node, map[string]state.NodeRef, error) {
+func (coordinator *Coordinator) buildSelectors(nodes []state.Node) ([]state.Node, map[string]state.NodeRef, error) {
 	selectors, err := coordinator.builder.Build(nodes)
 	if err != nil {
 		return nil, nil, err

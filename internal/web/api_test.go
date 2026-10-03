@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -261,6 +262,7 @@ func TestAPIWildcardAndHostnamePolicy(t *testing.T) {
 	setup := func(origin string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "http://"+remoteHost+"/api/v1/access/setup", strings.NewReader(`{"token":"`+validTestToken+`"}`))
 		request.Host = remoteHost
+		request.RemoteAddr = "127.0.0.1:40001"
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Origin", origin)
 		response := httptest.NewRecorder()
@@ -470,6 +472,45 @@ func TestAccessTokenValidationBounds(t *testing.T) {
 	}
 }
 
+func TestAccessSetupRequiresLoopbackClient(t *testing.T) {
+	backend := &fakeBackend{}
+	api := newTestAPI(t, backend, newFakeSubscriptions())
+	status := func(remote string) map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "http://"+testHost+"/api/v1/access/status", nil)
+		req.Host = testHost
+		req.RemoteAddr = remote
+		response := httptest.NewRecorder()
+		api.ServeHTTP(response, req)
+		var body map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	if body := status("192.0.2.1:10001"); body["setupAllowed"] != false {
+		t.Fatalf("LAN client may set up: %v", body)
+	}
+	if body := status("[::1]:10001"); body["setupAllowed"] != true {
+		t.Fatalf("loopback client may not set up: %v", body)
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://"+testHost+"/api/v1/access/setup", strings.NewReader(`{"token":"`+validTestToken+`"}`))
+	req.Host = testHost
+	req.RemoteAddr = "192.0.2.1:10001"
+	req.Header.Set("Origin", testOrigin)
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	api.ServeHTTP(response, req)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "setup_requires_loopback") {
+		t.Fatalf("LAN setup = %d %s", response.Code, response.Body.String())
+	}
+	backend.mu.Lock()
+	calls := backend.accessSetupCalls
+	backend.mu.Unlock()
+	if calls != 0 {
+		t.Fatal("LAN setup reached the backend")
+	}
+}
+
 func TestAccessSetupFirstClaimIsAtomic(t *testing.T) {
 	backend := &fakeBackend{}
 	started := make(chan struct{}, 2)
@@ -478,44 +519,33 @@ func TestAccessSetupFirstClaimIsAtomic(t *testing.T) {
 	backend.accessSetupRelease = release
 	api := newTestAPI(t, backend, newFakeSubscriptions())
 
-	responses := make(chan *httptest.ResponseRecorder, 2)
-	for _, remote := range []string{"192.0.2.1:10001", "192.0.2.2:10002"} {
-		go func(remote string) {
-			req := httptest.NewRequest(http.MethodPost, "http://"+testHost+"/api/v1/access/setup", strings.NewReader(`{"token":"`+validTestToken+`"}`))
-			req.Host = testHost
-			req.RemoteAddr = remote
-			req.Header.Set("Origin", testOrigin)
-			req.Header.Set("Content-Type", "application/json")
-			response := httptest.NewRecorder()
-			api.ServeHTTP(response, req)
-			responses <- response
-		}(remote)
+	setup := func() *httptest.ResponseRecorder {
+		return request(api, http.MethodPost, "/api/v1/access/setup", `{"token":"`+validTestToken+`"}`, nil, testOrigin)
 	}
-	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatal("concurrent setup did not reach backend")
-		}
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() { first <- setup() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("setup did not reach backend")
+	}
+	// Every loopback peer shares one admission slot, so a concurrent claim is
+	// refused while the first is in flight.
+	if concurrent := setup(); concurrent.Code != http.StatusTooManyRequests {
+		t.Fatalf("concurrent setup = %d", concurrent.Code)
 	}
 	close(release)
-	statuses := map[int]int{}
-	for range 2 {
-		select {
-		case response := <-responses:
-			statuses[response.Code]++
-		case <-time.After(time.Second):
-			t.Fatal("concurrent setup did not finish")
-		}
+	if response := <-first; response.Code != http.StatusCreated {
+		t.Fatalf("first setup = %d", response.Code)
 	}
-	if statuses[http.StatusCreated] != 1 || statuses[http.StatusConflict] != 1 {
-		t.Fatalf("atomic setup statuses = %#v", statuses)
+	if again := setup(); again.Code != http.StatusConflict {
+		t.Fatalf("second claim = %d", again.Code)
 	}
 	backend.mu.Lock()
-	calls, initialized := backend.accessSetupCalls, backend.accessInitialized
+	initialized := backend.accessInitialized
 	backend.mu.Unlock()
-	if calls != 2 || !initialized {
-		t.Fatalf("first claim backend state calls=%d initialized=%t", calls, initialized)
+	if !initialized {
+		t.Fatal("first claim did not initialize")
 	}
 }
 
@@ -703,7 +733,7 @@ func TestNodeDetailsRequiresAuthenticationAndUsesExactRoute(t *testing.T) {
 
 	cookie, csrf := establish(t, api)
 	wrongMethod := requestWithCSRF(api, http.MethodPost, "/api/v1/nodes/"+nodeID+"/details", `{}`, cookie, csrf)
-	if wrongMethod.Code != http.StatusNotFound || wrongMethod.Header().Get("Cache-Control") != "no-store" {
+	if wrongMethod.Code != http.StatusMethodNotAllowed || wrongMethod.Header().Get("Allow") != http.MethodGet || wrongMethod.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("node details wrong method = %d %#v", wrongMethod.Code, wrongMethod.Header())
 	}
 	badPath := request(api, http.MethodGet, "/api/v1/nodes//details", "", cookie, "")
@@ -847,10 +877,9 @@ func TestStableSubscriptionURLAndRemovedRoutes(t *testing.T) {
 	if result.URL != expected {
 		t.Fatalf("stable URL = %#v", result)
 	}
-	metadata := request(api, http.MethodGet, "/api/v1/subscription", "", cookie, "")
 	status := request(api, http.MethodGet, "/api/v1/status", "", cookie, "")
-	if strings.Contains(metadata.Body.String(), result.URL) || strings.Contains(status.Body.String(), result.URL) {
-		t.Fatalf("ordinary endpoint exposed subscription URL: metadata=%s status=%s", metadata.Body.String(), status.Body.String())
+	if strings.Contains(status.Body.String(), result.URL) {
+		t.Fatalf("ordinary endpoint exposed subscription URL: status=%s", status.Body.String())
 	}
 	for _, legacy := range []struct {
 		method string
@@ -922,6 +951,49 @@ func TestSSESurvivesAccessMigration(t *testing.T) {
 	}
 }
 
+func TestSSEAcceptsSameOriginBrowserRequestsWithoutOrigin(t *testing.T) {
+	backend := &fakeBackend{events: make(chan Event), subscribed: make(chan struct{}, 1)}
+	api := newTestAPI(t, backend, newFakeSubscriptions())
+	cookie, _ := establish(t, api)
+	open := func(headers map[string]string) (*httptest.ResponseRecorder, context.CancelFunc, chan struct{}) {
+		ctx, cancel := context.WithCancel(context.Background())
+		req := httptest.NewRequest(http.MethodGet, "http://"+testHost+"/api/v1/events", nil).WithContext(ctx)
+		req.Host = testHost
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
+		req.AddCookie(cookie)
+		response := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			api.ServeHTTP(response, req)
+			close(done)
+		}()
+		return response, cancel, done
+	}
+	// Chromium sends no Origin on a same-origin EventSource GET.
+	_, cancel, done := open(map[string]string{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors"})
+	select {
+	case <-backend.subscribed:
+	case <-time.After(time.Second):
+		t.Fatal("same-origin SSE without Origin was rejected")
+	}
+	cancel()
+	<-done
+	for _, headers := range []map[string]string{
+		{"Sec-Fetch-Site": "cross-site"},
+		{"Sec-Fetch-Site": "same-site"},
+		{"Origin": "http://evil.example"},
+	} {
+		response, cancel, done := open(headers)
+		<-done
+		cancel()
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("SSE with %v = %d, want 403", headers, response.Code)
+		}
+	}
+}
+
 func establish(t *testing.T, api *API) (*http.Cookie, string) {
 	t.Helper()
 	response := request(api, http.MethodPost, "/api/v1/access/setup", `{"token":"`+validTestToken+`"}`, nil, testOrigin)
@@ -982,6 +1054,7 @@ func rawRequest(api *API, method, route, body string, cookie *http.Cookie, origi
 	}
 	req := httptest.NewRequest(method, "http://"+testHost+route, reader)
 	req.Host = testHost
+	req.RemoteAddr = "127.0.0.1:40000"
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -997,4 +1070,147 @@ func rawRequest(api *API, method, route, body string, cookie *http.Cookie, origi
 	response := httptest.NewRecorder()
 	api.ServeHTTP(response, req)
 	return response
+}
+
+func TestClientIdentityGroupsIPv6Prefixes(t *testing.T) {
+	if clientIdentity("[2001:db8:1:2::10]:1000") != clientIdentity("[2001:db8:1:2:ffff::1]:2000") {
+		t.Fatal("addresses in one IPv6 /64 have separate budgets")
+	}
+	if clientIdentity("[2001:db8:1:2::10]:1000") == clientIdentity("[2001:db8:1:3::10]:1000") {
+		t.Fatal("different IPv6 /64 prefixes share a budget")
+	}
+	if clientIdentity("192.0.2.1:1") == clientIdentity("192.0.2.2:1") {
+		t.Fatal("IPv4 addresses share a budget")
+	}
+	if clientIdentity("[::1]:1") != "loopback" || clientIdentity("127.0.0.2:1") != "loopback" {
+		t.Fatal("loopback is not grouped")
+	}
+}
+
+func TestHashedAssetsAreImmutableAndIndexIsNotCached(t *testing.T) {
+	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
+	entries, err := fs.ReadDir(staticFiles, "static/dist/assets")
+	if err != nil || len(entries) == 0 {
+		t.Skip("frontend build output is not embedded")
+	}
+	asset := request(api, http.MethodGet, "/assets/"+entries[0].Name(), "", nil, "")
+	if asset.Code != http.StatusOK || !strings.Contains(asset.Header().Get("Cache-Control"), "immutable") {
+		t.Fatalf("asset = %d %q", asset.Code, asset.Header().Get("Cache-Control"))
+	}
+	index := request(api, http.MethodGet, "/", "", nil, "")
+	if index.Code != http.StatusOK || index.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("index = %d %q", index.Code, index.Header().Get("Cache-Control"))
+	}
+	spa := request(api, http.MethodGet, "/signin", "", nil, "")
+	if spa.Code != http.StatusOK || spa.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("SPA fallback = %d %q", spa.Code, spa.Header().Get("Cache-Control"))
+	}
+	missing := request(api, http.MethodGet, "/assets/missing.js", "", nil, "")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing asset = %d", missing.Code)
+	}
+}
+
+func problemCode(t *testing.T, response *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Code string `json:"code"`
+	}
+	_ = json.NewDecoder(bytes.NewReader(response.Body.Bytes())).Decode(&body)
+	return body.Code
+}
+
+func TestStateChangingRequestGuards(t *testing.T) {
+	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
+	cookie, csrf := establish(t, api)
+	if response := rawRequest(api, http.MethodPost, "/api/v1/control/refresh", `{}`, cookie, testOrigin, "wrong"); response.Code != http.StatusForbidden || problemCode(t, response) != "csrf_failed" {
+		t.Fatalf("bad CSRF = %d %s", response.Code, response.Body.String())
+	}
+	if response := rawRequest(api, http.MethodPost, "/api/v1/control/refresh", `{}`, cookie, "http://evil.example", csrf); response.Code != http.StatusForbidden || problemCode(t, response) != "invalid_origin" {
+		t.Fatalf("bad Origin = %d %s", response.Code, response.Body.String())
+	}
+	large := `{"provider":"` + strings.Repeat("a", 1<<20) + `"}`
+	if response := requestWithCSRF(api, http.MethodPost, "/api/v1/control/refresh", large, cookie, csrf); response.Code != http.StatusRequestEntityTooLarge || problemCode(t, response) != "body_too_large" {
+		t.Fatalf("oversized body = %d %s", response.Code, response.Body.String())
+	}
+	if response := requestWithCSRF(api, http.MethodPost, "/api/v1/control/refresh", `{"provider":`, cookie, csrf); response.Code != http.StatusBadRequest || problemCode(t, response) != "invalid_json" {
+		t.Fatalf("malformed JSON = %d %s", response.Code, response.Body.String())
+	}
+	textRequest := httptest.NewRequest(http.MethodPost, "http://"+testHost+"/api/v1/control/refresh", strings.NewReader(`{}`))
+	textRequest.Host = testHost
+	textRequest.RemoteAddr = "127.0.0.1:40000"
+	textRequest.Header.Set("Content-Type", "text/plain")
+	textRequest.Header.Set("Origin", testOrigin)
+	textRequest.Header.Set(csrfHeaderName, csrf)
+	textRequest.AddCookie(cookie)
+	textResponse := httptest.NewRecorder()
+	api.ServeHTTP(textResponse, textRequest)
+	if textResponse.Code != http.StatusUnsupportedMediaType || problemCode(t, textResponse) != "invalid_content_type" {
+		t.Fatalf("non-JSON body = %d %s", textResponse.Code, textResponse.Body.String())
+	}
+}
+
+func TestUnknownHostIsRejected(t *testing.T) {
+	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
+	req := httptest.NewRequest(http.MethodGet, "http://attacker.example/api/v1/access/status", nil)
+	req.Host = "attacker.example:10809"
+	response := httptest.NewRecorder()
+	api.ServeHTTP(response, req)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("DNS-rebinding host = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestProviderLoginThrottling(t *testing.T) {
+	backend := &fakeBackend{}
+	api := newTestAPI(t, backend, newFakeSubscriptions())
+	cookie, csrf := establish(t, api)
+	login := func(account string) *httptest.ResponseRecorder {
+		return requestWithCSRF(api, http.MethodPost, "/api/v1/auth/login", `{"provider":"kuaifan","account":"`+account+`","password":"secret"}`, cookie, csrf)
+	}
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	backend.mu.Lock()
+	backend.accountLoginStarted, backend.accountLoginRelease = started, release
+	backend.mu.Unlock()
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() { first <- login("person@example.com") }()
+	<-started
+	if concurrent := login("person@example.com"); concurrent.Code != http.StatusTooManyRequests || problemCode(t, concurrent) != "login_in_progress" {
+		t.Fatalf("concurrent login = %d %s", concurrent.Code, concurrent.Body.String())
+	}
+	close(release)
+	<-first
+	backend.mu.Lock()
+	backend.accountLoginStarted, backend.accountLoginRelease = nil, nil
+	backend.mu.Unlock()
+	for range 5 {
+		_ = login("fail@example.com")
+	}
+	if limited := login("fail@example.com"); limited.Code != http.StatusTooManyRequests || problemCode(t, limited) != "login_rate_limited" || limited.Header().Get("Retry-After") == "" {
+		t.Fatalf("rate-limited login = %d %s", limited.Code, limited.Body.String())
+	}
+}
+
+type secretDiagnosticsBackend struct{ fakeBackend }
+
+func (*secretDiagnosticsBackend) Diagnostics(context.Context) (any, error) {
+	return map[string]any{"version": "1", "token": "very-secret", "nested": map[string]any{"password": "hunter2"}}, nil
+}
+
+func TestDiagnosticsExportIsRedactedAttachment(t *testing.T) {
+	backend := &secretDiagnosticsBackend{}
+	api, err := NewAPI(testConfig(), Dependencies{Backend: backend, Subscriptions: newFakeSubscriptions()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie, csrf := establish(t, api)
+	response := requestWithCSRF(api, http.MethodPost, "/api/v1/diagnostics/export", `{}`, cookie, csrf)
+	if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Disposition"), "attachment") {
+		t.Fatalf("diagnostics = %d %#v", response.Code, response.Header())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "very-secret") || strings.Contains(body, "hunter2") || !strings.Contains(body, `"version":"1"`) {
+		t.Fatalf("diagnostics were not redacted: %s", body)
+	}
 }

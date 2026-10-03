@@ -39,6 +39,7 @@ var (
 	ErrBindingKeyAlreadyConfigured   = errors.New("account binding key is already configured")
 	ErrStateNotFound                 = errors.New("persistent state not found")
 	ErrCorruptState                  = errors.New("persistent state is corrupt")
+	ErrStoreClosed                   = errors.New("persistent state store is closed")
 	ErrInsecureStatePath             = errors.New("state path has insecure ownership or mode")
 	ErrInvalidSnapshot               = errors.New("invalid runtime snapshot")
 	ErrInvalidTransition             = errors.New("invalid service state transition")
@@ -118,7 +119,7 @@ type Node struct {
 	Health    NodeHealth    `json:"health"`
 	UDPHealth UDPHealth     `json:"udpHealth"`
 	TCPRTT    time.Duration `json:"tcpRtt,omitempty"`
-	ProbedAt  time.Time     `json:"probedAt,omitempty"`
+	ProbedAt  time.Time     `json:"probedAt,omitzero"`
 }
 
 // TunnelEligible reports whether a generic provider transport can accept the
@@ -144,28 +145,13 @@ type AccountSummary struct {
 	Display            string    `json:"display"`
 	Tier               string    `json:"tier"`
 	SubscriptionActive bool      `json:"subscriptionActive"`
-	SubscriptionEndsAt time.Time `json:"subscriptionEndsAt,omitempty"`
+	SubscriptionEndsAt time.Time `json:"subscriptionEndsAt,omitzero"`
 }
 
 // NewAccountSummary is the safe construction path for browser-visible account
 // metadata. It never retains the supplied raw account identifier.
 func NewAccountSummary(account, tier string, subscriptionActive bool, subscriptionEndsAt time.Time) AccountSummary {
-	return AccountSummary{Display: RedactAccount(account), Tier: tier, SubscriptionActive: subscriptionActive, SubscriptionEndsAt: subscriptionEndsAt}
-}
-
-// RedactAccount returns a safe display form. It never returns the original
-// local part and declines to expose malformed account strings.
-func RedactAccount(account string) string {
-	account = strings.TrimSpace(account)
-	at := strings.LastIndexByte(account, '@')
-	if at <= 0 || at == len(account)-1 || strings.Count(account, "@") != 1 {
-		return "•••"
-	}
-	local := []rune(account[:at])
-	if len(local) == 0 {
-		return "•••"
-	}
-	return string(local[0]) + "•••@" + account[at+1:]
+	return AccountSummary{Display: provider.RedactAccount(account), Tier: tier, SubscriptionActive: subscriptionActive, SubscriptionEndsAt: subscriptionEndsAt}
 }
 
 // RuntimeSnapshot is one atomic aggregate of independent provider accounts.
@@ -395,20 +381,58 @@ func (l LastGoodState) clone() LastGoodState {
 
 // SubscriptionAuthority contains account-bound selector and proxy credential
 // keys. AccountBinding is the stable, non-reversible subscription path token.
+// AccountRoster records, per provider, a keyed digest of the account the
+// credential epoch was issued to. Entries survive provider logout so that a
+// later login with a different account of the same provider rotates the epoch,
+// while adding, removing, or expiring other providers never does.
 type SubscriptionAuthority struct {
 	SelectorKey    []byte
 	ProxyAuthKey   []byte
 	AccountBinding []byte
+	AccountRoster  map[provider.ID][]byte
 	ActivatedAt    time.Time
 }
 
-const accountBindingDomain = "kfadapter/subscription-account/v2\x00"
+const (
+	accountBindingDomain = "kfadapter/subscription-account/v2\x00"
+	accountRosterDomain  = "kfadapter/subscription-roster/v1\x00"
+	maxAccountRoster     = 64
+)
 
 func (g SubscriptionAuthority) clone() SubscriptionAuthority {
 	g.SelectorKey = append([]byte(nil), g.SelectorKey...)
 	g.ProxyAuthKey = append([]byte(nil), g.ProxyAuthKey...)
 	g.AccountBinding = append([]byte(nil), g.AccountBinding...)
+	g.AccountRoster = cloneAccountRoster(g.AccountRoster)
 	return g
+}
+
+// Clone returns a deep copy of the authority.
+func (g SubscriptionAuthority) Clone() SubscriptionAuthority { return g.clone() }
+
+func cloneAccountRoster(roster map[provider.ID][]byte) map[provider.ID][]byte {
+	if roster == nil {
+		return nil
+	}
+	clone := make(map[provider.ID][]byte, len(roster))
+	for id, digest := range roster {
+		clone[id] = append([]byte(nil), digest...)
+	}
+	return clone
+}
+
+// SameAccountRoster reports whether two rosters contain identical entries.
+func SameAccountRoster(left, right map[provider.ID][]byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for id, digest := range left {
+		other, exists := right[id]
+		if !exists || subtle.ConstantTimeCompare(digest, other) != 1 {
+			return false
+		}
+	}
+	return true
 }
 
 // AccountBindingString returns the raw Base64url stable subscription token.
@@ -530,6 +554,105 @@ func accountBindingFor(bindingKey []byte, userID string) ([]byte, error) {
 	return mac.Sum(nil), nil
 }
 
+func accountRosterDigest(bindingKey []byte, id provider.ID, userID string) ([]byte, error) {
+	canonical, err := canonicalProviderUserID(userID)
+	if err != nil || !id.Valid() || len(bindingKey) != sha256.Size {
+		return nil, ErrAccountChanged
+	}
+	mac := hmac.New(sha256.New, bindingKey)
+	_, _ = mac.Write([]byte(accountRosterDomain))
+	_, _ = mac.Write([]byte(id))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(canonical))
+	return mac.Sum(nil), nil
+}
+
+// parseAccountBindingID decodes the canonical composite produced by
+// RuntimeSnapshot.AccountBindingID into provider -> user ID pairs.
+func parseAccountBindingID(bindingID string) (map[provider.ID]string, error) {
+	accounts := make(map[provider.ID]string)
+	remaining := bindingID
+	next := func() (string, error) {
+		separator := strings.IndexByte(remaining, ':')
+		if separator <= 0 {
+			return "", ErrAccountChanged
+		}
+		length, err := strconv.Atoi(remaining[:separator])
+		if err != nil || length < 0 || length > len(remaining)-separator-1 {
+			return "", ErrAccountChanged
+		}
+		value := remaining[separator+1 : separator+1+length]
+		remaining = remaining[separator+1+length:]
+		return value, nil
+	}
+	for remaining != "" {
+		id, err := next()
+		if err != nil {
+			return nil, err
+		}
+		userID, err := next()
+		if err != nil {
+			return nil, err
+		}
+		providerID := provider.ID(id)
+		if !providerID.Valid() {
+			return nil, ErrAccountChanged
+		}
+		if _, duplicate := accounts[providerID]; duplicate {
+			return nil, ErrAccountChanged
+		}
+		accounts[providerID] = userID
+	}
+	if len(accounts) == 0 {
+		return nil, ErrAccountChanged
+	}
+	return accounts, nil
+}
+
+func accountRosterDigests(bindingKey []byte, bindingID string) (map[provider.ID][]byte, error) {
+	accounts, err := parseAccountBindingID(bindingID)
+	if err != nil {
+		return nil, err
+	}
+	digests := make(map[provider.ID][]byte, len(accounts))
+	for id, userID := range accounts {
+		digest, err := accountRosterDigest(bindingKey, id, userID)
+		if err != nil {
+			for _, previous := range digests {
+				wipeBytes(previous)
+			}
+			return nil, err
+		}
+		digests[id] = digest
+	}
+	return digests, nil
+}
+
+// rosterAdmits reports whether every active provider account in bindingID is
+// recorded in the authority's roster. An empty roster is a legacy v8 epoch
+// whose binding was derived from the complete composite account identity.
+func rosterAdmits(authority SubscriptionAuthority, bindingKey []byte, bindingID string) bool {
+	if len(authority.AccountBinding) != sha256.Size || len(bindingKey) != sha256.Size {
+		return false
+	}
+	if len(authority.AccountRoster) == 0 {
+		return matchesAccountBinding(authority.AccountBinding, bindingKey, bindingID)
+	}
+	digests, err := accountRosterDigests(bindingKey, bindingID)
+	if err != nil {
+		return false
+	}
+	admitted := true
+	for id, digest := range digests {
+		stored, exists := authority.AccountRoster[id]
+		if !exists || subtle.ConstantTimeCompare(stored, digest) != 1 {
+			admitted = false
+		}
+		wipeBytes(digest)
+	}
+	return admitted
+}
+
 func matchesAccountBinding(binding, bindingKey []byte, userID string) bool {
 	expected, err := accountBindingFor(bindingKey, userID)
 	if err != nil || len(binding) != sha256.Size {
@@ -593,20 +716,19 @@ func (p PersistentState) VerifyAccessToken(token string) bool {
 	return p.AccessTokenVerifier.VerifyAccessToken(token)
 }
 
-// DeriveAccountBinding computes the durable subscription path token for userID.
-func (p PersistentState) DeriveAccountBinding(userID string) ([]byte, error) {
-	if !p.AccessTokenInitialized() {
-		return nil, ErrAccountChanged
-	}
-	return accountBindingFor(p.AccessTokenVerifier.Hash, userID)
+// MatchesAccount reports whether authority admits every provider account in
+// the composite account identity.
+func (p PersistentState) MatchesAccount(bindingID string) bool {
+	return p.AuthorityAdmits(p.Subscription, bindingID)
 }
 
-// MatchesAccount verifies the active durable account binding in constant time.
-func (p PersistentState) MatchesAccount(userID string) bool {
+// AuthorityAdmits reports whether authority, keyed by this installation's
+// access verifier, admits every provider account in bindingID.
+func (p PersistentState) AuthorityAdmits(authority SubscriptionAuthority, bindingID string) bool {
 	if !p.AccessTokenInitialized() {
 		return false
 	}
-	return matchesAccountBinding(p.Subscription.AccountBinding, p.AccessTokenVerifier.Hash, userID)
+	return rosterAdmits(authority, p.AccessTokenVerifier.Hash, bindingID)
 }
 
 // NewPersistentState creates an uninitialized installation with fresh local
@@ -640,30 +762,66 @@ func newSubscriptionAuthority(activatedAt time.Time) (SubscriptionAuthority, err
 	return SubscriptionAuthority{SelectorKey: selectorKey, ProxyAuthKey: proxyKey, ActivatedAt: activatedAt.UTC()}, nil
 }
 
-// EnsureSubscriptionAccountBinding keeps credentials stable for the same
-// account. A changed account receives fresh selector/proxy keys, a new binding,
-// and no credential-bearing cached subscription state.
-func EnsureSubscriptionAccountBinding(p *PersistentState, userID string, now time.Time) (bool, error) {
+// EnsureSubscriptionAccountBinding keeps credentials stable while every
+// provider account matches the roster entry recorded for that provider. New
+// providers join the roster and logged-out providers keep their entries, so
+// neither rotates credentials. Only a different account for an already
+// recorded provider receives fresh selector/proxy keys, a new binding, and no
+// credential-bearing cached subscription state. It reports whether it rotated.
+func EnsureSubscriptionAccountBinding(p *PersistentState, bindingID string, now time.Time) (bool, error) {
 	if p == nil || !p.AccessTokenInitialized() || validateSubscriptionAuthority(p.Subscription) != nil {
 		return false, ErrAccountChanged
 	}
-	binding, err := p.DeriveAccountBinding(userID)
+	bindingKey := p.AccessTokenVerifier.Hash
+	digests, err := accountRosterDigests(bindingKey, bindingID)
 	if err != nil {
 		return false, err
 	}
-	defer wipeBytes(binding)
-	if len(p.Subscription.AccountBinding) == 0 {
-		p.Subscription.AccountBinding = append([]byte(nil), binding...)
+	current := p.Subscription
+	switch {
+	case len(current.AccountBinding) == 0:
+		token, err := randomBytes(sha256.Size)
+		if err != nil {
+			return false, err
+		}
+		p.Subscription.AccountBinding = token
+		p.Subscription.AccountRoster = digests
 		return false, nil
-	}
-	if subtle.ConstantTimeCompare(p.Subscription.AccountBinding, binding) == 1 {
-		return false, nil
+	case len(current.AccountRoster) == 0:
+		// A legacy epoch bound to one composite identity adopts a roster when the
+		// same composite logs in again.
+		if matchesAccountBinding(current.AccountBinding, bindingKey, bindingID) {
+			p.Subscription.AccountRoster = digests
+			return false, nil
+		}
+	default:
+		conflict := false
+		for id, digest := range digests {
+			if stored, exists := current.AccountRoster[id]; exists && subtle.ConstantTimeCompare(stored, digest) != 1 {
+				conflict = true
+			}
+		}
+		merged := cloneAccountRoster(current.AccountRoster)
+		for id, digest := range digests {
+			if _, exists := merged[id]; !exists {
+				merged[id] = append([]byte(nil), digest...)
+			}
+		}
+		if !conflict && len(merged) <= maxAccountRoster {
+			p.Subscription.AccountRoster = merged
+			return false, nil
+		}
 	}
 	next, err := newSubscriptionAuthority(now)
 	if err != nil {
 		return false, err
 	}
-	next.AccountBinding = append([]byte(nil), binding...)
+	token, err := randomBytes(sha256.Size)
+	if err != nil {
+		return false, err
+	}
+	next.AccountBinding = token
+	next.AccountRoster = digests
 	wipeBytes(p.Subscription.SelectorKey)
 	wipeBytes(p.Subscription.ProxyAuthKey)
 	p.Subscription = next
@@ -725,6 +883,14 @@ func ValidatePersistentState(p PersistentState) error {
 func validateSubscriptionAuthority(g SubscriptionAuthority) error {
 	if g.ActivatedAt.IsZero() || len(g.SelectorKey) != sha256.Size || len(g.ProxyAuthKey) != sha256.Size || (len(g.AccountBinding) != 0 && len(g.AccountBinding) != sha256.Size) {
 		return fmt.Errorf("invalid subscription credential epoch")
+	}
+	if len(g.AccountRoster) > maxAccountRoster || (len(g.AccountRoster) != 0 && len(g.AccountBinding) == 0) {
+		return fmt.Errorf("invalid subscription account roster")
+	}
+	for id, digest := range g.AccountRoster {
+		if !id.Valid() || len(digest) != sha256.Size {
+			return fmt.Errorf("invalid subscription account roster")
+		}
 	}
 	return nil
 }

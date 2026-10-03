@@ -3,6 +3,7 @@ package kuaifan
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -703,4 +704,39 @@ func (r stringReader) Read(data []byte) (int, error) {
 	}
 	count := copy(data, r)
 	return count, io.EOF
+}
+
+func TestRequestEnvelopePreservesProfileNonce(t *testing.T) {
+	payload, err := requestEnvelope(map[string]any{"nonce": "07531556"}, "zh_CN", "20260926000000000", rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload["nonce"] != "07531556" {
+		t.Fatalf("explicit nonce overwritten: %v", payload["nonce"])
+	}
+	generated, err := requestEnvelope(map[string]any{}, "zh_CN", "20260926000000000", rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, ok := generated["nonce"].(string)
+	if !ok || len(nonce) != 8 {
+		t.Fatalf("generated nonce = %v", generated["nonce"])
+	}
+}
+
+func TestUnexpectedLinesAreSkippedNotFatal(t *testing.T) {
+	groups := []any{map[string]any{"id": "g"}}
+	good := map[string]any{"host": "node.example", "port": 11000, "provider": "WIFIIN", "groupId": "g", "desc": "good"}
+	newProvider := map[string]any{"host": "node2.example", "port": 11001, "provider": "WS", "groupId": "g"}
+	badPort := map[string]any{"host": "node3.example", "port": 0, "provider": "WIFIIN", "groupId": "g"}
+	lines, err := validateLines(rawLineFields(t, groups, []any{good, newProvider, badPort}))
+	if err != nil {
+		t.Fatalf("one unexpected row failed the catalog: %v", err)
+	}
+	if len(lines.Lines) != 1 || lines.Lines[0].Host != "node.example" || lines.Skipped != 2 {
+		t.Fatalf("lines = %#v", lines)
+	}
+	if _, err := validateLines(rawLineFields(t, groups, []any{newProvider, badPort})); !errors.Is(err, ErrInvalidLine) {
+		t.Fatalf("all-invalid catalog error = %v", err)
+	}
 }

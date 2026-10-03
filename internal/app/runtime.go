@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kfadapter/kfadapter/internal/logging"
 	"github.com/kfadapter/kfadapter/internal/provider"
 	"github.com/kfadapter/kfadapter/internal/selector"
 	"github.com/kfadapter/kfadapter/internal/state"
@@ -192,6 +194,7 @@ type RuntimeConfig struct {
 	ProbeConcurrent int
 	EventClients    int
 	EventBuffer     int
+	Logger          *slog.Logger
 }
 
 // Runtime is the sole browser-safe facade over state, control,
@@ -218,7 +221,11 @@ type Runtime struct {
 	lastRefreshAt time.Time
 	nextRefreshAt time.Time
 	alive         atomic.Bool
-	events        *eventHub
+	// accessInitialized caches the durable, write-once access verifier flag so
+	// the unauthenticated access-status probe never reads the whole state.
+	accessInitialized atomic.Bool
+	events            *eventHub
+	logger            *slog.Logger
 }
 
 // NewRuntime validates the dependencies needed by every web.Backend method.
@@ -248,16 +255,14 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if config.RefreshEvery < minRefreshPolicy || config.RefreshEvery > maxRefreshPolicy {
 		config.RefreshEvery = 23 * time.Hour
 	}
+	if config.Logger == nil {
+		config.Logger = logging.Discard()
+	}
+	// provider.refreshInterval in config.yaml is the only refresh cadence. A
+	// legacy persisted refresh policy has no UI and is deliberately ignored.
 	persistent, err := config.Store.Load()
 	if err != nil {
 		return nil, err
-	}
-	if persistent.Preferences.RefreshPolicy != "" {
-		refreshEvery, err := parseRefreshPolicy(persistent.Preferences.RefreshPolicy)
-		if err != nil {
-			return nil, err
-		}
-		config.RefreshEvery = refreshEvery
 	}
 	mutationMu := config.MutationMu
 	if mutationMu == nil {
@@ -292,8 +297,9 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		startedAt: config.StartedAt.UTC(), now: config.Now, dial: config.DialContext,
 		probeTimeout: config.ProbeTimeout, probeSlots: make(chan struct{}, config.ProbeConcurrent), mutations: mutationMu,
 		refreshEvery: config.RefreshEvery, lastRefreshAt: lastRefreshAt, nextRefreshAt: nextRefreshAt,
-		events: newEventHub(config.EventClients, config.EventBuffer),
+		events: newEventHub(config.EventClients, config.EventBuffer), logger: config.Logger,
 	}
+	runtime.accessInitialized.Store(persistent.AccessTokenInitialized())
 	runtime.alive.Store(true)
 	return runtime, nil
 }
@@ -348,11 +354,7 @@ func (r *Runtime) AccessStatus(context.Context) (web.AccessStatus, error) {
 	if !r.alive.Load() {
 		return web.AccessStatus{}, errRuntimeStopped
 	}
-	persistent, err := r.store.Load()
-	if err != nil {
-		return web.AccessStatus{}, err
-	}
-	return web.AccessStatus{Initialized: persistent.AccessTokenInitialized()}, nil
+	return web.AccessStatus{Initialized: r.accessInitialized.Load()}, nil
 }
 
 // AccessSetup atomically commits the first local access-token verifier, then
@@ -379,6 +381,7 @@ func (r *Runtime) AccessSetup(_ context.Context, token string) error {
 	if persistent.AccessTokenVerifier == nil {
 		return classifyAccessSetupError(errors.New("access verifier was not persisted"))
 	}
+	r.accessInitialized.Store(true)
 	if err := r.manager.ConfigureBindingKey(persistent.AccessTokenVerifier.BindingKey()); err != nil {
 		// The verifier is already durable. Startup will retry this deterministic
 		// configuration before accepting a login, rather than risking a reset.
@@ -571,7 +574,6 @@ func (r *Runtime) Login(ctx context.Context, input web.LoginInput) (web.Account,
 	account, err := r.providers.Login(ctx, id, provider.Credentials{
 		Account: input.Account, Password: input.Password, InstallationID: persistent.InstallationID,
 	})
-	input.Password = ""
 	if err != nil {
 		r.publish("state", lifecycleEvent{State: string(r.manager.State())})
 		return web.Account{}, classifyLoginError(err)
@@ -633,15 +635,22 @@ func (r *Runtime) Refresh(ctx context.Context, providerID string) error {
 	if !r.alive.Load() {
 		return errRuntimeStopped
 	}
+	scope := providerID
+	if scope == "" {
+		scope = "all"
+	}
 	before := r.manager.Current()
 	if err := r.providers.Refresh(ctx, id); err != nil {
+		r.logger.Warn("provider refresh failed", "providers", scope, "state", string(r.manager.State()), "error", logging.Error(err))
 		r.publish("refresh", refreshEvent{State: string(r.manager.State()), Complete: false})
 		return err
 	}
 	current := r.manager.Current()
 	if current == nil || before == nil || current.Generation <= before.Generation || !state.SessionUsable(current, r.now()) {
+		r.logger.Warn("provider refresh did not commit a new generation", "providers", scope)
 		return errors.New("app: refresh did not commit a new complete generation")
 	}
+	r.logger.Info("provider refresh succeeded", "providers", scope, "generation", current.Generation)
 	r.recordRefresh()
 	r.publish("refresh", refreshEvent{State: string(r.manager.State()), Complete: true})
 	return nil
@@ -668,6 +677,7 @@ func (r *Runtime) Heartbeat(ctx context.Context, refresh bool) error {
 		return err
 	}
 	if expired {
+		r.logger.Warn("expired provider accounts were removed", "state", string(r.manager.State()))
 		r.publishState()
 		return nil
 	}
@@ -729,8 +739,11 @@ func (r *Runtime) Probe(ctx context.Context, nodeID string) (web.ProbeResult, er
 	defer cancel()
 	started := r.now()
 	connection, dialErr := r.dial(probeCtx, "tcp", net.JoinHostPort(node.Host, strconv.Itoa(int(node.Port))))
-	finished := r.now().UTC()
-	latency := finished.Sub(started)
+	// Measure before converting to UTC: UTC() strips the monotonic reading, and
+	// the latency must not jump with wall-clock adjustments.
+	end := r.now()
+	latency := end.Sub(started)
+	finished := end.UTC()
 	if latency < 0 {
 		latency = 0
 	}
@@ -868,15 +881,10 @@ func (r *Runtime) CommitControlSnapshotLocked(snapshot *state.RuntimeSnapshot) e
 	if err := r.manager.Commit(rebuilt); err != nil {
 		return abort(err)
 	}
-	return nil
-}
-
-func parseRefreshPolicy(value string) (time.Duration, error) {
-	interval, err := time.ParseDuration(value)
-	if err != nil || interval < minRefreshPolicy || interval > maxRefreshPolicy {
-		return 0, errors.New("app: refresh policy must be between 15m and 24h")
+	if plan.Rotated {
+		r.logger.Warn("subscription credentials rotated because a provider account changed")
 	}
-	return interval, nil
+	return nil
 }
 
 // Diagnostics returns a closed, redacted report. It intentionally omits
@@ -987,17 +995,6 @@ func (r *Runtime) scheduleRefreshRetry() {
 		r.nextRefreshAt = next
 	}
 	r.mu.Unlock()
-}
-
-func (r *Runtime) clearActiveSession() error {
-	if r == nil {
-		return errors.New("app: runtime unavailable")
-	}
-	_, err := r.store.Update(func(candidate *state.PersistentState) error {
-		candidate.ActiveSession = nil
-		return nil
-	})
-	return err
 }
 
 func (r *Runtime) publishState() {

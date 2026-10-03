@@ -90,12 +90,31 @@ func TestDriverLoginAndRefreshEncryptedControlProtocol(t *testing.T) {
 	}
 }
 
-func TestDriverRejectsMalformedCatalogLine(t *testing.T) {
+func TestDriverSkipsMalformedCatalogLines(t *testing.T) {
 	t.Parallel()
 	fixture := catalogFixture()
+	baseline, err := nodesFromCatalog(fixture.Groups, vipTier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture = catalogFixture()
 	fixture.Groups[0].Regions[0].Lines[0].ConnectIP = "example.com"
+	nodes, err := nodesFromCatalog(fixture.Groups, vipTier)
+	if err != nil {
+		t.Fatalf("one malformed line failed the catalog: %v", err)
+	}
+	if len(nodes) >= len(baseline) {
+		t.Fatalf("malformed line was not skipped: %d >= %d", len(nodes), len(baseline))
+	}
+	for _, group := range fixture.Groups {
+		for regionIndex := range group.Regions {
+			for lineIndex := range group.Regions[regionIndex].Lines {
+				group.Regions[regionIndex].Lines[lineIndex].ConnectIP = "example.com"
+			}
+		}
+	}
 	if _, err := nodesFromCatalog(fixture.Groups, vipTier); !errors.Is(err, ErrInvalidLine) {
-		t.Fatalf("nodesFromCatalog error = %v, want ErrInvalidLine", err)
+		t.Fatalf("all-malformed catalog error = %v, want ErrInvalidLine", err)
 	}
 }
 
@@ -203,7 +222,7 @@ func TestAccountRequiresQuotedVIPTime(t *testing.T) {
 	}
 }
 
-func TestPaidProfileRequiresMatchingFutureExactExpiry(t *testing.T) {
+func TestPaidProfileWithoutMatchingFutureExpiryIsStandard(t *testing.T) {
 	now := time.Date(2026, 7, 22, 6, 0, 0, 0, time.UTC)
 	profiles := []accountPayload{
 		{UserID: 15904241, Email: "alice@example.com", VIPTime: 98},
@@ -211,11 +230,20 @@ func TestPaidProfileRequiresMatchingFutureExactExpiry(t *testing.T) {
 		{UserID: 15904241, Email: "alice@example.com", VIPTime: 98, VIPSubscription: []vipPeriod{{EndTime: "2026-07-21 14:00:00", Grade: 1}}},
 		{UserID: 15904241, Email: "alice@example.com", VIPTime: 98, VIPSubscription: []vipPeriod{{EndTime: "2026-08-22 14:00:00", Grade: 2}}},
 		{UserID: 15904241, Email: "alice@example.com", SVIP: svipStatus{Time: 1}, VIPSubscription: []vipPeriod{{EndTime: "2026-08-22 14:00:00", Grade: 1}}},
+		{UserID: 15904241, Email: "alice@example.com", VIPTime: 98, VIPSubscription: []vipPeriod{{EndTime: "2026-08-22 14:00:00", Grade: 3}}},
 	}
 	for _, profile := range profiles {
-		if _, err := profile.account(time.FixedZone("Asia/Shanghai", 8*60*60), now); !errors.Is(err, ErrSchema) {
+		account, err := profile.account(time.FixedZone("Asia/Shanghai", 8*60*60), now)
+		if err != nil {
 			t.Fatalf("paid profile without matching future expiry error = %v", err)
 		}
+		if account.Tier != standardTier || account.SubscriptionActive || !account.SubscriptionEndsAt.IsZero() || !account.Valid() {
+			t.Fatalf("account = %#v, want inactive standard", account)
+		}
+	}
+	active, err := accountPayload{UserID: 15904241, Email: "alice@example.com", VIPTime: 98, VIPSubscription: []vipPeriod{{EndTime: "2026-08-22 14:00:00", Grade: 1}, {EndTime: "garbage", Grade: 1}}}.account(time.FixedZone("Asia/Shanghai", 8*60*60), now)
+	if err != nil || active.Tier != vipTier || !active.SubscriptionActive {
+		t.Fatalf("active VIP = %#v, %v", active, err)
 	}
 }
 

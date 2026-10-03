@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/kfadapter/kfadapter/internal/selector"
 	"github.com/kfadapter/kfadapter/internal/state"
@@ -22,20 +21,16 @@ type SelectorApplier interface {
 // persistence or runtime commit failure.
 type SelectorCoordinator struct {
 	socks SelectorApplier
-	now   func() time.Time
 
 	mu       sync.RWMutex
 	registry *selector.Registry
 }
 
-func NewSelectorCoordinator(socks SelectorApplier, registry *selector.Registry, now func() time.Time) (*SelectorCoordinator, error) {
+func NewSelectorCoordinator(socks SelectorApplier, registry *selector.Registry) (*SelectorCoordinator, error) {
 	if registry == nil {
 		return nil, errors.New("app: selector registry is required")
 	}
-	if now == nil {
-		now = time.Now
-	}
-	return &SelectorCoordinator{socks: socks, now: now, registry: registry}, nil
+	return &SelectorCoordinator{socks: socks, registry: registry}, nil
 }
 
 // Registry returns the current immutable registry. Callers must not mutate it.

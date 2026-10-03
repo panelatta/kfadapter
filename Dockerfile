@@ -1,9 +1,19 @@
-FROM golang:1.26-alpine AS builder
+# The console is built with the same Node major as CI. Dependency manifests are
+# copied before sources so dependency layers stay cached across source edits.
+FROM node:24-alpine AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
 
-RUN apk add --no-cache nodejs npm
+FROM golang:1.26-alpine AS builder
 WORKDIR /src
-COPY . .
-RUN cd web && npm ci && npm run build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
+COPY --from=web /src/internal/web/static/dist/ ./internal/web/static/dist/
 
 ARG VERSION=devel
 RUN CGO_ENABLED=0 go build \
@@ -23,4 +33,5 @@ ARG VERSION=devel
 LABEL org.opencontainers.image.version="$VERSION"
 COPY --from=builder --chown=65532:65532 /kfadapter ./kfadapter
 USER 65532:65532
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["./kfadapter", "healthcheck"]
 ENTRYPOINT ["./kfadapter"]

@@ -88,11 +88,26 @@ type Config struct {
 	Provider   Provider   `yaml:"provider"`
 }
 
+// Load reads and validates an existing configuration file without creating it.
 func Load(path string) (Config, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("open configuration: %w", err)
+	}
+	return load(file)
+}
+
+// LoadOrCreate is Load, but first writes the defaults when path is absent.
+// Only the long-running service uses it; inspection commands never write.
+func LoadOrCreate(path string) (Config, error) {
 	file, err := openOrCreate(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("open configuration: %w", err)
 	}
+	return load(file)
+}
+
+func load(file *os.File) (Config, error) {
 	defer file.Close()
 
 	decoder := yaml.NewDecoder(io.LimitReader(file, maxConfigBytes+1))
@@ -244,6 +259,9 @@ func validateListen(name, address string) error {
 	addr, err := netip.ParseAddr(address)
 	if err != nil || addr.String() != address {
 		return fmt.Errorf("%s must be a canonical numeric IP address", name)
+	}
+	if addr.Zone() != "" {
+		return fmt.Errorf("%s must not include an IPv6 zone", name)
 	}
 	return nil
 }

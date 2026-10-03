@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	wireprofile "github.com/kfadapter/kfadapter/internal/kuaifan/profile"
+	"github.com/kfadapter/kfadapter/internal/kuaifan/wifiin"
 	"io"
 	"net"
 	"net/http"
@@ -214,11 +215,6 @@ func (c *Client) FetchClientConfig(ctx context.Context) (ClientConfig, error) {
 	return ClientConfig{APIBase: base}, nil
 }
 
-// FetchConfig is retained as a concise synonym for FetchClientConfig.
-func (c *Client) FetchConfig(ctx context.Context) (ClientConfig, error) {
-	return c.FetchClientConfig(ctx)
-}
-
 // AccountProfile is the account metadata validated by user/refresh.do.
 type AccountProfile struct {
 	IsVIP     bool
@@ -304,6 +300,9 @@ type Line struct {
 type Lines struct {
 	Groups []Group
 	Lines  []Line
+	// Skipped counts individually malformed or unsupported rows that were
+	// omitted instead of failing the whole catalog.
+	Skipped int
 }
 
 // FetchLines uses the login token (not the authority provider token).
@@ -384,11 +383,15 @@ func requestEnvelope(fields any, language, timestamp string, randomness io.Reade
 		return nil, fmt.Errorf("control: request fields must be an object: %w", err)
 	}
 	payload["lang"] = language
-	nonce, err := wireprofile.RandomInt(randomness, 100000000)
-	if err != nil {
-		return nil, fmt.Errorf("control: nonce: %w", err)
+	// Profiles that derive their own nonce (Windows) set it explicitly; only
+	// requests without one receive a random eight-digit nonce.
+	if _, hasNonce := payload["nonce"]; !hasNonce {
+		nonce, err := wireprofile.RandomInt(randomness, 100000000)
+		if err != nil {
+			return nil, fmt.Errorf("control: nonce: %w", err)
+		}
+		payload["nonce"] = fmt.Sprintf("%08d", nonce)
 	}
-	payload["nonce"] = fmt.Sprintf("%08d", nonce)
 	if _, hasTime := payload["time"]; !hasTime {
 		payload["time"] = timestamp
 	}
@@ -574,26 +577,14 @@ func authorityKeyWithinLimit(key authorityKey) bool {
 
 func withinLimit(value string, limit int) bool { return len(value) <= limit }
 
+// buildProviderExtension builds the iOS WIFIIN extension through the wire
+// package, the single definition of its layout.
 func buildProviderExtension(providerToken, orderID, userID string) (string, error) {
-	for _, field := range []string{providerToken, orderID, userID} {
-		if !validProviderExtensionField(field) {
-			return "", ErrSchema
-		}
+	extension, err := wifiin.ProviderExtensionForProfile("ios", providerToken, orderID, userID)
+	if err != nil {
+		return "", ErrSchema
 	}
-	return "|" + providerToken + "|" + wireprofile.IOSPackageName + "|" + orderID + "|" + userID + "|" + wireprofile.IOSProviderDevice + "|" + wireprofile.IOSProviderVersion, nil
-}
-
-func validProviderExtensionField(value string) bool {
-	if value == "" || !withinLimit(value, maxControlFieldBytes) {
-		return false
-	}
-	for index := 0; index < len(value); index++ {
-		character := value[index]
-		if character < 0x21 || character > 0x7e || character == '|' {
-			return false
-		}
-	}
-	return true
+	return extension, nil
 }
 
 func optionalNestedString(fields map[string]json.RawMessage, outer, inner string) (string, bool) {
@@ -662,14 +653,24 @@ func validateLinesForProfile(fields map[string]json.RawMessage, language string,
 		groups = append(groups, Group{ID: id, Name: name})
 	}
 	lines := make([]Line, 0, len(lineObjects))
+	skipped := 0
 	for _, object := range lineObjects {
 		line, err := parseLine(object, groupIDs, language, profile)
+		if errors.Is(err, ErrInvalidLine) {
+			// One unexpected row (a new provider type, an odd port) must not
+			// discard the whole catalog; structural errors still fail below.
+			skipped++
+			continue
+		}
 		if err != nil {
 			return Lines{}, err
 		}
 		lines = append(lines, line)
 	}
-	return Lines{Groups: groups, Lines: lines}, nil
+	if len(lines) == 0 && skipped != 0 {
+		return Lines{}, ErrInvalidLine
+	}
+	return Lines{Groups: groups, Lines: lines, Skipped: skipped}, nil
 }
 
 func parseLine(object map[string]json.RawMessage, groupIDs map[string]struct{}, language string, profile providerProfile) (Line, error) {

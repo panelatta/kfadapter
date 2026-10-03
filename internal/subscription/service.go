@@ -6,7 +6,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
@@ -29,18 +28,11 @@ const (
 	subscriptionResponseChunkBytes  = 32 << 10
 )
 
-// SnapshotSource is satisfied by state.Manager. It lets callers render a
-// pinned state view without coupling the service to control-plane code.
-type SnapshotSource interface {
-	Current() *state.RuntimeSnapshot
-}
-
 // ServiceConfig wires the single, account-bound subscription authority. The
 // mutation locker is shared with the runtime coordinator; when present its
 // lock is always acquired before Service.mu by fetch-proof persistence.
 type ServiceConfig struct {
 	Store          *state.SQLiteStore
-	Snapshots      SnapshotSource
 	SocksAddress   string
 	Now            func() time.Time
 	MutationLocker sync.Locker
@@ -50,7 +42,6 @@ type ServiceConfig struct {
 // URL token is the verifier-derived account binding.
 type Service struct {
 	store          *state.SQLiteStore
-	snapshots      SnapshotSource
 	socksAddress   string
 	now            func() time.Time
 	mutationLocker sync.Locker
@@ -66,8 +57,11 @@ type Service struct {
 // transaction writes the binding, rendered subscription, and active session.
 type RuntimeCommitPlan struct {
 	Authority state.SubscriptionAuthority
-	userID    string
-	previous  state.SubscriptionAuthority
+	// Rotated reports that a provider account changed and the plan carries
+	// fresh selector and proxy keys.
+	Rotated  bool
+	userID   string
+	previous state.SubscriptionAuthority
 }
 
 type serviceHooks struct {
@@ -121,7 +115,7 @@ func NewService(config ServiceConfig) (*Service, error) {
 		config.Now = time.Now
 	}
 	service := &Service{
-		store: config.Store, snapshots: config.Snapshots,
+		store:        config.Store,
 		socksAddress: config.SocksAddress, now: config.Now, mutationLocker: config.MutationLocker,
 		responseSlots: make(chan struct{}, subscriptionResponseConcurrency),
 	}
@@ -129,57 +123,6 @@ func NewService(config ServiceConfig) (*Service, error) {
 		return nil, err
 	}
 	return service, nil
-}
-
-// SetSocksAddress re-renders the active subscription when a wildcard listener
-// is reached through a concrete host address.
-func (s *Service) SetSocksAddress(address string) error {
-	if s == nil {
-		return ErrSubscriptionUnavailable
-	}
-	if err := validateAddress(address); err != nil {
-		return err
-	}
-	if s.mutationLocker != nil {
-		s.mutationLocker.Lock()
-		defer s.mutationLocker.Unlock()
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.socksAddress == address {
-		return nil
-	}
-	previous := s.socksAddress
-	s.socksAddress = address
-	persistent, err := s.loadPersisted()
-	if err != nil {
-		s.socksAddress = previous
-		return err
-	}
-	updated, changed, err := s.reconcileListenerAddress(persistent)
-	if err != nil {
-		s.socksAddress = previous
-		return err
-	}
-	if changed {
-		updated, err = s.store.Update(func(candidate *state.PersistentState) error {
-			repaired, changed, err := s.reconcileListenerAddress(*candidate)
-			if err != nil || !changed {
-				return err
-			}
-			*candidate = repaired
-			return nil
-		})
-		if err != nil {
-			s.socksAddress = previous
-			return err
-		}
-	}
-	if err := s.validateRenderedState(updated); err != nil {
-		return err
-	}
-	s.primeCacheLocked(updated)
-	return nil
 }
 
 func (s *Service) reconcileAndPrime() error {
@@ -270,20 +213,15 @@ func (s *Service) reconcileListenerAddress(persistent state.PersistentState) (st
 	return candidate, true, nil
 }
 
-// matchesRenderedAtAddress accepts the current renderer and a pre-cutover body
-// filtered by persisted legacy exclusions, so startup can safely rewrite the
-// latter with every currently eligible node.
+// matchesRenderedAtAddress accepts a body the current renderer produced for a
+// previously configured listener address, so startup can re-render it.
 func (s *Service) matchesRenderedAtAddress(body string, nodes []state.PersistedNode, authority state.SubscriptionAuthority) bool {
 	address, ok := renderedAddress(body)
 	if !ok {
 		return false
 	}
 	rendered, _, _, err := s.renderPersistedNodesAt(nodes, authority, address)
-	if err == nil && rendered == body {
-		return true
-	}
-	legacy, _, _, err := s.renderPersistedNodesAtWithLegacyExclusions(nodes, authority, address, true)
-	return err == nil && legacy == body
+	return err == nil && rendered == body
 }
 
 func renderedAddress(body string) (string, bool) {
@@ -345,51 +283,8 @@ func (s *Service) primeCacheLocked(persistent state.PersistentState) {
 	s.cache = cache
 }
 
-// PublishAccount binds a successfully authenticated canonical account to
-// durable authority. Same-account calls preserve binding and SOCKS keys.
-func (s *Service) PublishAccount(ctx context.Context, userID string) (state.SubscriptionAuthority, func(), error) {
-	if err := ctx.Err(); err != nil {
-		return state.SubscriptionAuthority{}, nil, err
-	}
-	if strings.TrimSpace(userID) == "" {
-		return state.SubscriptionAuthority{}, nil, state.ErrAccountChanged
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var before state.PersistentState
-	after, err := s.store.Update(func(candidate *state.PersistentState) error {
-		before = candidate.Clone()
-		_, err := state.EnsureSubscriptionAccountBinding(candidate, userID, s.now().UTC())
-		return err
-	})
-	if err != nil {
-		return state.SubscriptionAuthority{}, nil, err
-	}
-	if err := s.validateRenderedState(after); err != nil {
-		if rollbackErr := s.store.Save(before); rollbackErr != nil {
-			return state.SubscriptionAuthority{}, nil, fmt.Errorf("subscription binding validation failed and rollback failed: %w", err)
-		}
-		return state.SubscriptionAuthority{}, nil, err
-	}
-	s.primeCacheLocked(after)
-	var once sync.Once
-	rollback := func() {
-		once.Do(func() {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			if err := s.store.Save(before); err == nil {
-				s.primeCacheLocked(before)
-			}
-		})
-	}
-	return cloneSubscriptionAuthority(after.Subscription), rollback, nil
-}
-
 func cloneSubscriptionAuthority(authority state.SubscriptionAuthority) state.SubscriptionAuthority {
-	authority.SelectorKey = append([]byte(nil), authority.SelectorKey...)
-	authority.ProxyAuthKey = append([]byte(nil), authority.ProxyAuthKey...)
-	authority.AccountBinding = append([]byte(nil), authority.AccountBinding...)
-	return authority
+	return authority.Clone()
 }
 
 // PrepareRuntimeCommit derives, but does not persist, the account-bound
@@ -409,11 +304,13 @@ func (s *Service) PrepareRuntimeCommit(ctx context.Context, userID string) (Runt
 		return RuntimeCommitPlan{}, err
 	}
 	candidate := persistent.Clone()
-	if _, err := state.EnsureSubscriptionAccountBinding(&candidate, userID, s.now().UTC()); err != nil {
+	rotated, err := state.EnsureSubscriptionAccountBinding(&candidate, userID, s.now().UTC())
+	if err != nil {
 		return RuntimeCommitPlan{}, err
 	}
 	return RuntimeCommitPlan{
 		Authority: cloneSubscriptionAuthority(candidate.Subscription),
+		Rotated:   rotated,
 		userID:    userID,
 		previous:  cloneSubscriptionAuthority(persistent.Subscription),
 	}, nil
@@ -435,18 +332,11 @@ func (s *Service) CommitRuntimeSnapshot(ctx context.Context, plan RuntimeCommitP
 	var before state.PersistentState
 	after, err := s.store.Update(func(candidate *state.PersistentState) error {
 		before = candidate.Clone()
-		if !sameSubscriptionAuthority(candidate.Subscription, plan.previous) {
+		if !sameSubscriptionAuthority(candidate.Subscription, plan.previous) ||
+			!state.SameAccountRoster(candidate.Subscription.AccountRoster, plan.previous.AccountRoster) {
 			return state.ErrAccountChanged
 		}
-		expectedBinding, err := candidate.DeriveAccountBinding(plan.userID)
-		if err != nil {
-			return err
-		}
-		matchesBinding := subtle.ConstantTimeCompare(plan.Authority.AccountBinding, expectedBinding) == 1
-		for index := range expectedBinding {
-			expectedBinding[index] = 0
-		}
-		if !matchesBinding {
+		if !candidate.AuthorityAdmits(plan.Authority, plan.userID) {
 			return state.ErrAccountChanged
 		}
 		changedAccount := !sameSubscriptionAuthority(candidate.Subscription, plan.Authority)
@@ -503,34 +393,6 @@ func (s *Service) updateLastGood(candidate *state.PersistentState, snapshot *sta
 		candidate.LastGood.CreatedAt = s.now().UTC()
 	}
 	return nil
-}
-
-// PublishSnapshot renders and persists the current account-bound subscription.
-func (s *Service) PublishSnapshot(snapshot *state.RuntimeSnapshot) error {
-	if snapshot == nil {
-		return ErrNoEligibleLinks
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	after, err := s.store.Update(func(candidate *state.PersistentState) error {
-		if err := s.updateLastGood(candidate, snapshot); err != nil {
-			return err
-		}
-		return s.validateRenderedState(*candidate)
-	})
-	if err != nil {
-		return err
-	}
-	s.primeCacheLocked(after)
-	return nil
-}
-
-// PublishCurrent renders the current snapshot source when configured.
-func (s *Service) PublishCurrent() error {
-	if s.snapshots == nil {
-		return ErrNoEligibleLinks
-	}
-	return s.PublishSnapshot(s.snapshots.Current())
 }
 
 // Metadata returns redacted state and never exposes the subscription URL,
@@ -635,30 +497,24 @@ func (s *Service) serveSubscription(w http.ResponseWriter, r *http.Request, bind
 	_, _ = base64.RawURLEncoding.Decode(token[:], []byte(binding))
 	s.mu.Lock()
 	current := s.cache
+	renderedAddress := s.socksAddress
 	matched := current.body != "" && subtle.ConstantTimeCompare(token[:], current.binding[:]) == 1
 	s.mu.Unlock()
 	if !matched {
 		writeNotFound(w)
 		return
 	}
-	if socksAddress != "" {
-		if err := s.SetSocksAddress(socksAddress); err != nil {
-			writeResponseUnavailable(w, true)
-			return
-		}
-		s.mu.Lock()
-		current = s.cache
-		matched = current.body != "" && subtle.ConstantTimeCompare(token[:], current.binding[:]) == 1
-		s.mu.Unlock()
-		if !matched {
-			writeNotFound(w)
-			return
-		}
+	// A wildcard listener is reached through a concrete host address. The body
+	// is rendered for that address per request; shared state is never mutated
+	// by a read, so concurrent clients on different addresses stay isolated.
+	address := renderedAddress
+	if socksAddress != "" && validateAddress(socksAddress) == nil {
+		address = socksAddress
 	}
 	body := current.body
-	if !filter.empty() {
+	if !filter.empty() || address != renderedAddress {
 		var err error
-		body, err = renderFilteredLinks(current.links, filter, s.socksAddress)
+		body, err = renderFilteredLinks(current.links, filter, address)
 		if errors.Is(err, ErrNoEligibleLinks) {
 			writeNotFound(w)
 			return
@@ -802,21 +658,7 @@ func ValidatePersistentState(persistent state.PersistentState) error {
 		}
 		rendered, _, err := Render(links, address)
 		if err != nil || rendered != lastGood.RenderedSubscription {
-			legacyLinks := make([]Link, 0, len(lastGood.Nodes))
-			for _, node := range lastGood.Nodes {
-				credential, deriveErr := selector.Derive(selector.NodeIdentity{NodeID: node.ID, Provider: node.Provider, Host: node.Host, Port: int(node.Port)}, persistent.Subscription.SelectorKey, persistent.Subscription.ProxyAuthKey)
-				if deriveErr != nil {
-					return errRenderedSubscriptionMismatch
-				}
-				legacyLinks = append(legacyLinks, Link{
-					Selector: credential.Selector, Password: credential.Password, Name: node.Name, Group: node.Group,
-					Eligible: node.Eligible && !node.Excluded && provider.ID(node.Provider).Valid() && node.Host != "" && node.Port != 0,
-				})
-			}
-			legacy, _, legacyErr := Render(legacyLinks, address)
-			if legacyErr != nil || legacy != lastGood.RenderedSubscription {
-				return errRenderedSubscriptionMismatch
-			}
+			return errRenderedSubscriptionMismatch
 		}
 	}
 	if active := persistent.ActiveSession; active != nil {
@@ -913,10 +755,6 @@ func (s *Service) renderPersistedNodes(nodes []state.PersistedNode, authority st
 }
 
 func (s *Service) renderPersistedNodesAt(nodes []state.PersistedNode, authority state.SubscriptionAuthority, socksAddress string) (string, int, []state.PersistedNode, error) {
-	return s.renderPersistedNodesAtWithLegacyExclusions(nodes, authority, socksAddress, false)
-}
-
-func (s *Service) renderPersistedNodesAtWithLegacyExclusions(nodes []state.PersistedNode, authority state.SubscriptionAuthority, socksAddress string, legacyExclusions bool) (string, int, []state.PersistedNode, error) {
 	if s.hooks.onRender != nil {
 		s.hooks.onRender()
 	}
@@ -927,9 +765,6 @@ func (s *Service) renderPersistedNodesAtWithLegacyExclusions(nodes []state.Persi
 			return "", 0, nil, err
 		}
 		eligible := node.Eligible && provider.ID(node.Provider).Valid() && node.Host != "" && node.Port != 0
-		if legacyExclusions {
-			eligible = eligible && !node.Excluded
-		}
 		links = append(links, Link{Selector: credential.Selector, Password: credential.Password, Name: node.Name, Group: node.Group, Eligible: eligible})
 	}
 	body, count, err := Render(links, socksAddress)

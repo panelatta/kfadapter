@@ -82,12 +82,13 @@ func (s *Supervisor) Run(parent context.Context) error {
 
 	drainCtx, drainCancel := context.WithTimeout(context.Background(), s.drainTimeout)
 	defer drainCancel()
+	// Shutdown hooks run concurrently under one shared drain deadline, so a
+	// slow worker cannot consume the budget of the others.
 	var shutdown sync.WaitGroup
-	for index := len(s.workers) - 1; index >= 0; index-- {
-		if s.workers[index].Shutdown == nil {
+	for _, worker := range s.workers {
+		if worker.Shutdown == nil {
 			continue
 		}
-		worker := s.workers[index]
 		shutdown.Add(1)
 		go func() {
 			defer shutdown.Done()

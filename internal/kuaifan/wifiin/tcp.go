@@ -261,7 +261,9 @@ func (r *HandshakeReader) fill() error {
 		return err
 	}
 	var buf [32 * 1024]byte
-	for {
+	// io.Reader may return (0, nil) occasionally but not indefinitely; follow
+	// bufio's tolerance before reporting a stalled reader.
+	for range maxEmptyReads {
 		n, err := r.r.Read(buf[:])
 		if n > 0 {
 			r.pending = append(r.pending, buf[:n]...)
@@ -273,7 +275,8 @@ func (r *HandshakeReader) fill() error {
 		if err != nil {
 			return err
 		}
-		// io.Reader is prohibited from indefinitely returning (0, nil).
-		return io.ErrNoProgress
 	}
+	return io.ErrNoProgress
 }
+
+const maxEmptyReads = 100

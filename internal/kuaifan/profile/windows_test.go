@@ -2,7 +2,9 @@ package profile
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
+	"strconv"
 	"testing"
 )
 
@@ -72,5 +74,18 @@ func TestWindowsDefinition(t *testing.T) {
 	}
 	if eligible, err := definition.ValidateLine("WS", ""); err != nil || eligible {
 		t.Fatalf("Windows WS eligibility = %t, %v", eligible, err)
+	}
+}
+
+func TestRandomIntHandlesBoundsBeyond32Bits(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("int cannot exceed 32 bits")
+	}
+	n := 1<<40 + 7
+	for range 16 {
+		value, err := RandomInt(rand.Reader, n)
+		if err != nil || value < 0 || value >= n {
+			t.Fatalf("RandomInt = %d, %v", value, err)
+		}
 	}
 }

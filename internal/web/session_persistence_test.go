@@ -173,18 +173,26 @@ func TestBrowserSessionPersistenceFailuresFailClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("overlong restored row prevents startup", func(t *testing.T) {
+	t.Run("overlong restored row is shortened to the current TTL", func(t *testing.T) {
 		now := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)
 		secret := strings.Repeat("A", 43)
 		persistence := &fakeBrowserSessionPersistence{sessions: map[string]persistedBrowserSession{
-			secret: {csrf: secret, expiresAt: now.Add(2 * time.Hour)},
+			sessionKey(secret): {csrf: secret, expiresAt: now.Add(12 * time.Hour)},
 		}}
 		config := testConfig()
 		config.Now = func() time.Time { return now }
 		config.SessionTTL = time.Hour
-		_, err := NewAPI(config, Dependencies{Sessions: persistence})
-		if err == nil {
-			t.Fatal("NewAPI succeeded with overlong restored browser session")
+		api, err := NewAPI(config, Dependencies{Backend: &fakeBackend{}, Subscriptions: newFakeSubscriptions(), Sessions: persistence})
+		if err != nil {
+			t.Fatalf("lowering the session TTL prevented startup: %v", err)
+		}
+		cookie := &http.Cookie{Name: sessionCookieName, Value: secret}
+		if response := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusOK {
+			t.Fatalf("restored session status = %d", response.Code)
+		}
+		now = now.Add(61 * time.Minute)
+		if response := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusUnauthorized {
+			t.Fatalf("restored session outlived the current TTL: %d", response.Code)
 		}
 	})
 
@@ -198,7 +206,7 @@ func TestBrowserSessionPersistenceFailuresFailClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("delete failure preserves live durable session", func(t *testing.T) {
+	t.Run("delete failure still locks the console and retries deletion", func(t *testing.T) {
 		now := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)
 		persistence := &fakeBrowserSessionPersistence{}
 		backend := &fakeBackend{}
@@ -210,15 +218,24 @@ func TestBrowserSessionPersistenceFailuresFailClosed(t *testing.T) {
 		persistence.mu.Unlock()
 
 		locked := requestWithCSRF(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, csrf)
-		if locked.Code != http.StatusServiceUnavailable || locked.Header().Get("Cache-Control") != "no-store" || locked.Header().Get("Set-Cookie") != "" {
-			t.Fatalf("session delete failure = %d %#v", locked.Code, locked.Header())
+		if locked.Code != http.StatusNoContent || !strings.Contains(locked.Header().Get("Set-Cookie"), sessionCookieName+"=;") {
+			t.Fatalf("lock with failed durable delete = %d %#v", locked.Code, locked.Header())
 		}
-		if response := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusOK {
-			t.Fatalf("session revoked in memory after failed durable delete = %d", response.Code)
+		if response := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusUnauthorized {
+			t.Fatalf("session still accepted after lock = %d", response.Code)
 		}
-		recreated := newPersistentTestAPI(t, clock, backend, persistence)
-		if response := request(recreated, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusOK {
-			t.Fatalf("session missing after failed durable delete and recreation = %d", response.Code)
+		persistence.mu.Lock()
+		persistence.deleteErr = nil
+		persistence.mu.Unlock()
+		// The next session operation retries the pending durable deletion.
+		if login := request(api, http.MethodPost, "/api/v1/access/login", `{"token":"`+validTestToken+`"}`, nil, testOrigin); login.Code != http.StatusOK {
+			t.Fatalf("follow-up login = %d", login.Code)
+		}
+		persistence.mu.Lock()
+		_, stillStored := persistence.sessions[sessionKey(cookie.Value)]
+		persistence.mu.Unlock()
+		if stillStored {
+			t.Fatal("revoked session row was never deleted")
 		}
 	})
 }
@@ -239,5 +256,21 @@ func TestBrowserSessionPersistenceIsOptional(t *testing.T) {
 	}
 	if response := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusUnauthorized {
 		t.Fatalf("nil persistence revoked status = %d", response.Code)
+	}
+}
+
+func TestPersistedBrowserSessionsNeverContainTheCookieToken(t *testing.T) {
+	persistence := &fakeBrowserSessionPersistence{}
+	api := newPersistentTestAPI(t, time.Now, &fakeBackend{}, persistence)
+	cookie, _ := establish(t, api)
+	persistence.mu.Lock()
+	defer persistence.mu.Unlock()
+	if len(persistence.sessions) != 1 {
+		t.Fatalf("persisted sessions = %d", len(persistence.sessions))
+	}
+	for stored := range persistence.sessions {
+		if stored == cookie.Value || stored != sessionKey(cookie.Value) {
+			t.Fatal("persisted session key is not the cookie token digest")
+		}
 	}
 }

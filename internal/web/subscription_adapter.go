@@ -26,10 +26,9 @@ func (a subscriptionAdapter) Metadata(context.Context) (SubscriptionMetadata, er
 	return SubscriptionMetadata{Active: metadata.Active, NodeCount: metadata.NodeCount}, nil
 }
 
-func (a subscriptionAdapter) SubscriptionURL(_ context.Context, baseURL, socksAddress string) (SubscriptionURL, error) {
-	if err := a.service.SetSocksAddress(socksAddress); err != nil {
-		return SubscriptionURL{}, err
-	}
+// SubscriptionURL is a pure read: the SOCKS address a client reaches is
+// applied when the subscription itself is served, never persisted here.
+func (a subscriptionAdapter) SubscriptionURL(_ context.Context, baseURL, _ string) (SubscriptionURL, error) {
 	url, err := a.service.SubscriptionURL(baseURL)
 	if err != nil {
 		return SubscriptionURL{}, err

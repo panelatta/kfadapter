@@ -35,6 +35,16 @@ async function openTokenLogin() {
 }
 
 describe("access token and browser session", () => {
+  it("explains that first setup must happen on the adapter host", async () => {
+    const api = makeApi(signedOutStatus());
+    Object.assign(api, { accessStatus: vi.fn().mockResolvedValue({ initialized: false, setupAllowed: false, authenticated: false }) });
+    render(<App api={api} />);
+    await screen.findByRole("heading", { name: "Create console access" });
+    expect(screen.getByRole("alert").textContent).toContain("device running kfadapter");
+    expect(screen.queryByLabelText("Access token")).toBeNull();
+    expect(api.setupAccess).not.toHaveBeenCalled();
+  });
+
   it("creates a first-access token after confirmation, trims it, and clears both fields", async () => {
     const api = await openTokenSetup();
     const historyWrites = vi.spyOn(window.history, "replaceState");
@@ -178,7 +188,7 @@ describe("access token and browser session", () => {
     await waitFor(() => expect(api.nodes).toHaveBeenCalledTimes(2));
     await userEvent.click(screen.getByRole("button", { name: "KuaiFan" }));
     await userEvent.click(within(screen.getByLabelText("East China group")).getByText("East China", { exact: true }));
-    expect(await screen.findByRole("treeitem", { name: "Beijing 01" })).toBeTruthy();
+    expect(await screen.findByRole("listitem", { name: "Beijing 01" })).toBeTruthy();
     expect(screen.queryByText(/(?:account|nodes) (?:refreshed|updated)/i)).toBeNull();
   });
 
@@ -204,13 +214,13 @@ describe("access token and browser session", () => {
     const musicGroup = screen.getByLabelText("音乐/视频APP专线 group");
     expect(musicGroup.textContent).toContain("5");
     await userEvent.click(within(musicGroup).getByText("音乐/视频APP专线", { exact: true }));
-    for (const node of music) expect(screen.getByRole("treeitem", { name: node.name })).toBeTruthy();
+    for (const node of music) expect(screen.getByRole("listitem", { name: node.name })).toBeTruthy();
 
     const australiaGroup = screen.getByLabelText("澳洲 ➩ 中国 group");
     expect(australiaGroup.textContent).toContain("2");
     await userEvent.click(within(australiaGroup).getByText("澳洲 ➩ 中国", { exact: true }));
-    expect(screen.getByRole("treeitem", { name: "澳大利亚 ➩ 中国 · 2" })).toBeTruthy();
-    expect(screen.getByRole("treeitem", { name: "澳大利亚 ➩ 中国 · 7" })).toBeTruthy();
+    expect(screen.getByRole("listitem", { name: "澳大利亚 ➩ 中国 · 2" })).toBeTruthy();
+    expect(screen.getByRole("listitem", { name: "澳大利亚 ➩ 中国 · 7" })).toBeTruthy();
   });
 
   it("requires an explicit provider before account sign-in", async () => {
@@ -228,7 +238,7 @@ describe("access token and browser session", () => {
     await screen.findByRole("heading", { name: "Service status" });
     await userEvent.click(screen.getByRole("button", { name: "QuickFox" }));
     expect(screen.getByText("Connect QuickFox", { selector: "[data-slot='card-title']" })).toBeTruthy();
-    expect(screen.queryByRole("tree", { name: "Nodes by group" })).toBeNull();
+    expect(screen.queryByRole("list", { name: "Nodes by group" })).toBeNull();
     await userEvent.type(screen.getByLabelText("Email"), "quickfox@example.com");
     await userEvent.type(screen.getByLabelText("Password"), "quickfox-secret");
     await userEvent.click(screen.getByRole("button", { name: "Connect QuickFox" }));
@@ -247,7 +257,7 @@ describe("access token and browser session", () => {
     expect(screen.getByRole("button", { name: "Sign out all" })).toBeTruthy();
     expect(screen.getByText("Service", { exact: true })).toBeTruthy();
     expect(screen.getByText("Subscription link", { exact: true })).toBeTruthy();
-    expect(screen.queryByRole("tree", { name: "Nodes by group" })).toBeNull();
+    expect(screen.queryByRole("list", { name: "Nodes by group" })).toBeNull();
 
     await userEvent.click(within(views).getByRole("button", { name: "KuaiFan" }));
     expect(screen.getByText("KuaiFan account", { selector: "[data-slot='card-title']" })).toBeTruthy();
@@ -256,7 +266,7 @@ describe("access token and browser session", () => {
     expect(screen.queryByRole("button", { name: "Sign out all" })).toBeNull();
     expect(screen.queryByText("Service", { exact: true })).toBeNull();
     expect(screen.queryByText("Subscription link", { exact: true })).toBeNull();
-    expect(await screen.findByRole("tree", { name: "Nodes by group" })).toBeTruthy();
+    expect(await screen.findByRole("list", { name: "Nodes by group" })).toBeTruthy();
 
     await userEvent.click(within(views).getByRole("button", { name: "Status" }));
     expect(screen.getByText("Providers", { exact: true })).toBeTruthy();
@@ -264,7 +274,7 @@ describe("access token and browser session", () => {
     expect(screen.getByRole("button", { name: "Sign out all" })).toBeTruthy();
     expect(screen.getByText("Service", { exact: true })).toBeTruthy();
     expect(screen.getByText("Subscription link", { exact: true })).toBeTruthy();
-    expect(screen.queryByRole("tree", { name: "Nodes by group" })).toBeNull();
+    expect(screen.queryByRole("list", { name: "Nodes by group" })).toBeNull();
   });
 
   it("renders status panels while the subscription link is still loading", async () => {
@@ -325,7 +335,7 @@ describe("access token and browser session", () => {
     const inventory = [...nodes, { ...nodes[0], id: "blocked", name: "Paid-only archive", eligible: false }];
     render(<App api={makeApi(readyStatus(), inventory)} />);
     await screen.findByRole("heading", { name: "Service status" });
-    expect(screen.queryByRole("treeitem", { name: "Paid-only archive" })).toBeNull();
+    expect(screen.queryByRole("listitem", { name: "Paid-only archive" })).toBeNull();
     expect(screen.queryByText("Paid-only archive")).toBeNull();
   });
 
@@ -354,6 +364,8 @@ describe("access token and browser session", () => {
     await screen.findByRole("heading", { name: "Service status" });
 
     await userEvent.click(screen.getByRole("button", { name: "Sign out all" }));
+    expect(api.logoutAccount).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Confirm sign out" }));
 
     await waitFor(() => expect(api.logoutAccount).toHaveBeenCalledTimes(2));
     expect(api.logoutAccount).toHaveBeenNthCalledWith(1, "kuaifan");
@@ -441,5 +453,78 @@ describe("access token and browser session", () => {
     expect(setItem).not.toHaveBeenCalled();
     expect(window.location.search).toBe("");
     expect(window.location.hash).toBe("");
+  });
+});
+
+describe("console loading and recovery", () => {
+  it("shows a retryable error instead of the account form when status fails", async () => {
+    const api = makeApi(readyStatus());
+    vi.mocked(api.status)
+      .mockRejectedValueOnce(new ApiError({ status: 503, title: "Service unavailable", code: "status_unavailable" }))
+      .mockResolvedValue(readyStatus());
+    render(<App api={api} />);
+    expect(await screen.findByRole("heading", { name: "Service unavailable" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Connect account" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByRole("heading", { name: "Service status" })).toBeTruthy();
+  });
+
+  it("keeps the node list when only the subscription URL fails", async () => {
+    const api = makeApi(readyStatus());
+    vi.mocked(api.subscriptionURL).mockRejectedValue(new ApiError({ status: 503, title: "Service unavailable", code: "subscription_unavailable" }));
+    render(<App api={api} />);
+    await screen.findByRole("heading", { name: "Service status" });
+    await userEvent.click(await screen.findByRole("button", { name: "KuaiFan" }));
+    await userEvent.click(within(screen.getByLabelText("East China group")).getByText("East China", { exact: true }));
+    expect(await screen.findByRole("listitem", { name: "Shanghai 01" })).toBeTruthy();
+    expect(screen.getAllByText("Service unavailable").length).toBeGreaterThan(0);
+  });
+
+  it("reloads after unlocking even when a load from the previous session was still running", async () => {
+    const api = makeApi(readyStatus());
+    let releaseSlowStatus: (() => void) | undefined;
+    render(<App api={api} />);
+    await screen.findByRole("heading", { name: "Service status" });
+    vi.mocked(api.status).mockImplementationOnce(
+      () => new Promise((resolve) => { releaseSlowStatus = () => resolve(readyStatus()); }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Refresh all" }));
+    await waitFor(() => expect(releaseSlowStatus).toBeDefined());
+    await userEvent.click(screen.getByRole("button", { name: "Lock console" }));
+    await userEvent.type(await screen.findByLabelText("Access token"), accessToken);
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    releaseSlowStatus?.();
+    expect(await screen.findByRole("heading", { name: "Service status" })).toBeTruthy();
+  });
+
+  it("explains rate limiting with the backend's problem codes", async () => {
+    const api = makeApi(signedOutStatus());
+    Object.assign(api, {
+      accessStatus: vi.fn().mockResolvedValue({ initialized: true, authenticated: false }),
+      loginAccess: vi.fn().mockRejectedValue(new ApiError({ status: 429, title: "Too Many Requests", code: "access_rate_limited" })),
+    });
+    render(<App api={api} />);
+    await screen.findByRole("heading", { name: "Unlock console" });
+    await userEvent.type(screen.getByLabelText("Access token"), accessToken);
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(await screen.findByText("Too many attempts. Wait a moment and try again.")).toBeTruthy();
+  });
+});
+
+describe("diagnostics export", () => {
+  it("downloads the redacted diagnostics report", async () => {
+    const api = makeApi(readyStatus());
+    const report = new Blob(["{}"], { type: "application/json" });
+    Object.assign(api, { diagnostics: vi.fn().mockResolvedValue(report) });
+    const createObjectURL = vi.fn().mockReturnValue("blob:report");
+    const revokeObjectURL = vi.fn();
+    Object.assign(URL, { createObjectURL, revokeObjectURL });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    render(<App api={api} />);
+    await screen.findByRole("heading", { name: "Service status" });
+    await userEvent.click(screen.getByRole("button", { name: "Export diagnostics" }));
+    await waitFor(() => expect(click).toHaveBeenCalledOnce());
+    expect(createObjectURL).toHaveBeenCalledWith(report);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:report");
   });
 });

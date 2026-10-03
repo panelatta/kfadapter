@@ -11,12 +11,15 @@ import (
 	"unicode/utf8"
 )
 
+// MaxNodes bounds the nodes one provider snapshot may carry.
+const MaxNodes = 4096
+
 const (
 	maxIdentifierBytes = 32
 	maxFieldBytes      = 4096
 	maxStateBytes      = 1 << 20
 	maxAuthorities     = 16
-	maxNodes           = 4096
+	maxNodes           = MaxNodes
 )
 
 var (
@@ -27,7 +30,10 @@ var (
 	ErrLoginRejected    = errors.New("provider: login rejected")
 	ErrAccountExists    = errors.New("provider: account already exists")
 	ErrNoSession        = errors.New("provider: no refreshable session")
-	ErrAuthorityExpired = errors.New("provider: authority expired")
+	// ErrCommandUnsupported and ErrAddressUnsupported let transports report
+	// SOCKS-visible capability limits (RFC 1928 replies 0x07 and 0x08).
+	ErrCommandUnsupported = errors.New("provider: command unsupported")
+	ErrAddressUnsupported = errors.New("provider: address type unsupported")
 )
 
 // ID is a stable provider implementation identifier, such as "kuaifan".

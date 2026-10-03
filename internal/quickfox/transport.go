@@ -102,7 +102,7 @@ func (transport *Transport) RelayStream(ctx context.Context, request provider.Re
 }
 
 func (*Transport) RelayDatagrams(context.Context, provider.DatagramRequest) error {
-	return errors.New("quickfox: UDP relay is unavailable")
+	return fmt.Errorf("quickfox: UDP relay is unavailable: %w", provider.ErrCommandUnsupported)
 }
 
 func (transport *Transport) resolveTarget(ctx context.Context, host string, timeout time.Duration) (netip.Addr, error) {
@@ -110,8 +110,12 @@ func (transport *Transport) resolveTarget(ctx context.Context, host string, time
 		if address.Is4() {
 			return address, nil
 		}
-		return netip.Addr{}, errors.New("quickfox: IPv6 targets are unsupported")
+		return netip.Addr{}, fmt.Errorf("quickfox: IPv6 targets are unsupported: %w", provider.ErrAddressUnsupported)
 	}
+	// The QuickFox relay preface carries only an IPv4 address, so domain
+	// targets are resolved locally (see README: the local resolver observes
+	// the queried names). Answers pointing at local or private space are
+	// skipped: forwarding them to the provider relay can never be intended.
 	resolveContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	addresses, err := transport.lookup(resolveContext, "ip4", host)
@@ -119,18 +123,30 @@ func (transport *Transport) resolveTarget(ctx context.Context, host string, time
 		return netip.Addr{}, fmt.Errorf("quickfox: resolve target: %w", err)
 	}
 	for _, address := range addresses {
-		if address.Is4() {
+		address = address.Unmap()
+		if address.Is4() && publicUnicast(address) {
 			return address, nil
 		}
 	}
-	return netip.Addr{}, errors.New("quickfox: target has no IPv4 address")
+	return netip.Addr{}, errors.New("quickfox: target has no public IPv4 address")
 }
+
+func publicUnicast(address netip.Addr) bool {
+	return address.IsGlobalUnicast() && !address.IsPrivate() && !address.IsLoopback() &&
+		!address.IsLinkLocalUnicast() && !address.IsUnspecified() && !sharedAddressSpace.Contains(address)
+}
+
+// sharedAddressSpace is RFC 6598 carrier-grade NAT space.
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
 
 func dialRelay(ctx context.Context, dial provider.DialContextFunc, host string, port uint16, timeout time.Duration) (net.Conn, error) {
 	dialContext, cancel := context.WithTimeout(ctx, timeout)
 	connection, err := dial(dialContext, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
 	cancel()
 	if ctx.Err() != nil {
+		if connection != nil {
+			_ = connection.Close()
+		}
 		return nil, ctx.Err()
 	}
 	if err != nil {

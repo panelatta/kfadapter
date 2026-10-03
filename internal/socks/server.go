@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -20,6 +21,14 @@ const (
 	defaultHandshakeTimeout = 10 * time.Second
 	defaultMaxConnections   = 1024
 	maximumMaxConnections   = 65536
+	minAcceptRetryDelay     = 5 * time.Millisecond
+	maxAcceptRetryDelay     = time.Second
+	// maxHandshakesPerClient bounds unauthenticated connections from one IP,
+	// so a single LAN host cannot hold every slot through the setup timeout.
+	maxHandshakesPerClient = 32
+	// defaultFlowRevalidation is how often an established flow re-checks that
+	// its credentials and provider account are still current.
+	defaultFlowRevalidation = 30 * time.Second
 )
 
 // SnapshotSource resolves compact tunnel pins without exposing a runtime
@@ -51,6 +60,10 @@ type Server struct {
 	handshakeTimeout time.Duration
 	slots            chan struct{}
 	selectors        atomic.Pointer[selector.Registry]
+	revalidateEvery  time.Duration
+
+	handshakeMu sync.Mutex
+	handshakes  map[netip.Addr]int
 
 	lifecycleMu  sync.Mutex
 	listener     net.Listener
@@ -91,7 +104,7 @@ func New(config Config) (*Server, error) {
 	}
 	drained := make(chan struct{})
 	close(drained)
-	server := &Server{snapshots: config.Snapshots, providers: config.Providers, dial: dial, handshakeTimeout: timeout, slots: make(chan struct{}, maxConnections), active: make(map[net.Conn]context.CancelFunc), drained: drained}
+	server := &Server{snapshots: config.Snapshots, providers: config.Providers, dial: dial, handshakeTimeout: timeout, slots: make(chan struct{}, maxConnections), active: make(map[net.Conn]context.CancelFunc), drained: drained, handshakes: make(map[netip.Addr]int), revalidateEvery: defaultFlowRevalidation}
 	server.selectors.Store(config.Selectors)
 	return server, nil
 }
@@ -219,19 +232,44 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	}()
 	defer close(stop)
 
+	var acceptDelay time.Duration
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
 			if ctx.Err() != nil || !s.accepting(listener) {
 				return nil
 			}
-			return err
+			if !temporaryAcceptError(err) {
+				return err
+			}
+			// Descriptor exhaustion and aborted handshakes are transient: back off
+			// like net/http instead of stopping the whole adapter.
+			if acceptDelay == 0 {
+				acceptDelay = minAcceptRetryDelay
+			} else if acceptDelay *= 2; acceptDelay > maxAcceptRetryDelay {
+				acceptDelay = maxAcceptRetryDelay
+			}
+			timer := time.NewTimer(acceptDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
+			continue
+		}
+		acceptDelay = 0
+		releaseHandshake, admitted := s.beginHandshake(connection.RemoteAddr())
+		if !admitted {
+			_ = connection.Close()
+			continue
 		}
 		select {
 		case s.slots <- struct{}{}:
-			handlerCtx, cancel := context.WithCancel(context.Background())
+			handlerCtx, cancel := context.WithCancel(context.WithValue(context.Background(), handshakeReleaseKey{}, releaseHandshake))
 			if !s.addActiveHandler(connection, cancel) {
 				cancel()
+				releaseHandshake()
 				_ = connection.Close()
 				<-s.slots
 				continue
@@ -240,9 +278,11 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 				defer func() { <-s.slots }()
 				defer s.removeActiveHandler(connection)
 				defer cancel()
+				defer releaseHandshake()
 				_ = s.HandleConn(handlerCtx, connection)
 			}(connection, handlerCtx, cancel)
 		default:
+			releaseHandshake()
 			_ = connection.Close()
 		}
 	}
@@ -284,7 +324,7 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		_ = writeAuthStatus(client, false)
 		return state.ErrSelectorUnknown
 	}
-	authenticated := registry.AuthenticateAt(username, password, now)
+	authenticated := registry.Authenticate(username, password)
 	if !authenticated {
 		_ = writeAuthStatus(client, false)
 		return state.ErrSelectorUnknown
@@ -300,6 +340,9 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 	}
 	if err := writeAuthStatus(client, true); err != nil {
 		return err
+	}
+	if release, ok := ctx.Value(handshakeReleaseKey{}).(func()); ok {
+		release()
 	}
 
 	command, destination, err := readRequest(client)
@@ -329,7 +372,7 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		_ = writeReply(client, replyGeneralFailure, target{})
 		return state.ErrSelectorUnknown
 	}
-	authenticated = registry.AuthenticateAt(username, password, now)
+	authenticated = registry.Authenticate(username, password)
 	if !authenticated {
 		_ = writeReply(client, replyGeneralFailure, target{})
 		return state.ErrSelectorUnknown
@@ -376,7 +419,7 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		if currentRegistry == nil {
 			return false
 		}
-		authenticated := currentRegistry.AuthenticateAt(username, password, now)
+		authenticated := currentRegistry.Authenticate(username, password)
 		if !authenticated {
 			return false
 		}
@@ -396,6 +439,10 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		ready = true
 		return nil
 	}
+	// Established flows end when their credentials are rotated or their
+	// provider account is logged out or expires, not only at disconnect.
+	stopWatch := s.watchFlow(client, username, password, node)
+	defer stopWatch()
 	if association != nil {
 		err = transport.RelayDatagrams(ctx, provider.DatagramRequest{
 			Dial: s.dial, Control: client, Packets: association, NodeHost: node.Host, NodePort: node.Port,
@@ -440,6 +487,12 @@ func targetFromAddr(address net.Addr) target {
 }
 
 func dialReply(err error) byte {
+	if errors.Is(err, provider.ErrCommandUnsupported) {
+		return replyCommandUnsupported
+	}
+	if errors.Is(err, provider.ErrAddressUnsupported) {
+		return replyAddressUnsupported
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return replyTTLExpired
 	}
@@ -460,4 +513,95 @@ func dialReply(err error) byte {
 		return replyConnectionRefused
 	}
 	return replyGeneralFailure
+}
+
+// temporaryAcceptError reports listener errors that clear up on their own,
+// such as file-descriptor exhaustion or a connection reset before Accept.
+func temporaryAcceptError(err error) bool {
+	if errors.Is(err, net.ErrClosed) {
+		return false
+	}
+	for _, errno := range []syscall.Errno{syscall.EMFILE, syscall.ENFILE, syscall.ENOBUFS, syscall.ENOMEM, syscall.ECONNABORTED, syscall.ECONNRESET, syscall.EINTR, syscall.EAGAIN} {
+		if errors.Is(err, errno) {
+			return true
+		}
+	}
+	var timeout interface{ Timeout() bool }
+	return errors.As(err, &timeout) && timeout.Timeout()
+}
+
+type handshakeReleaseKey struct{}
+
+// beginHandshake admits a new connection unless its client IP already has
+// maxHandshakesPerClient connections that have not finished authentication.
+// The returned release is idempotent.
+func (s *Server) beginHandshake(remote net.Addr) (func(), bool) {
+	address, ok := remoteIP(remote)
+	if !ok {
+		return func() {}, true
+	}
+	s.handshakeMu.Lock()
+	if s.handshakes[address] >= maxHandshakesPerClient {
+		s.handshakeMu.Unlock()
+		return nil, false
+	}
+	s.handshakes[address]++
+	s.handshakeMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.handshakeMu.Lock()
+			defer s.handshakeMu.Unlock()
+			if s.handshakes[address] <= 1 {
+				delete(s.handshakes, address)
+			} else {
+				s.handshakes[address]--
+			}
+		})
+	}, true
+}
+
+func remoteIP(remote net.Addr) (netip.Addr, bool) {
+	tcp, ok := remote.(*net.TCPAddr)
+	if !ok || tcp == nil {
+		return netip.Addr{}, false
+	}
+	address, ok := netip.AddrFromSlice(tcp.IP)
+	return address.Unmap(), ok
+}
+
+// watchFlow closes client once the flow's selector credentials stop
+// authenticating or its node leaves the current provider snapshot.
+func (s *Server) watchFlow(client net.Conn, username, password string, node state.Node) func() {
+	interval := s.revalidateEvery
+	if interval <= 0 {
+		return func() {}
+	}
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if !s.flowAuthorized(username, password, node) {
+					_ = client.Close()
+					return
+				}
+			}
+		}
+	}()
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
+}
+
+func (s *Server) flowAuthorized(username, password string, node state.Node) bool {
+	registry := s.selectors.Load()
+	if registry == nil || !registry.Authenticate(username, password) {
+		return false
+	}
+	pin, err := s.snapshots.CompactPin(username, time.Now())
+	return err == nil && pin.Node.TunnelEligible() && sameCanonicalNode(node, pin.Node)
 }

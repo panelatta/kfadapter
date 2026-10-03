@@ -7,11 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,6 +24,7 @@ import (
 	"github.com/kfadapter/kfadapter/internal/config"
 	"github.com/kfadapter/kfadapter/internal/kuaifan"
 	"github.com/kfadapter/kfadapter/internal/lifecycle"
+	"github.com/kfadapter/kfadapter/internal/logging"
 	"github.com/kfadapter/kfadapter/internal/provider"
 	providercoordinator "github.com/kfadapter/kfadapter/internal/provider/coordinator"
 	"github.com/kfadapter/kfadapter/internal/quickfox"
@@ -48,10 +51,11 @@ func main() {
 
 func run(arguments []string, stdout, stderr io.Writer) int {
 	if len(arguments) == 0 || arguments[0] == "serve" || strings.HasPrefix(arguments[0], "-") {
-		if err := serve(commandArgs(arguments)); err != nil {
-			// Never render underlying control/state errors: they could retain
-			// endpoint or upstream service context in a future implementation.
-			fmt.Fprintln(stderr, "kfadapter: service stopped")
+		logger := logging.New(stderr)
+		if err := serve(commandArgs(arguments), logger); err != nil {
+			// Errors describe local configuration, state, listener, and control
+			// plane conditions. Credentials and tunnel material never enter them.
+			logger.Error("service stopped", "error", logging.Error(err))
 			return 1
 		}
 		return 0
@@ -59,7 +63,7 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 	switch arguments[0] {
 	case "healthcheck":
 		if err := healthcheck(arguments[1:]); err != nil {
-			fmt.Fprintln(stderr, "kfadapter: healthcheck failed")
+			fmt.Fprintln(stderr, "kfadapter: healthcheck failed: "+logging.Error(err))
 			return 1
 		}
 		return 0
@@ -68,17 +72,23 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 		return 0
 	case "validate-config":
 		if err := validateConfig(arguments[1:]); err != nil {
-			fmt.Fprintln(stderr, "kfadapter: invalid configuration")
+			fmt.Fprintln(stderr, "kfadapter: invalid configuration: "+logging.Error(err))
 			return 1
 		}
 		fmt.Fprintln(stdout, "configuration valid")
 		return 0
 	case "validate-state":
 		if err := validateState(arguments[1:]); err != nil {
-			fmt.Fprintln(stderr, "kfadapter: invalid state")
+			fmt.Fprintln(stderr, "kfadapter: invalid state: "+logging.Error(err))
 			return 1
 		}
 		fmt.Fprintln(stdout, "state valid")
+		return 0
+	case "backup":
+		if err := backupState(arguments[1:], stdout); err != nil {
+			fmt.Fprintln(stderr, "kfadapter: backup failed: "+logging.Error(err))
+			return 1
+		}
 		return 0
 	default:
 		fmt.Fprintln(stderr, "kfadapter: unknown command")
@@ -100,6 +110,13 @@ func loadConfig(arguments []string) (config.Config, error) {
 	return config.Load(configPath)
 }
 
+func loadOrCreateConfig(arguments []string) (config.Config, error) {
+	if len(arguments) != 0 {
+		return config.Config{}, errors.New("configuration arguments are not supported")
+	}
+	return config.LoadOrCreate(configPath)
+}
+
 func validateConfig(arguments []string) error {
 	_, err := loadConfig(arguments)
 	return err
@@ -115,6 +132,28 @@ func validateState(arguments []string) error {
 		return errors.New("invalid validate-state arguments")
 	}
 	return state.ValidateSQLiteFile(*path, subscription.ValidatePersistentState)
+}
+
+// backupState writes a validated, point-in-time copy of state.db to stdout
+// while the service keeps running. The container filesystem is read-only, so
+// the image leaves through the exec stream; scripts/backup-state.sh archives it
+// on the host in the same format as an offline backup.
+func backupState(arguments []string, stdout io.Writer) error {
+	if len(arguments) != 0 {
+		return errors.New("backup arguments are not supported")
+	}
+	if file, ok := stdout.(*os.File); ok {
+		if info, err := file.Stat(); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+			return errors.New("refusing to write the state database to a terminal; redirect standard output")
+		}
+	}
+	image, err := state.SnapshotSQLiteFile(filepath.Join(stateDirectory, "state.db"), subscription.ValidatePersistentState)
+	if err != nil {
+		return err
+	}
+	defer clear(image)
+	_, err = stdout.Write(image)
+	return err
 }
 
 func healthcheck(arguments []string) error {
@@ -146,17 +185,17 @@ func healthcheck(arguments []string) error {
 	return connection.Close()
 }
 
-func serve(arguments []string) error {
-	cfg, err := loadConfig(arguments)
+func serve(arguments []string, logger *slog.Logger) error {
+	cfg, err := loadOrCreateConfig(arguments)
 	if err != nil {
-		return err
+		return fmt.Errorf("load configuration: %w", err)
 	}
 	if err := requireContainer(); err != nil {
 		return err
 	}
-	adapter, err := newAdapter(cfg)
+	adapter, err := newAdapter(cfg, logger)
 	if err != nil {
-		return err
+		return fmt.Errorf("start adapter: %w", err)
 	}
 	return adapter.run()
 }
@@ -166,25 +205,29 @@ type adapter struct {
 	manager            *state.Manager
 	store              *state.SQLiteStore
 	httpServer         *http.Server
+	api                *web.API
 	httpListener       net.Listener
 	socksServer        *socks.Server
 	socksListener      net.Listener
-	startupLog         io.Writer
+	logger             *slog.Logger
 	managementEndpoint string
 	proxyEndpoint      string
 }
 
-func newAdapter(cfg config.Config) (*adapter, error) {
-	return newAdapterAtStateDirectory(cfg, stateDirectory)
+func newAdapter(cfg config.Config, logger *slog.Logger) (*adapter, error) {
+	return newAdapterAtStateDirectory(cfg, stateDirectory, logger)
 }
 
-func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string) (result *adapter, err error) {
+func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string, logger *slog.Logger) (result *adapter, err error) {
+	if logger == nil {
+		logger = logging.Discard()
+	}
 	if err := validateListenInterface(cfg.ListenAddr); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listen address: %w", err)
 	}
 	store, err := state.NewSQLiteStore(stateDirectory)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("state directory: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -193,17 +236,10 @@ func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string) (resul
 	}()
 	persistent, err := store.LoadOrCreate(subscription.ValidatePersistentState)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load state: %w", err)
 	}
-	if persistent.ActiveSession != nil && !state.SessionUsable(persistent.ActiveSession, time.Now().UTC()) {
-		persistent, err = store.Update(func(candidate *state.PersistentState) error {
-			candidate.ActiveSession = nil
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
+	// An expired persisted session is handled in one place: the manager starts
+	// in the expired state and app.NewRuntime clears the durable copy.
 	var bindingKey []byte
 	if persistent.AccessTokenInitialized() {
 		if persistent.AccessTokenVerifier == nil {
@@ -262,7 +298,7 @@ func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string) (resul
 	if err != nil {
 		return nil, err
 	}
-	selectorCoordinator, err := app.NewSelectorCoordinator(socksServer, registry, time.Now)
+	selectorCoordinator, err := app.NewSelectorCoordinator(socksServer, registry)
 	if err != nil {
 		return nil, err
 	}
@@ -293,6 +329,7 @@ func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string) (resul
 		Selectors: selectorCoordinator, MutationMu: mutationMu, SocksAddress: proxyAddress, HTTPAddress: managementAddress,
 		Version: version, StartedAt: startedAt,
 		RefreshEvery: cfg.Provider.RefreshInterval.Value(), ProbeTimeout: cfg.Proxy.DialTimeout.Value(),
+		Logger: logger,
 	})
 	if err != nil {
 		return nil, err
@@ -302,18 +339,18 @@ func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string) (resul
 		Version: version, StartedAt: startedAt, SessionTTL: cfg.Management.SessionTTL.Value(),
 	}, web.Dependencies{Backend: runtimeFacade, Subscriptions: web.NewSubscriptionAdapter(subscriptionService), Sessions: store, Liveness: runtimeFacade})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("management server: %w", err)
 	}
 	httpListener, err := api.Listen()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("listen for management: %w", err)
 	}
 	socksListener, err := net.Listen("tcp", proxyAddress)
 	if err != nil {
 		_ = httpListener.Close()
-		return nil, err
+		return nil, fmt.Errorf("listen for proxy: %w", err)
 	}
-	return &adapter{runtime: runtimeFacade, manager: manager, store: store, httpServer: server, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, startupLog: os.Stdout, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
+	return &adapter{runtime: runtimeFacade, manager: manager, store: store, httpServer: server, api: api, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, logger: logger, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
 }
 
 func validateListenInterface(listen string) error {
@@ -407,8 +444,8 @@ func (d *adapter) runContext(ctx context.Context) (result error) {
 	if err != nil {
 		return err
 	}
-	if d.startupLog != nil {
-		_, _ = fmt.Fprintf(d.startupLog, "kfadapter: ready management=%s proxy=%s\n", d.managementEndpoint, d.proxyEndpoint)
+	if d.logger != nil {
+		d.logger.Info("ready", "version", version, "management", d.managementEndpoint, "proxy", d.proxyEndpoint)
 	}
 	return supervisor.Run(ctx)
 }
@@ -430,6 +467,9 @@ func (d *adapter) runWeb(ctx context.Context) error {
 }
 
 func (d *adapter) shutdownWeb(ctx context.Context) error {
+	// Abort in-flight handlers first: a provider login holding the runtime's
+	// mutation lock would otherwise delay runtime shutdown until it times out.
+	d.api.CancelRequests()
 	return d.httpServer.Shutdown(ctx)
 }
 
@@ -452,6 +492,5 @@ func (d *adapter) watchdog(context.Context) error {
 	if !d.runtime.Healthy() {
 		return errors.New("runtime is stopped")
 	}
-	_, err := d.store.Load()
-	return err
+	return d.store.Ping()
 }

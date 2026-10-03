@@ -14,7 +14,7 @@ func TestSelectorCoordinatorInstallsLiveOnlyMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator, err := NewSelectorCoordinator(nil, registry, time.Now)
+	coordinator, err := NewSelectorCoordinator(nil, registry)
 	if err != nil {
 		t.Fatal(err)
 	}

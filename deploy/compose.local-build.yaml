@@ -1,0 +1,59 @@
+# Developer deployment built from this checkout. It mirrors the production
+# hardening in ../compose.yaml but uses an isolated project and state volume,
+# so it can never touch production state. Validate with:
+#   scripts/preflight.sh --local-build
+# and run with:
+#   docker compose --env-file /dev/null -f deploy/compose.local-build.yaml up -d --build
+name: kfadapter-local
+
+services:
+  kfadapter:
+    build:
+      context: ..
+      args:
+        VERSION: local
+    image: ${KFADAPTER_LOCAL_IMAGE:-kfadapter:local}
+    network_mode: host
+    user: "65532:65532"
+    working_dir: /kfadapter
+    init: true
+    read_only: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      TZ: "${KFADAPTER_TZ:-Asia/Shanghai}"
+    volumes:
+      - db_data:/kfadapter/data
+      - type: bind
+        source: ../config.yaml
+        target: /kfadapter/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD", "./kfadapter", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  db_data:

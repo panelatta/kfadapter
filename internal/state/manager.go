@@ -68,22 +68,12 @@ func (s *RuntimeStore) replace(next *RuntimeSnapshot) {
 type Status struct {
 	State      ServiceState                   `json:"state"`
 	Generation uint64                         `json:"generation,omitempty"`
-	CreatedAt  time.Time                      `json:"createdAt,omitempty"`
-	ExpiresAt  time.Time                      `json:"expiresAt,omitempty"`
+	CreatedAt  time.Time                      `json:"createdAt,omitzero"`
+	ExpiresAt  time.Time                      `json:"expiresAt,omitzero"`
 	Accounts   map[provider.ID]AccountSummary `json:"accounts,omitempty"`
 	NodeTotal  int                            `json:"nodeTotal"`
 	Eligible   int                            `json:"eligible"`
 }
-
-// AccountBindingStatus reports whether a raw account ID is authorized by the
-// durable selector-key binding without exposing that identifier.
-type AccountBindingStatus string
-
-const (
-	AccountBindingUnbound  AccountBindingStatus = "unbound"
-	AccountBindingMatch    AccountBindingStatus = "match"
-	AccountBindingMismatch AccountBindingStatus = "mismatch"
-)
 
 // Manager serializes service-state transitions and wraps a RuntimeStore.
 type Manager struct {
@@ -133,7 +123,7 @@ func NewManagerWithSubscription(initial *RuntimeSnapshot, subscription Subscript
 	manager := &Manager{runtime: store, state: StateSignedOut, subscription: subscription.clone(), accountBindingKey: append([]byte(nil), bindingKey...), bindingKeyConfigured: len(bindingKey) == sha256.Size}
 	if initial != nil {
 		if ValidateRuntimeSnapshot(initial) == nil && SessionUsable(initial, now) {
-			if !manager.bindingKeyConfigured || len(subscription.AccountBinding) != sha256.Size || !matchesAccountBinding(subscription.AccountBinding, bindingKey, initial.AccountBindingID()) {
+			if !manager.bindingKeyConfigured || len(subscription.AccountBinding) != sha256.Size || !rosterAdmits(subscription, bindingKey, initial.AccountBindingID()) {
 				return nil, ErrAccountChanged
 			}
 			manager.state = StateReady
@@ -225,7 +215,7 @@ func (m *Manager) InstallEpoch(candidate SubscriptionAuthority, userID string) (
 		return nil, ErrAccountChanged
 	}
 	m.mu.Lock()
-	if (m.state != StateAuthenticating && m.state != StateSyncing) || !m.bindingKeyConfigured || len(m.accountBindingKey) != sha256.Size || len(candidate.AccountBinding) != sha256.Size || !matchesAccountBinding(candidate.AccountBinding, m.accountBindingKey, userID) {
+	if (m.state != StateAuthenticating && m.state != StateSyncing) || !m.bindingKeyConfigured || len(m.accountBindingKey) != sha256.Size || len(candidate.AccountBinding) != sha256.Size || !rosterAdmits(candidate, m.accountBindingKey, userID) {
 		m.mu.Unlock()
 		return nil, ErrAccountChanged
 	}
@@ -260,24 +250,8 @@ func sameSubscriptionCredentials(left, right SubscriptionAuthority) bool {
 	return subtle.ConstantTimeCompare(left.SelectorKey, right.SelectorKey) == 1 && subtle.ConstantTimeCompare(left.ProxyAuthKey, right.ProxyAuthKey) == 1
 }
 func sameSubscriptionAuthority(left, right SubscriptionAuthority) bool {
-	return sameSubscriptionCredentials(left, right) && subtle.ConstantTimeCompare(left.AccountBinding, right.AccountBinding) == 1
-}
-
-// AccountBindingStatus checks the supplied account against durable authority
-// without retaining the raw identifier.
-func (m *Manager) AccountBindingStatus(userID string) AccountBindingStatus {
-	if m == nil {
-		return AccountBindingMismatch
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.bindingKeyConfigured || len(m.subscription.SelectorKey) == 0 || len(m.subscription.AccountBinding) == 0 {
-		return AccountBindingUnbound
-	}
-	if matchesAccountBinding(m.subscription.AccountBinding, m.accountBindingKey, userID) {
-		return AccountBindingMatch
-	}
-	return AccountBindingMismatch
+	return sameSubscriptionCredentials(left, right) && subtle.ConstantTimeCompare(left.AccountBinding, right.AccountBinding) == 1 &&
+		SameAccountRoster(left.AccountRoster, right.AccountRoster)
 }
 
 func currentSessionMatchesPin(current *RuntimeSnapshot, pin TunnelPin, now time.Time) bool {
@@ -475,7 +449,7 @@ func (m *Manager) Commit(snapshot *RuntimeSnapshot) error {
 	if m.runtime.snapshot.Load() != nil && snapshot.Generation <= m.runtime.snapshot.Load().Generation {
 		return fmt.Errorf("%w: non-monotonic generation", ErrInvalidSnapshot)
 	}
-	if !m.bindingKeyConfigured || len(m.subscription.SelectorKey) == 0 || len(m.subscription.AccountBinding) != sha256.Size || !matchesAccountBinding(m.subscription.AccountBinding, m.accountBindingKey, snapshot.AccountBindingID()) {
+	if !m.bindingKeyConfigured || len(m.subscription.SelectorKey) == 0 || len(m.subscription.AccountBinding) != sha256.Size || !rosterAdmits(m.subscription, m.accountBindingKey, snapshot.AccountBindingID()) {
 		return ErrAccountChanged
 	}
 	m.runtime.replace(snapshot)

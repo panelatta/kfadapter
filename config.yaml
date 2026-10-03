@@ -1,5 +1,6 @@
 # Paths are fixed relative to /kfadapter: configuration is ./config.yaml and
-# persistent SQLite data is ./data. Provider requests use https://ws.kuaifan.co.
+# persistent SQLite data is ./data. Provider control requests go to each
+# provider's fixed HTTPS API (KuaiFan and QuickFox); see README.md.
 
 # Shared numeric listener address for management and SOCKS. Production host
 # networking makes OpenWrt interface addresses directly bindable. A specific

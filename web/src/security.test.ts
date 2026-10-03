@@ -107,7 +107,7 @@ describe("browser boundary", () => {
   });
 
   it("ships a CSP-compatible self-hosted production shell with no remote asset URL", () => {
-    const staticDirectory = resolve(process.cwd(), "../internal/web/static");
+    const staticDirectory = resolve(process.cwd(), "../internal/web/static/dist");
     const index = readFileSync(`${staticDirectory}/index.html`, "utf8");
     const assetNames = readdirSync(`${staticDirectory}/assets`);
     const mainBundles = assetNames.filter((file) => /^index-[A-Za-z0-9_-]+\.js$/.test(file));

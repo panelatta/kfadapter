@@ -19,7 +19,7 @@ coverage.out
 # JavaScript dependencies and generated frontend assets.
 /node_modules/
 /web/node_modules/
-/internal/web/static/
+/internal/web/static/dist/
 __pycache__/
 
 # Editor and operating-system files.

@@ -1,0 +1,2 @@
+# The console build (web/, `npm run build`) writes to dist/ here. This file
+# keeps the embed target present in a fresh clone so Go builds without it.

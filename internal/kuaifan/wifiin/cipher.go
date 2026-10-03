@@ -49,6 +49,7 @@ func NewEncrypter(key []byte, iv []byte) (cipher.Stream, error) {
 	if len(iv) != IVSize {
 		return nil, ErrInvalidIV
 	}
+	//lint:ignore SA1019 the provider's WIFIIN wire protocol is AES-256-CFB.
 	return cipher.NewCFBEncrypter(block, iv), nil
 }
 
@@ -62,6 +63,7 @@ func NewDecrypter(key []byte, iv []byte) (cipher.Stream, error) {
 	if len(iv) != IVSize {
 		return nil, ErrInvalidIV
 	}
+	//lint:ignore SA1019 the provider's WIFIIN wire protocol is AES-256-CFB.
 	return cipher.NewCFBDecrypter(block, iv), nil
 }
 

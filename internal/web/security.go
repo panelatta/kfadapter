@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -69,11 +71,14 @@ type sessionStore struct {
 	pending        map[string]struct{}
 	accessAttempts map[string]accessAttempt
 	loginAttempts  map[string]loginAttempt
-	persistence    BrowserSessionPersistence
-	now            func() time.Time
-	random         io.Reader
-	ttl            time.Duration
-	max            int
+	// undeleted holds revoked session keys whose durable deletion failed; each
+	// later persistence round retries them.
+	undeleted   map[string]struct{}
+	persistence BrowserSessionPersistence
+	now         func() time.Time
+	random      io.Reader
+	ttl         time.Duration
+	max         int
 }
 
 func newSessionStore(now func() time.Time, random io.Reader, ttl time.Duration, max int, persistence BrowserSessionPersistence) (*sessionStore, error) {
@@ -94,6 +99,7 @@ func newSessionStore(now func() time.Time, random io.Reader, ttl time.Duration, 
 		pending:        make(map[string]struct{}),
 		accessAttempts: make(map[string]accessAttempt),
 		loginAttempts:  make(map[string]loginAttempt),
+		undeleted:      make(map[string]struct{}),
 		persistence:    persistence,
 		now:            now,
 		random:         random,
@@ -113,8 +119,16 @@ func newSessionStore(now func() time.Time, random io.Reader, ttl time.Duration, 
 }
 
 func (s *sessionStore) restore(now time.Time, token, csrf string, expiresAt time.Time) error {
-	if !validBrowserSessionSecret(token) || !validBrowserSessionSecret(csrf) || !now.Before(expiresAt) || expiresAt.After(now.Add(s.ttl)) {
+	if !validBrowserSessionSecret(token) || !validBrowserSessionSecret(csrf) {
 		return errors.New("invalid persisted browser session")
+	}
+	if !now.Before(expiresAt) {
+		return nil
+	}
+	// A session issued under a longer TTL than the current configuration is
+	// shortened rather than rejected, so lowering sessionTTL never blocks startup.
+	if limit := now.Add(s.ttl); expiresAt.After(limit) {
+		expiresAt = limit
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -132,10 +146,11 @@ func (s *sessionStore) create() (string, browserSession, error) {
 	// Entropy reads are deliberately outside s.mu: a blocked entropy source must
 	// not prevent a concurrent access request from observing its admission.
 	for range 4 {
-		token, err := randomToken(s.random, 32)
+		cookieToken, err := randomToken(s.random, 32)
 		if err != nil {
 			return "", browserSession{}, err
 		}
+		token := sessionKey(cookieToken)
 		csrf, err := randomToken(s.random, 32)
 		if err != nil {
 			return "", browserSession{}, err
@@ -180,15 +195,16 @@ func (s *sessionStore) create() (string, browserSession, error) {
 			s.deleteBrowserSessions([]string{token})
 			return "", browserSession{}, errors.New("browser session expired before persistence")
 		}
-		return token, session, nil
+		return cookieToken, session, nil
 	}
 	return "", browserSession{}, errors.New("browser session token collision")
 }
 
-func (s *sessionStore) valid(token string) (browserSession, bool) {
-	if token == "" {
+func (s *sessionStore) valid(cookieToken string) (browserSession, bool) {
+	if cookieToken == "" {
 		return browserSession{}, false
 	}
+	token := sessionKey(cookieToken)
 	s.mu.Lock()
 	session, ok := s.sessions[token]
 	expired := ok && !s.now().Before(session.expiresAt)
@@ -206,18 +222,24 @@ func (s *sessionStore) valid(token string) (browserSession, bool) {
 	return session, true
 }
 
-func (s *sessionStore) revoke(token string) error {
-	if token == "" {
+func (s *sessionStore) revoke(cookieToken string) error {
+	if cookieToken == "" {
 		return nil
 	}
-	if s.persistence != nil {
-		if err := s.persistence.DeleteBrowserSession(token); err != nil {
-			return err
-		}
-	}
+	token := sessionKey(cookieToken)
+	// Revocation takes effect in memory first, so a failed durable delete can
+	// never leave the console unlocked for this process.
 	s.mu.Lock()
 	s.removeSessionLocked(token)
 	s.mu.Unlock()
+	if s.persistence != nil {
+		if err := s.persistence.DeleteBrowserSession(token); err != nil {
+			s.mu.Lock()
+			s.undeleted[token] = struct{}{}
+			s.mu.Unlock()
+			return err
+		}
+	}
 	return nil
 }
 
@@ -225,19 +247,33 @@ func (s *sessionStore) deleteBrowserSessions(tokens []string) {
 	if s.persistence == nil {
 		return
 	}
+	s.mu.Lock()
+	for token := range s.undeleted {
+		tokens = append(tokens, token)
+	}
+	s.mu.Unlock()
 	for _, token := range tokens {
-		if token != "" {
-			_ = s.persistence.DeleteBrowserSession(token)
+		if token == "" {
+			continue
 		}
+		err := s.persistence.DeleteBrowserSession(token)
+		s.mu.Lock()
+		if err == nil {
+			delete(s.undeleted, token)
+		} else if _, active := s.sessions[token]; !active {
+			s.undeleted[token] = struct{}{}
+		}
+		s.mu.Unlock()
 	}
 }
 
 // matches verifies that the exact session which started a stream remains
 // active. It also closes the session done signal at expiry.
-func (s *sessionStore) matches(token string, expected browserSession) bool {
-	if token == "" || expected.done == nil {
+func (s *sessionStore) matches(cookieToken string, expected browserSession) bool {
+	if cookieToken == "" || expected.done == nil {
 		return false
 	}
+	token := sessionKey(cookieToken)
 	s.mu.Lock()
 	session, ok := s.sessions[token]
 	expired := ok && !s.now().Before(session.expiresAt)
@@ -318,7 +354,8 @@ func (s *sessionStore) finishAccess(client string, successful, countedFailure bo
 // beginLogin atomically checks the per-session failure window and reserves the
 // only backend login slot for that browser session. Concurrent attempts never
 // reach the backend and do not count as credential failures.
-func (s *sessionStore) beginLogin(token string) (loginAdmission, time.Duration) {
+func (s *sessionStore) beginLogin(cookieToken string) (loginAdmission, time.Duration) {
+	token := sessionKey(cookieToken)
 	s.mu.Lock()
 	expired := s.pruneLocked()
 	if _, active := s.sessions[token]; !active {
@@ -350,7 +387,8 @@ func (s *sessionStore) beginLogin(token string) (loginAdmission, time.Duration) 
 
 // finishLogin releases a prior login reservation exactly once. It never
 // recreates login state for a session that logout or expiry removed in flight.
-func (s *sessionStore) finishLogin(token string, successful, countedFailure bool) {
+func (s *sessionStore) finishLogin(cookieToken string, successful, countedFailure bool) {
+	token := sessionKey(cookieToken)
 	s.mu.Lock()
 	session, active := s.sessions[token]
 	if !active {
@@ -480,6 +518,19 @@ func exactSecretEqual(expected, given string) bool {
 	return subtle.ConstantTimeCompare([]byte(expected), []byte(given)) == 1
 }
 
+// sessionKey is the only form in which a browser session is stored, in memory
+// or in SQLite. The cookie carries the preimage, so a leaked database or backup
+// cannot be replayed as a console session.
+func sessionKey(cookieToken string) string {
+	digest := sha256.Sum256([]byte(cookieToken))
+	return base64.RawURLEncoding.EncodeToString(digest[:])
+}
+
+// loopbackClient reports whether a request's peer is on this host.
+func loopbackClient(remoteAddress string) bool {
+	return clientIdentity(remoteAddress) == "loopback"
+}
+
 func clientIdentity(remoteAddress string) string {
 	host, _, err := net.SplitHostPort(remoteAddress)
 	if err != nil {
@@ -492,6 +543,14 @@ func clientIdentity(remoteAddress string) string {
 	}
 	if host == "" {
 		return "unknown"
+	}
+	// One IPv6 host usually controls a whole /64, so throttling per address
+	// would let it rotate addresses freely.
+	if address, err := netip.ParseAddr(host); err == nil && address.Is6() && !address.Is4In6() {
+		prefix, err := address.Prefix(64)
+		if err == nil {
+			return prefix.String()
+		}
 	}
 	return host
 }
@@ -538,6 +597,23 @@ func readJSONBody(w http.ResponseWriter, r *http.Request, limit int, target any)
 		return errMalformedJSON
 	}
 	return nil
+}
+
+// eventStreamOriginAllowed guards the read-only event stream. Browsers omit
+// Origin on same-origin EventSource GETs, so a missing Origin is accepted
+// unless Fetch Metadata identifies a cross-site or same-site request. The
+// session cookie is SameSite=Strict and HttpOnly, so cross-site requests are
+// unauthenticated regardless; this check is defense in depth.
+func eventStreamOriginAllowed(r *http.Request) bool {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		return originAllowed(origin, "http://"+r.Host)
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return true
+	default:
+		return false
+	}
 }
 
 func originAllowed(header, expected string) bool {
