@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/mail"
 	"net/netip"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -39,22 +40,26 @@ type publicProblemError interface {
 // Config defines the HTTP listener and optional DNS hostname accepted by the
 // browser boundary.
 type Config struct {
-	Listen      string
-	Hostname    string
-	SocksListen string
-	Version     string
-	StartedAt   time.Time
-	Now         func() time.Time
-	Random      io.Reader
-	SessionTTL  time.Duration
-	MaxSessions int
+	Listen   string
+	Hostname string
+	// PublicOrigin is the explicitly trusted HTTPS origin of a TLS reverse proxy.
+	PublicOrigin string
+	SocksListen  string
+	Version      string
+	StartedAt    time.Time
+	Now          func() time.Time
+	Random       io.Reader
+	SessionTTL   time.Duration
+	MaxSessions  int
 	// MaxConnections bounds all accepted local HTTP connections. Zero defaults
 	// to 128; values above 1024 are rejected.
 	MaxConnections int
-	// ReadTimeout bounds request headers plus JSON body delivery. WriteTimeout
-	// bounds regular responses; SSE refreshes and clears a per-write deadline so
-	// its idle lifetime is not limited by that server-wide bound.
+	// ReadTimeout bounds request headers plus JSON body delivery. OperationTimeout
+	// bounds a management API call (default three minutes, at most five).
+	// WriteTimeout starts when its response is ready, independently of backend
+	// work. SSE instead refreshes and clears its existing per-write deadline.
 	ReadTimeout      time.Duration
+	OperationTimeout time.Duration
 	WriteTimeout     time.Duration
 	JSONBodyLimit    int
 	SSEMaxClients    int
@@ -236,6 +241,7 @@ type API struct {
 	listenIP      netip.Addr
 	listenPort    string
 	hostname      string
+	publicOrigin  *url.URL
 	socksIP       netip.Addr
 	socksPort     string
 	sessions      *sessionStore
@@ -268,6 +274,13 @@ func NewAPI(config Config, dependencies Dependencies) (*API, error) {
 			return nil, fmt.Errorf("hostname %w", err)
 		}
 	}
+	var publicOrigin *url.URL
+	if config.PublicOrigin != "" {
+		publicOrigin, err = endpoint.ParseHTTPSOrigin(config.PublicOrigin)
+		if err != nil {
+			return nil, fmt.Errorf("public origin %w", err)
+		}
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -278,6 +291,13 @@ func NewAPI(config Config, dependencies Dependencies) (*API, error) {
 		config.ReadTimeout = 10 * time.Second
 	} else if config.ReadTimeout < 0 || config.ReadTimeout > 30*time.Second {
 		return nil, errors.New("invalid HTTP read timeout")
+	}
+	if config.OperationTimeout == 0 {
+		// Three sequential provider stages can each retry three 15-second
+		// requests. Leave room for their backoff and the durable commit.
+		config.OperationTimeout = 3 * time.Minute
+	} else if config.OperationTimeout < 0 || config.OperationTimeout > 5*time.Minute {
+		return nil, errors.New("invalid HTTP operation timeout")
 	}
 	if config.WriteTimeout == 0 {
 		config.WriteTimeout = 15 * time.Second
@@ -309,7 +329,7 @@ func NewAPI(config Config, dependencies Dependencies) (*API, error) {
 	return &API{smart: dependencies.Smart,
 		config: config, backend: dependencies.Backend, subscriptions: dependencies.Subscriptions,
 		liveness: dependencies.Liveness, listenIP: listenIP, listenPort: listenPort, hostname: config.Hostname,
-		socksIP: socksIP, socksPort: socksPort,
+		socksIP: socksIP, socksPort: socksPort, publicOrigin: publicOrigin,
 		sessions: sessions,
 		sseSlots: make(chan struct{}, config.SSEMaxClients),
 		requests: requests, cancelRequests: cancelRequests,
@@ -320,7 +340,7 @@ func NewAPI(config Config, dependencies Dependencies) (*API, error) {
 // subscription paths are never formatted into a log message.
 func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w.Header())
-	if !requestHostAllowed(a.listenIP, a.listenPort, a.hostname, r.Host) {
+	if !a.publicRequest(r.Host) && !requestHostAllowed(a.listenIP, a.listenPort, a.hostname, r.Host) {
 		setNoStore(w.Header())
 		a.writeProblem(w, http.StatusBadRequest, "invalid_host", "Invalid Host", "")
 		return
@@ -398,12 +418,12 @@ func (a *API) serveAPI(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, http.StatusUnauthorized, "not_authenticated", "Authentication required", "")
 		return
 	}
-	if r.URL.Path == "/api/v1/events" && !eventStreamOriginAllowed(r) {
+	if r.URL.Path == "/api/v1/events" && !eventStreamOriginAllowed(r, a.requestOrigin(r.Host)) {
 		a.writeProblem(w, http.StatusForbidden, "invalid_origin", "Invalid Origin", "")
 		return
 	}
 	if stateChanging(r.Method) {
-		if !originAllowed(r.Header.Get("Origin"), "http://"+r.Host) {
+		if !originAllowed(r.Header.Get("Origin"), a.requestOrigin(r.Host)) {
 			a.writeProblem(w, http.StatusForbidden, "invalid_origin", "Invalid Origin", "")
 			return
 		}
@@ -463,7 +483,7 @@ func (a *API) accessStatus(w http.ResponseWriter, r *http.Request) {
 		Authenticated bool       `json:"authenticated"`
 		CSRFToken     string     `json:"csrfToken,omitempty"`
 		ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
-	}{Initialized: status.Initialized, SetupAllowed: !status.Initialized && loopbackClient(r.RemoteAddr)}
+	}{Initialized: status.Initialized, SetupAllowed: !status.Initialized && a.setupAllowed(r)}
 	if _, session, authenticated := a.authenticate(r); authenticated {
 		response.Authenticated = true
 		response.CSRFToken = session.csrf
@@ -478,14 +498,14 @@ func (a *API) access(w http.ResponseWriter, r *http.Request, setup bool) {
 		a.backendUnavailable(w)
 		return
 	}
-	if !originAllowed(r.Header.Get("Origin"), "http://"+r.Host) {
+	if !originAllowed(r.Header.Get("Origin"), a.requestOrigin(r.Host)) {
 		a.writeProblem(w, http.StatusForbidden, "invalid_origin", "Invalid Origin", "")
 		return
 	}
 	// The first access token claims the installation for good. Only a client on
 	// the adapter host itself may make that claim, so another machine on the
 	// LAN cannot race the owner to a freshly deployed console.
-	if setup && !loopbackClient(r.RemoteAddr) {
+	if setup && !a.setupAllowed(r) {
 		a.writeProblem(w, http.StatusForbidden, "setup_requires_loopback", "Setup must be completed on the adapter host", "Open the console through 127.0.0.1 on the device running kfadapter, for example over an SSH port forward.")
 		return
 	}
@@ -538,7 +558,7 @@ func (a *API) access(w http.ResponseWriter, r *http.Request, setup bool) {
 	if setup {
 		status = http.StatusCreated
 	}
-	setSessionCookie(w, token, session.expiresAt)
+	setSessionCookie(w, token, session.expiresAt, a.publicRequest(r.Host))
 	a.writeJSON(w, status, struct {
 		Initialized   bool      `json:"initialized"`
 		Authenticated bool      `json:"authenticated"`
@@ -682,15 +702,16 @@ func (a *API) lock(w http.ResponseWriter, r *http.Request, token string) {
 		a.writeBodyError(w, err)
 		return
 	}
-	// The session is revoked in memory even when its durable row cannot be
-	// deleted yet; that deletion is retried, and the browser loses the cookie.
-	_ = a.revokeBrowserSession(token)
-	clearSessionCookie(w)
+	// Always lock this browser immediately, but report success only after the
+	// durable deletion succeeds. A failed deletion can survive a process restart.
+	err := a.sessions.revoke(r.Context(), token)
+	clearSessionCookie(w, a.publicRequest(r.Host))
+	if err != nil {
+		a.writeProblem(w, http.StatusServiceUnavailable, "session_revocation_pending", "Session lock could not be saved",
+			"The console is locked now, but an old session could become valid again after the service restarts. Repair persistent storage, then unlock and lock the console again to retry.")
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *API) revokeBrowserSession(token string) error {
-	return a.sessions.revoke(token)
 }
 
 func (a *API) refresh(w http.ResponseWriter, r *http.Request) {
@@ -957,7 +978,29 @@ func (a *API) backendUnavailable(w http.ResponseWriter) {
 	a.writeProblem(w, http.StatusServiceUnavailable, "service_unavailable", "Service unavailable", "")
 }
 
+// publicRequest depends only on an explicit configured authority. Forwarded
+// headers cannot expand the trusted Host/Origin policy or enable HTTPS cookies.
+func (a *API) publicRequest(host string) bool {
+	return a.publicOrigin != nil && strings.EqualFold(host, a.publicOrigin.Host)
+}
+
+func (a *API) requestOrigin(host string) string {
+	if a.publicRequest(host) {
+		return a.config.PublicOrigin
+	}
+	return "http://" + host
+}
+
+func (a *API) setupAllowed(r *http.Request) bool {
+	// A local TLS proxy has a loopback peer too. Its public authority must
+	// never be allowed to claim an uninitialized installation.
+	return loopbackClient(r.RemoteAddr) && !a.publicRequest(r.Host)
+}
+
 func (a *API) baseURL(requestHost string) string {
+	if a.publicOrigin != nil {
+		return a.config.PublicOrigin
+	}
 	if hostname, ok := a.advertisedHostname(requestHost); ok {
 		if a.listenPort == "80" {
 			return "http://" + hostname
@@ -972,6 +1015,13 @@ func (a *API) advertisedHostname(requestHost string) (string, bool) {
 }
 
 func (a *API) socksAddress(r *http.Request) string {
+	if a.publicOrigin != nil {
+		host := a.publicOrigin.Hostname()
+		if a.hostname != "" {
+			host = a.hostname
+		}
+		return net.JoinHostPort(host, a.socksPort)
+	}
 	if hostname, ok := a.advertisedHostname(r.Host); ok {
 		return net.JoinHostPort(hostname, a.socksPort)
 	}

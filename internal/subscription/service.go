@@ -556,11 +556,11 @@ func parseSubscriptionFilter(rawQuery string) (subscriptionFilter, bool) {
 	if !ok {
 		return subscriptionFilter{}, false
 	}
-	group, ok := singleFilterValue(values, "group", maxMetadataFilterBytes)
+	group, ok := singleFilterValue(values, "group", provider.MaxNodeGroupBytes)
 	if !ok {
 		return subscriptionFilter{}, false
 	}
-	name, ok := singleFilterValue(values, "name", maxMetadataFilterBytes)
+	name, ok := singleFilterValue(values, "name", maxNameFilterBytes)
 	if !ok {
 		return subscriptionFilter{}, false
 	}
@@ -571,7 +571,7 @@ func parseSubscriptionFilter(rawQuery string) (subscriptionFilter, bool) {
 	return filter, true
 }
 
-const maxMetadataFilterBytes = 512
+const maxNameFilterBytes = 512
 
 func singleFilterValue(values url.Values, key string, maxBytes int) (string, bool) {
 	items, exists := values[key]

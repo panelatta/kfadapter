@@ -25,10 +25,16 @@ trap cleanup EXIT HUP INT TERM
 mkdir -p "$work/bin" "$work/scripts" "$work/state" "$work/input"
 : >"$work/docker.log"
 cp "$PROJECT_ROOT/scripts/docker-local-context.sh" "$PROJECT_ROOT/scripts/restore-state.sh" "$PROJECT_ROOT/scripts/restore-state-archive.py" "$PROJECT_ROOT/scripts/restore-state-commit.py" "$PROJECT_ROOT/scripts/state-volume-path.sh" "$PROJECT_ROOT/scripts/verify-state-path.py" "$work/scripts/"
+cp "$PROJECT_ROOT/scripts/preflight.sh" "$work/scripts/preflight-real.sh"
 cat >"$work/scripts/preflight.sh" <<'SH'
 #!/usr/bin/env sh
 set -eu
 printf '%s\n' "preflight $*" >>"${FAKE_DOCKER_LOG:?}"
+exec "$(dirname -- "$0")/preflight-real.sh" "$@"
+SH
+cat >"$work/bin/uname" <<'SH'
+#!/usr/bin/env sh
+printf '%s\n' Linux
 SH
 cat >"$work/bin/id" <<'SH'
 #!/usr/bin/env sh
@@ -40,17 +46,23 @@ cat >"$work/bin/docker" <<'SH'
 set -eu
 log=${FAKE_DOCKER_LOG:?}
 case "${1:-}" in
+    version) printf '%s\n' linux; exit 0 ;;
+    info) printf '%s\n' "Debian GNU/Linux"; exit 0 ;;
     context)
         [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${4:-}" = '{{.Endpoints.docker.Host}}' ] || exit 2
         printf '%s\n' "${FAKE_DOCKER_CONTEXT_HOST:-unix:///var/run/docker.sock}"
         exit 0
         ;;
     volume)
+        if [ "${2:-}" = ls ]; then
+            printf '%s\n' kfadapter_db_data
+            exit 0
+        fi
         [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${5:-}" = kfadapter_db_data ] || exit 2
         case "${4:-}" in
             '{{.Name}}') printf '%s\n' kfadapter_db_data ;;
             '{{.Driver}}') printf '%s\n' local ;;
-            '{{.Mountpoint}}') printf '%s\n' "${FAKE_STATE_MOUNTPOINT:?}" ;;
+            '{{.Mountpoint}}') printf '%s\n' "${FAKE_STATE_MOUNTPOINT%/}" ;;
             '{{json .Options}}') printf '%s\n' null ;;
             *) exit 2 ;;
         esac
@@ -65,7 +77,7 @@ case "${1:-}" in
         ;;
     image)
         [ "${2:-}" = inspect ] || exit 2
-        [ "${3:-}" = "ghcr.io/oshinop/kfadapter@sha256:$(printf '%064d' 0)" ] || exit 2
+        [ "${3:-}" = "ghcr.io/panelatta/kfadapter@sha256:$(printf '%064d' 0)" ] || exit 2
         printf '%s\n' image-inspect >>"$log"
         exit 0
         ;;
@@ -84,7 +96,7 @@ case "${1:-}" in
         [ "${1:-}" = -v ] || exit 2
         mount=${2:-}; shift 2
         case "$mount" in /*:/restore:ro) ;; *) exit 2 ;; esac
-        [ "${1:-}" = "ghcr.io/oshinop/kfadapter@sha256:$(printf '%064d' 0)" ] || exit 2; shift
+        [ "${1:-}" = "ghcr.io/panelatta/kfadapter@sha256:$(printf '%064d' 0)" ] || exit 2; shift
         [ "$#" -eq 3 ] && [ "${1:-}" = validate-state ] && [ "${2:-}" = --file ] && [ "${3:-}" = /restore/state.db ] || exit 2
         stage=${mount%:/restore:ro}
         printf '%s\n' docker-run-offline-validator >>"$log"
@@ -118,10 +130,12 @@ PY
             esac
         done
         case "${1:-}" in
+            version) exit 0 ;;
             config)
+                [ "${2:-}" != --quiet ] || exit 0
                 [ "${2:-}" = --images ] && [ "${3:-}" = kfadapter ] || exit 2
                 printf '%s\n' compose-config-images >>"$log"
-                printf '%s\n' "ghcr.io/oshinop/kfadapter@sha256:$(printf '%064d' 0)"
+                printf '%s\n' "ghcr.io/panelatta/kfadapter@sha256:$(printf '%064d' 0)"
                 exit 0
                 ;;
             run)
@@ -172,7 +186,7 @@ PY
 esac
 exit 2
 SH
-chmod 0755 "$work/scripts/docker-local-context.sh" "$work/scripts/preflight.sh" "$work/scripts/restore-state.sh" "$work/scripts/restore-state-archive.py" "$work/scripts/restore-state-commit.py" "$work/scripts/state-volume-path.sh" "$work/scripts/verify-state-path.py" "$work/bin/id" "$work/bin/docker"
+chmod 0755 "$work/bin/uname" "$work/scripts/preflight-real.sh" "$work/scripts/docker-local-context.sh" "$work/scripts/preflight.sh" "$work/scripts/restore-state.sh" "$work/scripts/restore-state-archive.py" "$work/scripts/restore-state-commit.py" "$work/scripts/state-volume-path.sh" "$work/scripts/verify-state-path.py" "$work/bin/id" "$work/bin/docker"
 
 run_restore() {
     FAKE_DOCKER_LOG="$work/docker.log" \
@@ -184,6 +198,7 @@ run_restore() {
         PATH="$work/bin:$PATH" \
         KFADAPTER_HOST_UID="$actual_uid" \
         KFADAPTER_HOST_GID="$actual_gid" \
+        KFADAPTER_IMAGE_DIGEST="sha256:$(printf '%064d' 0)" \
         "$work/scripts/restore-state.sh" "$1"
 }
 
@@ -197,6 +212,7 @@ run_restore_at_volume_path() {
         PATH="$work/bin:$PATH" \
         KFADAPTER_HOST_UID="$actual_uid" \
         KFADAPTER_HOST_GID="$actual_gid" \
+        KFADAPTER_IMAGE_DIGEST="sha256:$(printf '%064d' 0)" \
         "$work/scripts/restore-state.sh" "$2"
 }
 
@@ -275,7 +291,7 @@ cp "$work/original-state.db" "$work/state/state.db"
 : >"$work/docker.log"
 run_restore_at_volume_path "$work/state/" "$current_archive"
 assert_live_payload state.db "$work/input/state.db" || fail "current SQLite state was not restored byte-for-byte"
-grep -Fq "preflight --state-dir $work/state" "$work/docker.log" || fail "restore did not run pinned production preflight against the canonical state path"
+grep -Fq "preflight --restore-existing --state-dir $work/state" "$work/docker.log" || fail "restore did not run pinned production preflight against the canonical state path"
 assert_exact_archive_payload "$current_archive" "$work/input/state.db" || fail "current SQLite archive did not retain exact database bytes"
 case "$(cat "$work/docker.log")" in
     *compose-config-images*image-inspect*docker-run-offline-validator*) ;;
@@ -309,6 +325,86 @@ for previous in "$@"; do
 done
 [ "$previous_current_count" -eq 1 ] || fail "repeated current restore did not preserve its prior SQLite state"
 [ "$previous_original_count" -eq 1 ] || fail "initial current SQLite state was not retained for rollback"
+# Existing damage is preserved exactly, while ordinary validation keeps its
+# healthy-state requirements. All Docker calls below use the local fake binary.
+for damage in empty oversized journal; do
+    python3 - "$work/state" "$damage" "$work/damaged-metadata.json" <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import json
+import sys
+
+state = Path(sys.argv[1])
+damage = sys.argv[2]
+if damage == "empty":
+    (state / "state.db").write_bytes(b"")
+elif damage == "oversized":
+    with (state / "state.db").open("r+b") as payload:
+        payload.truncate((18 << 20) + 1)
+else:
+    for suffix in ("journal", "wal", "shm"):
+        sidecar = state / f"state.db-{suffix}"
+        sidecar.write_bytes(f"interrupted SQLite {suffix}".encode())
+        sidecar.chmod(0o600)
+metadata = state.stat()
+files = {}
+for item in state.iterdir():
+    entry = item.stat()
+    files[item.name] = [entry.st_ino, entry.st_mode, entry.st_uid, entry.st_gid, entry.st_size, sha256(item.read_bytes()).hexdigest()]
+Path(sys.argv[3]).write_text(json.dumps({"inode": metadata.st_ino, "files": files}))
+PY
+    if python3 "$work/scripts/verify-state-path.py" --state-dir "$work/state" --base "$work" --uid "$actual_uid" --gid "$actual_gid" >/dev/null 2>&1; then
+        fail "$damage payload passed ordinary state validation"
+    fi
+    run_restore "$current_archive"
+    assert_live_payload state.db "$work/input/state.db" || fail "$damage state was not restored"
+    python3 - "$work" "$work/damaged-metadata.json" <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import json
+import sys
+
+root = Path(sys.argv[1])
+expected = json.loads(Path(sys.argv[2]).read_text())
+retained = [item / "state" for item in root.glob(".state.pre-restore-*") if (item / "state").stat().st_ino == expected["inode"]]
+assert len(retained) == 1, "damaged directory inode was not preserved"
+actual = {}
+for item in retained[0].iterdir():
+    entry = item.stat()
+    actual[item.name] = [entry.st_ino, entry.st_mode, entry.st_uid, entry.st_gid, entry.st_size, sha256(item.read_bytes()).hexdigest()]
+assert actual == expected["files"], "damaged directory contents or identity changed"
+PY
+done
+
+# Recovery mode relaxes only payload health: links, special files and path
+# traversal must still fail before anything is exchanged.
+for unsafe in symlink hardlink fifo permissions; do
+    extra="$work/state/state.db-journal"
+    case "$unsafe" in
+        symlink) ln -s "$work/input/state.db" "$extra" ;;
+        hardlink) ln "$work/input/state.db" "$extra" ;;
+        fifo) mkfifo "$extra" ;;
+        permissions) printf '%s\n' unsafe >"$extra"; chmod 0644 "$extra" ;;
+    esac
+    if run_restore "$current_archive" >/dev/null 2>&1; then
+        fail "recovery accepted an unsafe $unsafe old payload"
+    fi
+    rm -- "$extra"
+    assert_live_payload state.db "$work/input/state.db" || fail "$unsafe rejection changed live bytes"
+done
+if run_restore_at_volume_path "$work/state/../state" "$current_archive" >/dev/null 2>&1; then
+    fail "recovery accepted a traversal state path"
+fi
+if python3 "$work/scripts/verify-state-path.py" --state-dir "$work/state" --base "$work" --uid "$((actual_uid + 1))" --gid "$actual_gid" --allow-damaged-payload >/dev/null 2>&1; then
+    fail "recovery accepted wrong state ownership"
+fi
+
+for incompatible in --state-only --local-build; do
+    if "$work/scripts/preflight-real.sh" --restore-existing "$incompatible" >/dev/null 2>&1; then
+        fail "recovery validation was accepted with $incompatible"
+    fi
+done
+
 : >"$work/docker.log"
 snapshot_live_metadata >"$work/ps-failure-state-before"
 if FAKE_DOCKER_PS_FAIL=1 run_restore "$current_archive" >"$work/ps-failure-output" 2>&1; then

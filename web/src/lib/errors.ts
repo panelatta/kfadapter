@@ -8,6 +8,7 @@ export function isSessionProblem(error: unknown): boolean {
 }
 
 const problemMessages: Record<string, string> = {
+    session_revocation_pending: "The console is locked now, but an old session could become valid again after the service restarts. Repair persistent storage, then unlock and lock the console again to retry.",
     access_rate_limited: "Too many attempts. Wait a moment and try again.",
     login_rate_limited: "Too many attempts. Wait a moment and try again.",
     access_in_progress: "Another attempt is still being checked. Try again in a moment.",

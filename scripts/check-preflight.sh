@@ -5,7 +5,7 @@ umask 077
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
-IMAGE_REPOSITORY=ghcr.io/oshinop/kfadapter
+IMAGE_REPOSITORY=ghcr.io/panelatta/kfadapter
 IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
 
 fail() {

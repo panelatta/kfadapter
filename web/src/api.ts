@@ -217,7 +217,7 @@ export class ApiClient {
     return response.blob();
   }
 
-  events(onEvent: (event: EventMessage) => void, onFailure: () => void): () => void {
+  events(onEvent: (event: EventMessage) => void, onFailure: () => void, onOpen?: () => void): () => void {
     // EventSource reconnects by itself after a dropped connection, but a non-200
     // response (403, 429, 503) closes it permanently. Recreate closed streams
     // with capped exponential backoff so live updates always recover.
@@ -228,6 +228,7 @@ export class ApiClient {
     let stopped = false;
     const listeners = names.map((type) => {
       const listener = (message: Event) => {
+        if (stopped) return;
         const data = (message as MessageEvent<unknown>).data;
         if (typeof data !== "string") return;
         const event = parseNamedEvent(type, data);
@@ -245,13 +246,20 @@ export class ApiClient {
       retryTimer = null;
       if (stopped) return;
       const current = new EventSource(`${API_ROOT}/events`, { withCredentials: true });
+      let connected = false;
       stream = current;
       for (const [type, listener] of listeners) current.addEventListener(type, listener);
       current.onopen = () => {
+        if (stopped || stream !== current || connected) return;
+        connected = true;
         retryDelay = EVENT_RETRY_INITIAL_MS;
+        // The server does not replay missed events. Reconcile after both the
+        // first connection and browser-managed or explicitly recreated streams.
+        onOpen?.();
       };
       current.onerror = () => {
         if (stopped || stream !== current) return;
+        connected = false;
         onFailure();
         if (current.readyState !== EVENT_SOURCE_CLOSED) return;
         detach(current);

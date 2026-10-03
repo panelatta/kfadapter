@@ -68,7 +68,7 @@ def same_file_identity(first: os.stat_result, second: os.stat_result) -> bool:
     )
 
 
-def verify_tree(directory_fd: int, uid: int, gid: int) -> None:
+def verify_tree(directory_fd: int, uid: int, gid: int, allow_damaged_payload: bool = False) -> None:
     metadata = os.fstat(directory_fd)
     if stat.S_IMODE(metadata.st_mode) != 0o700:
         fail("state directory mode must be exactly 0700")
@@ -78,50 +78,53 @@ def verify_tree(directory_fd: int, uid: int, gid: int) -> None:
     entries = list(os.scandir(directory_fd))
     if not entries:
         return
-    if len(entries) != 1 or entries[0].name != "state.db":
+    if not allow_damaged_payload and (len(entries) != 1 or entries[0].name != "state.db"):
         fail("state directory must be empty or contain exactly one state.db file")
-    entry = entries[0]
-    entry_metadata = entry.stat(follow_symlinks=False)
-    if (
-        stat.S_ISLNK(entry_metadata.st_mode)
-        or not stat.S_ISREG(entry_metadata.st_mode)
-        or entry_metadata.st_nlink != 1
-        or entry_metadata.st_size <= 0
-        or entry_metadata.st_size > STATE_DB_MAX_BYTES
-        or stat.S_IMODE(entry_metadata.st_mode) != 0o600
-        or entry_metadata.st_uid != uid
-        or entry_metadata.st_gid != gid
-    ):
-        fail("state payload must be a non-empty 0600 regular file with one link and the state owner")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    try:
-        file_fd = os.open(entry.name, flags, dir_fd=directory_fd)
-    except OSError as error:
-        fail(f"could not open state payload safely: {error}")
-    try:
-        opened = os.fstat(file_fd)
+    # Recovery preserves the old directory as evidence. Its regular files may
+    # be empty, oversized, or include SQLite journal/WAL/SHM leftovers, but
+    # ownership, permissions, file identity and no-link guarantees still apply.
+    for entry in entries:
+        entry_metadata = entry.stat(follow_symlinks=False)
         if (
-            not same_file_identity(entry_metadata, opened)
-            or not stat.S_ISREG(opened.st_mode)
-            or opened.st_nlink != 1
-            or opened.st_size != entry_metadata.st_size
-            or opened.st_size > STATE_DB_MAX_BYTES
-            or stat.S_IMODE(opened.st_mode) != 0o600
-            or opened.st_uid != uid
-            or opened.st_gid != gid
+            stat.S_ISLNK(entry_metadata.st_mode)
+            or not stat.S_ISREG(entry_metadata.st_mode)
+            or entry_metadata.st_nlink != 1
+            or (not allow_damaged_payload and not 0 < entry_metadata.st_size <= STATE_DB_MAX_BYTES)
+            or stat.S_IMODE(entry_metadata.st_mode) != 0o600
+            or entry_metadata.st_uid != uid
+            or entry_metadata.st_gid != gid
         ):
-            fail("state payload identity changed")
-    finally:
-        os.close(file_fd)
+            fail("state payload must be a safe 0600 regular file with one link and the state owner; normal validation also requires a non-empty bounded payload")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            file_fd = os.open(entry.name, flags, dir_fd=directory_fd)
+        except OSError as error:
+            fail(f"could not open state payload safely: {error}")
+        try:
+            opened = os.fstat(file_fd)
+            if (
+                not same_file_identity(entry_metadata, opened)
+                or not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or opened.st_size != entry_metadata.st_size
+                or (not allow_damaged_payload and not 0 < opened.st_size <= STATE_DB_MAX_BYTES)
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_uid != uid
+                or opened.st_gid != gid
+            ):
+                fail("state payload identity changed")
+        finally:
+            os.close(file_fd)
 
-def verify(path: str, base: Path, uid: int, gid: int, expected: str | None) -> str:
+
+def verify(path: str, base: Path, uid: int, gid: int, expected: str | None, allow_damaged_payload: bool = False) -> str:
     parent, name, directory = open_directory(absolute_parts(path, base))
     try:
         metadata = os.fstat(directory)
         identity = f"{metadata.st_dev}:{metadata.st_ino}"
         if expected is not None and identity != expected:
             fail("state directory identity changed")
-        verify_tree(directory, uid, gid)
+        verify_tree(directory, uid, gid, allow_damaged_payload)
         final_entry = os.stat(name, dir_fd=parent, follow_symlinks=False)
         final = os.fstat(directory)
         if stat.S_ISLNK(final_entry.st_mode) or (final_entry.st_dev, final_entry.st_ino) != (final.st_dev, final.st_ino):
@@ -139,12 +142,13 @@ def main() -> int:
     parser.add_argument("--uid", required=True, type=int)
     parser.add_argument("--gid", required=True, type=int)
     parser.add_argument("--expect-identity")
+    parser.add_argument("--allow-damaged-payload", action="store_true", help="preserve safe old regular files during offline recovery without requiring a valid size or layout")
     parser.add_argument("--print-canonical-path", action="store_true")
     args = parser.parse_args()
     if not args.base.is_absolute() or args.base.is_symlink():
         fail("--base must be an absolute non-symlink directory")
     parts = absolute_parts(args.state_dir, args.base)
-    identity = verify(args.state_dir, args.base, args.uid, args.gid, args.expect_identity)
+    identity = verify(args.state_dir, args.base, args.uid, args.gid, args.expect_identity, args.allow_damaged_payload)
     print(canonical_path(parts) if args.print_canonical_path else identity)
     return 0
 

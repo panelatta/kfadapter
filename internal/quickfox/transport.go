@@ -36,12 +36,19 @@ func NewTransport() *Transport {
 
 func (*Transport) Protocol() provider.Protocol { return NativeProtocol }
 
-func (transport *Transport) RelayStream(ctx context.Context, request provider.RelayRequest) error {
+func (transport *Transport) RelayStream(ctx context.Context, request provider.RelayRequest) (relayErr error) {
 	if transport == nil || ctx == nil || request.Dial == nil || request.Client == nil || request.NodeHost == "" || request.NodePort == 0 ||
 		request.Target.Host == "" || request.Target.Port == 0 || request.Admit == nil || request.Ready == nil || request.HandshakeTimeout <= 0 ||
 		transport.clock == nil || transport.lookup == nil {
 		return errors.New("quickfox: invalid stream relay request")
 	}
+	// Closing a socket to interrupt a handshake reports an I/O error. Preserve
+	// the caller's cancellation reason even when that close wins the race.
+	defer func() {
+		if err := ctx.Err(); err != nil {
+			relayErr = err
+		}
+	}()
 	authority, err := decodeTunnelAuthority(request.Authority)
 	if err != nil {
 		return err
@@ -55,6 +62,10 @@ func (transport *Transport) RelayStream(ctx context.Context, request provider.Re
 		return err
 	}
 	defer control.Close()
+	// Keep cancellation attached through both handshakes and the relay: the
+	// control connection stays open while the data connection is in use.
+	stopControlCancel := context.AfterFunc(ctx, func() { _ = control.Close() })
+	defer stopControlCancel()
 	if err := control.SetDeadline(time.Now().Add(request.HandshakeTimeout)); err != nil {
 		return fmt.Errorf("quickfox: set control deadline: %w", err)
 	}
@@ -73,12 +84,17 @@ func (transport *Transport) RelayStream(ctx context.Context, request provider.Re
 	if err := control.SetDeadline(time.Time{}); err != nil {
 		return fmt.Errorf("quickfox: clear control deadline: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	upstream, err := dialRelay(ctx, request.Dial, request.NodeHost, request.NodePort, request.HandshakeTimeout)
 	if err != nil {
 		return err
 	}
 	defer upstream.Close()
+	stopDataCancel := context.AfterFunc(ctx, func() { _ = upstream.Close() })
+	defer stopDataCancel()
 	if err := upstream.SetDeadline(time.Now().Add(request.HandshakeTimeout)); err != nil {
 		return fmt.Errorf("quickfox: set data deadline: %w", err)
 	}
@@ -91,6 +107,9 @@ func (transport *Transport) RelayStream(ctx context.Context, request provider.Re
 	}
 	if err := upstream.SetDeadline(time.Time{}); err != nil {
 		return fmt.Errorf("quickfox: clear data deadline: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if !request.Admit() {
 		return provider.ErrNoSession
@@ -241,7 +260,9 @@ func relayXOR(ctx context.Context, client, upstream net.Conn) error {
 				break
 			}
 		}
-		if result != nil && !benignRelayClose(result) {
+		// A locally closed socket must unblock the other pump even when
+		// its error is harmless to report. Only a clean EOF half-closes.
+		if result != nil {
 			closeBoth()
 		}
 		results <- result

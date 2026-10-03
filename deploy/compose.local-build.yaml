@@ -1,9 +1,10 @@
 # Developer deployment built from this checkout. It mirrors the production
-# hardening in ../compose.yaml but uses an isolated project and state volume,
-# so it can never touch production state. Validate with:
+# hardening in ../compose.yaml. Pin the project name on every invocation so an
+# inherited COMPOSE_PROJECT_NAME cannot select production containers or state.
+# Validate with:
 #   scripts/preflight.sh --local-build
 # and run with:
-#   docker compose --env-file /dev/null -f deploy/compose.local-build.yaml up -d --build
+#   docker compose --env-file /dev/null --project-name kfadapter-local -f deploy/compose.local-build.yaml up -d --build
 name: kfadapter-local
 
 services:

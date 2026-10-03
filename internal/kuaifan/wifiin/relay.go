@@ -48,7 +48,9 @@ func Relay(ctx context.Context, left, right net.Conn) error {
 				err = dst.Close()
 			}
 		}
-		if err != nil && !errors.Is(err, net.ErrClosed) {
+		// A local Close is also an abort: the reverse copy may still be
+		// blocked reading an idle upstream. Only a clean EOF half-closes.
+		if err != nil {
 			closeBoth()
 		}
 		results <- err

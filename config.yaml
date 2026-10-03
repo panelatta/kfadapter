@@ -8,13 +8,18 @@
 # interfaces of its address family.
 listenAddr: 0.0.0.0
 
-# Optional DNS hostname accepted and advertised; localhost is implicitly accepted
+# Optional SOCKS DNS hostname and direct HTTP management hostname. localhost is implicitly accepted
 # when listenAddr is wildcard or loopback.
 # hostname: adapter.example.com
 
 # Management HTTP endpoint.
 management:
   port: 10809
+  # Optional canonical HTTPS origin of your TLS reverse proxy. No path, trailing
+  # slash, credentials, query, fragment, or explicit default :443 port. The proxy
+  # must set Host to this authority; forwarding headers are not trusted. Complete
+  # first-time setup over local HTTP/SSH before using this public console.
+  # publicOrigin: https://console.example.com
   # Lifetime of an authenticated browser session (valid range: 1m through 24h).
   sessionTTL: 30m
 

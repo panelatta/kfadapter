@@ -10,9 +10,8 @@ import (
 )
 
 // NewHTTPServer constructs the production HTTP server around a validated API.
-// Regular response writes are bounded. Authenticated SSE handlers explicitly
-// refresh and clear per-write deadlines, preserving idle stream lifetime while
-// retaining a bound for a blocked client write.
+// Management operations and their response writes have separate time budgets.
+// Authenticated SSE handlers retain their own per-write deadlines.
 func NewHTTPServer(config Config, dependencies Dependencies) (*http.Server, *API, error) {
 	api, err := NewAPI(config, dependencies)
 	if err != nil {
@@ -20,11 +19,11 @@ func NewHTTPServer(config Config, dependencies Dependencies) (*http.Server, *API
 	}
 	return &http.Server{
 		Addr:              api.config.Listen,
-		Handler:           api,
+		Handler:           api.httpHandler(),
 		BaseContext:       func(net.Listener) context.Context { return api.requests },
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       api.config.ReadTimeout,
-		WriteTimeout:      api.config.WriteTimeout,
+		WriteTimeout:      api.config.OperationTimeout + api.config.WriteTimeout,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 	}, api, nil

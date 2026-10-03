@@ -50,15 +50,17 @@ state_identity=$(python3 "$SCRIPT_DIR/verify-state-path.py" \
     --state-dir "$state_dir" \
     --base "$PROJECT_ROOT" \
     --uid "$STATE_UID" \
-    --gid "$STATE_GID")
+    --gid "$STATE_GID" \
+    --allow-damaged-payload)
 state_dir=$(python3 "$SCRIPT_DIR/verify-state-path.py" \
     --state-dir "$state_dir" \
     --base "$PROJECT_ROOT" \
     --uid "$STATE_UID" \
     --gid "$STATE_GID" \
     --expect-identity "$state_identity" \
-    --print-canonical-path) || fail "could not canonicalize the verified state directory"
-"$SCRIPT_DIR/preflight.sh" --state-dir "$state_dir"
+    --print-canonical-path \
+    --allow-damaged-payload) || fail "could not canonicalize the verified state directory"
+"$SCRIPT_DIR/preflight.sh" --restore-existing --state-dir "$state_dir"
 running_services=$(docker ps --filter "volume=$STATE_VOLUME" -q) ||
     fail "could not determine whether the Docker state volume is in use"
 [ -z "$running_services" ] || fail "Docker state volume is in use; stop every container mounting it before restoring state"
@@ -87,6 +89,16 @@ payload_name=$(python3 "$SCRIPT_DIR/restore-state-commit.py" \
 [ "$payload_name" = state.db ] || fail "restore preparation returned an unsupported state payload"
 "$SCRIPT_DIR/preflight.sh" --state-only --state-dir "$stage"
 validate_restored_state
+
+# Recheck the old directory after extraction and validation, using the same
+# safety-only rules. The commit helper separately pins its directory identity.
+python3 "$SCRIPT_DIR/verify-state-path.py" \
+    --state-dir "$state_dir" \
+    --base "$PROJECT_ROOT" \
+    --uid "$STATE_UID" \
+    --gid "$STATE_GID" \
+    --expect-identity "$state_identity" \
+    --allow-damaged-payload >/dev/null
 
 stage_path=$stage
 stage=

@@ -171,7 +171,7 @@ trap 'handle_upgrade_exit 143' TERM
 trap 'handle_upgrade_exit $?' EXIT
 
 [ "$#" -eq 0 ] || {
-    printf '%s\n' "usage: set KFADAPTER_IMAGE_DIGEST=sha256:<digest>; optionally set KFADAPTER_IMAGE_REPOSITORY=repository (default: ghcr.io/oshinop/kfadapter); scripts/upgrade.sh" >&2
+    printf '%s\n' "usage: set KFADAPTER_IMAGE_DIGEST=sha256:<digest>; optionally set KFADAPTER_IMAGE_REPOSITORY=repository (default: ghcr.io/panelatta/kfadapter); scripts/upgrade.sh" >&2
     exit 2
 }
 [ -n "${KFADAPTER_IMAGE_DIGEST:-}" ] || fail "KFADAPTER_IMAGE_DIGEST is required"

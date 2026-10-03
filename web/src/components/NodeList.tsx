@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { ChevronRight, Copy, Gauge, Info, LoaderCircle } from "lucide-react";
-import { ApiClient } from "@/api";
+import { ApiClient, ApiError } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -38,13 +38,15 @@ export function NodeList({
     );
 
     const markProbeFailed = (nodeId: string, requestError: unknown) => {
+        const unreachable = requestError instanceof ApiError &&
+            (requestError.problem.code === "tcp_probe_failed" || requestError.problem.code === "tcp_probe_timeout");
         onNodesChange((previous) =>
             previous.map((current) =>
                 current.id === nodeId
                     ? {
                           ...current,
-                          health: "unhealthy",
-                          tcpLatencyMs: undefined,
+                          health: unreachable ? "unhealthy" : current.health,
+                          tcpLatencyMs: unreachable ? undefined : current.tcpLatencyMs,
                           probeError: probeFailureLabel(requestError),
                       }
                     : current,

@@ -71,15 +71,21 @@ export function ServiceErrorCard({
     );
 }
 
-export function LoadingCard() {
+export function LoadingCard({
+    title = "Opening kfadapter",
+    description = "Checking console access.",
+}: {
+    title?: string;
+    description?: string;
+} = {}) {
     return (
         <AuthCardShell>
             <CardHeader>
                 <h1 className="flex items-center gap-2.5 font-sans text-lg font-semibold uppercase tracking-[0.05em]">
                     <LoaderCircle className="size-5 animate-spin text-primary" />
-                    Opening kfadapter
+                    {title}
                 </h1>
-                <CardDescription>Checking console access.</CardDescription>
+                <CardDescription>{description}</CardDescription>
             </CardHeader>
         </AuthCardShell>
     );
@@ -393,4 +399,3 @@ export function FormError({ message }: { message: string }) {
         </p>
     ) : null;
 }
-

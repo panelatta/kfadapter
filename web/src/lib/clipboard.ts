@@ -1,4 +1,5 @@
-export async function copyText(value: string): Promise<boolean> {
+export async function copyText(value: string, isCurrent: () => boolean = () => true): Promise<boolean> {
+    if (!isCurrent()) return false;
     try {
         if (navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(value);
@@ -7,6 +8,10 @@ export async function copyText(value: string): Promise<boolean> {
     } catch {
         // Fall through to the legacy copy command for non-secure LAN origins.
     }
+
+    // A native clipboard request cannot be undone. If its caller lost access
+    // while it was pending, do not start a second copy through the fallback.
+    if (!isCurrent()) return false;
 
     // Keep the temporary field next to the focused control so selecting it does
     // not move focus out of an open popover (which would dismiss it), and put

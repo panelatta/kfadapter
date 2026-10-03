@@ -13,8 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/kfadapter/kfadapter/internal/provider"
 )
 
@@ -124,8 +122,9 @@ func (s *SQLiteStore) validate() error {
 }
 
 // ValidateSQLiteFile validates an existing state.db without creating or
-// modifying it. Optional semantic validators inspect the reconstructed
-// aggregate after relational validation succeeds.
+// modifying it. Current databases and exact v9 backups are accepted; v9 is
+// reconstructed with the same disabled smart-proxy defaults as its migration.
+// Optional semantic validators inspect the aggregate after relational validation.
 func ValidateSQLiteFile(path string, semantic ...func(PersistentState) error) error {
 	if path == "" {
 		return ErrInsecureStatePath
@@ -148,15 +147,30 @@ func ValidateSQLiteFile(path string, semantic ...func(PersistentState) error) er
 	if err := validateSQLiteJournalMode(db); err != nil {
 		return err
 	}
-	if err := validateSQLiteSchema(db); err != nil {
-		return err
-	}
 	tx, err := db.Begin()
 	if err != nil {
 		return corruptDatabase(err)
 	}
 	defer tx.Rollback()
-	state, err := loadPersistentStateTx(tx)
+	// Restoration validates mounted read-only archives before production Load
+	// performs migration. Pin schema selection and all data checks to one read
+	// transaction, accepting only the exact current or supported v9 definition.
+	var version int
+	if err := tx.QueryRow("SELECT version FROM schema_version WHERE id = 1").Scan(&version); err != nil {
+		return corruptDatabase(err)
+	}
+	tables, statements := sqliteSchemaTables, sqliteSchemaStatements
+	switch version {
+	case sqliteSchemaVersion:
+	case 9:
+		tables, statements = sqliteSchemaV9Tables, sqliteSchemaV9Statements
+	default:
+		return corruptDatabase(errors.New("unsupported SQLite schema version"))
+	}
+	if err := validateSQLiteSchemaObjects(tx, version, tables, statements, true); err != nil {
+		return err
+	}
+	state, err := loadPersistentStateVersionTx(tx, version)
 	if err != nil {
 		return err
 	}
@@ -437,10 +451,7 @@ func openSQLite(path string, readOnly bool) (*sql.DB, error) {
 		query.Set("mode", "ro")
 	}
 	uri := &url.URL{Scheme: "file", Path: absolute, RawQuery: query.Encode()}
-	db, err := sql.Open("sqlite", uri.String())
-	if err != nil {
-		return nil, err
-	}
+	db := sql.OpenDB(&sqliteStateConnector{dsn: uri.String()})
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	if err := db.Ping(); err != nil {
@@ -865,6 +876,13 @@ func (s *SQLiteStore) Update(change func(*PersistentState) error) (PersistentSta
 }
 
 func loadPersistentStateTx(tx *sql.Tx) (PersistentState, error) {
+	return loadPersistentStateVersionTx(tx, sqliteSchemaVersion)
+}
+
+// loadPersistentStateVersionTx reads an already schema-validated aggregate.
+// Only read-only restore validation uses v9; normal loads and snapshots require
+// the current schema and its explicit smart-proxy preferences row.
+func loadPersistentStateVersionTx(tx *sql.Tx, version int) (PersistentState, error) {
 	var state PersistentState
 	if err := tx.QueryRow("SELECT installation_id FROM state_metadata WHERE id = 1").Scan(&state.InstallationID); err != nil {
 		return PersistentState{}, corruptDatabase(err)
@@ -901,13 +919,15 @@ func loadPersistentStateTx(tx *sql.Tx) (PersistentState, error) {
 	if err != nil {
 		return PersistentState{}, corruptDatabase(err)
 	}
-	var smartEnabled int64
-	if err := tx.QueryRow("SELECT enabled, interval_minutes FROM smart_proxy_preferences WHERE id = 1").Scan(&smartEnabled, &state.Preferences.SmartProxy.IntervalMinutes); err != nil {
-		return PersistentState{}, corruptDatabase(err)
-	}
-	state.Preferences.SmartProxy.Enabled, err = intBool(smartEnabled)
-	if err != nil {
-		return PersistentState{}, corruptDatabase(err)
+	if version != 9 {
+		var smartEnabled int64
+		if err := tx.QueryRow("SELECT enabled, interval_minutes FROM smart_proxy_preferences WHERE id = 1").Scan(&smartEnabled, &state.Preferences.SmartProxy.IntervalMinutes); err != nil {
+			return PersistentState{}, corruptDatabase(err)
+		}
+		state.Preferences.SmartProxy.Enabled, err = intBool(smartEnabled)
+		if err != nil {
+			return PersistentState{}, corruptDatabase(err)
+		}
 	}
 	state.Preferences.RevealEndpoints = value
 	state.Preferences.ExcludedNodeIDs = make(map[string]bool)

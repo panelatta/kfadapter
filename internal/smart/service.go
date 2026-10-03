@@ -151,6 +151,8 @@ func (s *Service) RequestProbe() bool {
 	return true
 }
 
+// Completed observations describe route performance. CompactPin checks the
+// current authority, so normal same-account credential refreshes retain rankings.
 func (s *Service) current(result Result) bool {
 	registry := s.registry()
 	if registry == nil || registry.SmartCredentials() != result.epoch {
@@ -238,9 +240,11 @@ func (s *Service) roundIfDue(parent context.Context) {
 	snapshot := s.manager.Current()
 	registry := s.registry()
 	var nodes []state.Node
-	if snapshot != nil && registry != nil {
+	now := time.Now()
+	if registry != nil && state.SessionUsable(snapshot, now) {
 		for _, node := range snapshot.Nodes {
-			if node.TunnelEligible() {
+			account, available := snapshot.Providers[node.Provider]
+			if node.TunnelEligible() && available && account.ExpiresAt.After(now) {
 				nodes = append(nodes, node)
 			}
 		}
@@ -260,6 +264,9 @@ func (s *Service) roundIfDue(parent context.Context) {
 	for range min(4, len(nodes)) {
 		workers.Go(func() {
 			for index := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
 				node := nodes[index]
 				pin, err := s.manager.CompactPin(node.Selector, time.Now())
 				if err != nil {
@@ -282,7 +289,9 @@ func (s *Service) roundIfDue(parent context.Context) {
 						total += measurement.LatencyMS
 					}
 				}
-				if len(result.Measurements) != len(defaultTargets) || !s.manager.SessionCurrentPin(pin, time.Now()) {
+				// A round deadline is not a target failure. In particular, a
+				// cancelled final target must not turn partial work into a full result.
+				if ctx.Err() != nil || len(result.Measurements) != len(defaultTargets) || !s.manager.SessionCurrentPin(pin, time.Now()) {
 					continue
 				}
 				if result.Successes > 0 {
@@ -295,6 +304,11 @@ func (s *Service) roundIfDue(parent context.Context) {
 	dispatched := 0
 dispatch:
 	for index := range nodes {
+		// Stop dispatching after cancellation even if a worker is also ready.
+		// Otherwise select can keep advancing the cursor over unprobed nodes.
+		if ctx.Err() != nil {
+			break
+		}
 		select {
 		case jobs <- index:
 			dispatched++

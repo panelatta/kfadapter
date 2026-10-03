@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiClient } from "@/api";
+import { ApiClient, ApiError } from "@/api";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { providerLoginStates, groupNameCollator, applyProbeResult } from "@/lib/console";
 import { routeFromLocation, replaceRoute, type Route } from "@/lib/routes";
@@ -8,7 +8,7 @@ import { ServiceErrorCard, LoadingCard, AccessTokenCard, ProviderLoginCard } fro
 import { StatusConsole } from "@/components/StatusConsole";
 import type { EventMessage, NodeRecord, StatusResponse } from "@/types";
 
-type SessionState = "checking" | "setup" | "access_login" | "available";
+type SessionState = "checking" | "setup" | "access_login" | "available" | "locking";
 
 interface AppProps {
     api?: ApiClient;
@@ -25,6 +25,8 @@ export function App({ api: providedApi }: AppProps) {
     const [loadError, setLoadError] = useState("");
     const [refreshing, setRefreshing] = useState(false);
     const sessionRevision = useRef(0);
+    const lockPending = useRef(false);
+    const loadRevision = useRef(0);
     const reloadWork = useRef({
         scheduled: false,
         running: false,
@@ -57,9 +59,15 @@ export function App({ api: providedApi }: AppProps) {
     const loadAuthenticatedData =
         useCallback(async (): Promise<StatusResponse | null> => {
             const revision = sessionRevision.current;
+            const request = ++loadRevision.current;
+            // Explicit actions can overlap an SSE reload. Only the newest load
+            // may publish data or errors, including failures from an old session.
+            const isCurrent = () =>
+                revision === sessionRevision.current &&
+                request === loadRevision.current;
             try {
                 const nextStatus = await api.status();
-                if (revision !== sessionRevision.current) return null;
+                if (!isCurrent()) return null;
 
                 if (providerLoginStates[nextStatus.state]) {
                     setStatus(nextStatus);
@@ -78,7 +86,7 @@ export function App({ api: providedApi }: AppProps) {
                     api.nodes(),
                     api.subscriptionURL(),
                 ]);
-                if (revision !== sessionRevision.current) return null;
+                if (!isCurrent()) return null;
 
                 for (const result of [nextNodes, nextSubscription]) {
                     if (
@@ -98,7 +106,7 @@ export function App({ api: providedApi }: AppProps) {
                     setLoadError(describeError(failure.reason));
                 return nextStatus;
             } catch (error) {
-                if (revision !== sessionRevision.current) return null;
+                if (!isCurrent()) return null;
                 if (isSessionProblem(error)) {
                     loseAccessSession();
                     return null;
@@ -185,9 +193,11 @@ export function App({ api: providedApi }: AppProps) {
     useEffect(() => {
         if (session !== "available") return;
         let active = true;
+        const revision = sessionRevision.current;
+        const isCurrentSession = () => active && revision === sessionRevision.current;
         const closeEvents = api.events(
             (event: EventMessage) => {
-                if (!active) return;
+                if (!isCurrentSession()) return;
                 if (event.type === "probe") {
                     setNodes((previous) => applyProbeResult(previous, event));
                     return;
@@ -195,11 +205,14 @@ export function App({ api: providedApi }: AppProps) {
                 queueAuthenticatedReload();
             },
             () => {
-                if (!active) return;
+                if (!isCurrentSession()) return;
                 const now = Date.now();
                 if (now < nextSSEFailureReloadAt.current) return;
                 nextSSEFailureReloadAt.current = now + 1000;
                 queueAuthenticatedReload();
+            },
+            () => {
+                if (isCurrentSession()) queueAuthenticatedReload();
             },
         );
         return () => {
@@ -233,6 +246,7 @@ export function App({ api: providedApi }: AppProps) {
     ): Promise<void> => {
         const revision = sessionRevision.current;
         await api.login(provider, account, password);
+        if (revision !== sessionRevision.current) return;
         await loadAuthenticatedData();
         if (revision === sessionRevision.current) replaceRoute("/");
     };
@@ -288,25 +302,36 @@ export function App({ api: providedApi }: AppProps) {
         mutateProvider(provider, (id) => api.logoutAccount(id));
 
     const lockConsole = async (): Promise<void> => {
+        if (lockPending.current) return;
+        lockPending.current = true;
         const revision = ++sessionRevision.current;
         reloadWork.current.queued = false;
         clearConsoleData();
-        setSession("access_login");
+        // Wait for the logout response before allowing a new login. In addition
+        // to clearing CSRF, that response can clear the browser's session cookie.
+        setSession("locking");
         replaceRoute("/");
         try {
             await api.lockConsole();
         } catch (error) {
-            // The service revokes a session even when it cannot persist that yet,
-            // so only an unreachable service leaves this browser session alive.
+            // A storage failure locks this process but must remain visible:
+            // its revoked session could be restored after a service restart.
             if (
                 revision === sessionRevision.current &&
                 !isSessionProblem(error)
             )
                 setLoadError(
-                    "The console could not confirm the lock with the service. If this browser is shared, reload and lock again.",
+                    error instanceof ApiError &&
+                        error.problem.code === "session_revocation_pending"
+                        ? describeError(error)
+                        : "The console could not confirm the lock with the service. If this browser is shared, reload and lock again.",
                 );
         } finally {
-            api.clearSession();
+            lockPending.current = false;
+            if (revision === sessionRevision.current) {
+                api.clearSession();
+                setSession("access_login");
+            }
         }
     };
 
@@ -335,6 +360,13 @@ export function App({ api: providedApi }: AppProps) {
     let content;
     if (session === "checking") {
         content = <LoadingCard />;
+    } else if (session === "locking") {
+        content = (
+            <LoadingCard
+                title="Locking console"
+                description="Waiting for the service to finish locking this session."
+            />
+        );
     } else if (session === "setup") {
         content = (
             <AccessTokenCard

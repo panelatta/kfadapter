@@ -5,7 +5,7 @@ services:
     # Production runs one immutable image. scripts/preflight.sh validates these
     # inputs and scripts/upgrade.sh swaps them with automatic rollback. The
     # digest of each published image is shown in the CI job summary.
-    image: "${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/oshinop/kfadapter}@${KFADAPTER_IMAGE_DIGEST:?set KFADAPTER_IMAGE_DIGEST=sha256:<digest> (see scripts/preflight.sh)}"
+    image: "${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/kfadapter}@${KFADAPTER_IMAGE_DIGEST:?set KFADAPTER_IMAGE_DIGEST=sha256:<digest> (see scripts/preflight.sh)}"
     network_mode: host
     user: "65532:65532"
     working_dir: /kfadapter

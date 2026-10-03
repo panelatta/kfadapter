@@ -32,8 +32,9 @@ kfadapter 把快帆（KuaiFan）和 QuickFox 账号转换成本地的 SOCKS5 代
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `listenAddr` | `0.0.0.0` | 管理端口与 SOCKS 端口共用的数字 IP；通配地址表示绑定该地址族的所有接口 |
-| `hostname` | 无 | 可选的 DNS 名，控制台和订阅链接会接受并使用它 |
-| `management.port` | `10809` | 管理控制台 HTTP 端口 |
+| `hostname` | 无 | 可选的 SOCKS DNS 名，也是直接 HTTP 访问时接受的管理域名 |
+| `management.port` | `10809` | 管理控制台 HTTP 回源端口 |
+| `management.publicOrigin` | 无 | TLS 反代的外部 HTTPS origin，例如 `https://console.example.com`；配置后订阅链接使用此地址 |
 | `management.sessionTTL` | `30m` | 浏览器会话时长（1m–24h）；调小后已有会话会被截短 |
 | `proxy.port` | `10808` | SOCKS5 端口 |
 | `proxy.dialTimeout` | `10s` | 连接上游节点的超时（1s–10s） |
@@ -45,11 +46,12 @@ kfadapter 把快帆（KuaiFan）和 QuickFox 账号转换成本地的 SOCKS5 代
 
 ### 2. 以固定 digest 启动
 
-生产环境只运行按 digest 固定的镜像。每次发布后，CI 任务摘要会给出新镜像的 digest。
+生产环境只运行按 digest 固定的镜像，默认仓库为 `ghcr.io/panelatta/kfadapter`。每次发布后，CI 任务摘要会给出完整的 `仓库@digest` 和可直接复制的部署命令。请使用同一次发布提供的仓库与 digest；从 fork 或其他仓库部署时，也同时设置这两个变量。
 
 ```bash
+export KFADAPTER_IMAGE_REPOSITORY=ghcr.io/panelatta/kfadapter
 export KFADAPTER_IMAGE_DIGEST=sha256:<64 位十六进制>
-sudo --preserve-env=KFADAPTER_IMAGE_DIGEST scripts/preflight.sh
+sudo --preserve-env=KFADAPTER_IMAGE_REPOSITORY,KFADAPTER_IMAGE_DIGEST scripts/preflight.sh
 docker compose --env-file /dev/null -f compose.yaml up -d
 ```
 
@@ -59,8 +61,10 @@ docker compose --env-file /dev/null -f compose.yaml up -d
 
 ```bash
 scripts/preflight.sh --local-build
-docker compose --env-file /dev/null -f deploy/compose.local-build.yaml up -d --build
+docker compose --env-file /dev/null --project-name kfadapter-local -f deploy/compose.local-build.yaml up -d --build
 ```
+
+开发命令必须保留 `--project-name kfadapter-local`，包括后续的 `logs`、`stop` 和 `down`；该参数会覆盖 shell 继承的 `COMPOSE_PROJECT_NAME`，固定使用开发项目及 `kfadapter-local_db_data` 状态卷。预检会核对最终解析出的项目名、卷名和状态挂载。需要指定开发镜像名时，仍可显式设置 `KFADAPTER_LOCAL_IMAGE`。
 
 ### 3. 首次设置访问令牌
 
@@ -82,13 +86,40 @@ ssh -L 10809:127.0.0.1:10809 root@<路由器地址>
 - 登录、登出或某个 provider 过期，都**不会**改变其他 provider 的 SOCKS 凭据和订阅链接；
 - 只有某个 provider 换成**另一个账号**时，全部 SOCKS 凭据和订阅链接才会轮换。
 
+### 使用 TLS 反向代理
+
+先按上文通过 SSH 完成首次设置，再配置 HTTPS 入口。即使反代从 `127.0.0.1` 回源，外部 HTTPS 入口也不能执行首次设置；本机 HTTP 健康检查与 SSH 初始化入口仍可使用。
+
+```yaml
+hostname: socks.example.com # SOCKS 客户端实际连接的主机，可与控制台域名不同
+management:
+  port: 10809
+  publicOrigin: https://console.example.com
+  sessionTTL: 30m
+```
+
+`publicOrigin` 必须是规范的小写 HTTPS origin，可以带非默认端口（例如 `:8443`），不能使用回环 IP、`localhost` 或其子域名，也不能带路径、末尾 `/`、凭据、查询参数、片段或默认 `:443`。代理必须把回源 `Host` 固定为该 origin 的 authority，并保留浏览器的 `Origin`。例如，在已配置证书的 Nginx HTTPS server 中：
+
+```nginx
+server_name console.example.com;
+location / {
+    proxy_pass http://127.0.0.1:10809;
+    proxy_set_header Host console.example.com;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+}
+```
+
+如果使用 `https://console.example.com:8443`，回源 `Host` 也必须包含 `:8443`。服务不会信任 `Forwarded` 或 `X-Forwarded-*` 来决定允许的域名、Origin 或协议。外部控制台会话 Cookie 带 `Secure`；直接本机 HTTP 会话保持可用。配置后，订阅链接固定使用 `publicOrigin`，其中的 SOCKS 地址使用 `hostname` 和 `proxy.port`；未设置 `hostname` 时使用 `publicOrigin` 的主机名和 `proxy.port`。TLS 反代只代理管理 HTTP，不代理 SOCKS，因此该 SOCKS 主机和端口也必须能被客户端访问。使用防火墙限制直接管理 HTTP 端口的网络访问，HTTPS 到 HTTP 的回源链路应位于可信网络或本机。
+
 ## 升级、备份与恢复
 
-所有脚本都需要 root 权限（用于保持状态文件的数字属主），并且只操作 Compose 管理的 `kfadapter_db_data` 卷。`compose.yaml` 要求设置 `KFADAPTER_IMAGE_DIGEST`，下面的 `docker compose` 命令都假定当前 shell 已导出当前运行版本的 digest。
+所有脚本都需要 root 权限（用于保持状态文件的数字属主），并且只操作 Compose 管理的 `kfadapter_db_data` 卷。`compose.yaml` 要求设置 `KFADAPTER_IMAGE_DIGEST`，下面的命令都假定当前 shell 已导出目标发布的 `KFADAPTER_IMAGE_REPOSITORY`；`docker compose` 还要求导出当前运行版本的 digest。
 
 ```bash
 # 升级到新 digest；失败时自动回滚到旧镜像并恢复升级前的状态
-sudo KFADAPTER_IMAGE_DIGEST=sha256:<新 digest> scripts/upgrade.sh
+sudo --preserve-env=KFADAPTER_IMAGE_REPOSITORY KFADAPTER_IMAGE_DIGEST=sha256:<新 digest> scripts/upgrade.sh
 
 # 备份：服务运行时自动做在线热备份，不中断代理；服务停止时做离线备份
 sudo scripts/backup-state.sh
@@ -98,8 +129,10 @@ sudo scripts/backup-state.sh --online backups/nightly.tar.gz
 sudo scripts/backup-state.sh --offline
 
 # 从归档恢复（需要先停止服务；旧状态目录会被保留以便回退）
-sudo KFADAPTER_IMAGE_DIGEST=sha256:<当前 digest> scripts/restore-state.sh backups/state-<时间戳>.tar.gz
+sudo --preserve-env=KFADAPTER_IMAGE_REPOSITORY KFADAPTER_IMAGE_DIGEST=sha256:<当前 digest> scripts/restore-state.sh backups/state-<时间戳>.tar.gz
 ```
+
+当前版本也接受升级前的 v9 状态备份：恢复时只读校验归档，服务启动后再迁移到 v10，保留账号、订阅凭据和浏览器会话；新增的智能代理设置默认关闭。
 
 在线备份通过 `docker exec` 在服务容器里运行 `./kfadapter backup`：它在一个 SQLite 读事务内先做和 `validate-state` 相同的完整校验，再把同一事务看到的数据库页原样输出到标准输出，所以得到的一定是某一次已提交的完整状态；备份持有读锁的时间通常只有几毫秒，期间服务的写入会等待（上限 5 秒）而不是失败。宿主机脚本再核对页数和日志模式，写成与离线备份相同格式的 `tar.gz`，可以直接用 `restore-state.sh` 恢复。容器文件系统保持只读，也不需要额外的挂载。
 
@@ -122,7 +155,7 @@ rootless Docker 或启用 userns-remap 时，用 `KFADAPTER_HOST_UID` 和 `KFADA
 
 ## 已知限制
 
-- **管理控制台只提供 HTTP。** 访问令牌、provider 密码和会话 Cookie 以明文在网络上传输。请只在可信网络中使用，或在前面加一层带 TLS 的反向代理。
+- **管理监听器提供 HTTP。** 直接连接时，访问令牌、provider 密码和会话 Cookie 以明文在网络上传输。请只在可信网络中使用，或按上文配置 TLS 反向代理及 `management.publicOrigin`。
 - **QuickFox 会在本地解析域名。** QuickFox 的隧道协议只能携带 IPv4 地址，所以 SOCKS 客户端请求的域名由 kfadapter 所在主机的 DNS 解析，本地 DNS 服务器能看到这些域名。解析到回环、私有或运营商 NAT 地址的结果会被丢弃。快帆节点不受此限制。
 - **QuickFox 不支持 UDP 和 IPv6 目标**，对应请求会返回 SOCKS 应答码 `0x07` 和 `0x08`。
 - 已建立的 SOCKS 连接会每 30 秒复查一次凭据：凭据轮换、provider 登出或过期后，连接会被关闭。

@@ -14,6 +14,9 @@ import (
 // MaxNodes bounds the nodes one provider snapshot may carry.
 const MaxNodes = 4096
 
+// MaxNodeGroupBytes bounds group metadata and exact subscription group filters.
+const MaxNodeGroupBytes = maxFieldBytes
+
 const (
 	maxIdentifierBytes = 32
 	maxFieldBytes      = 4096
@@ -136,7 +139,7 @@ type Node struct {
 func (node Node) Valid() bool {
 	return validField(node.ID) && validField(node.AuthorityID) && node.Protocol.Valid() &&
 		validField(node.Host) && node.Port != 0 && len(node.Name) <= maxFieldBytes &&
-		len(node.Group) <= maxFieldBytes && len(node.Model) <= maxFieldBytes
+		len(node.Group) <= MaxNodeGroupBytes && len(node.Model) <= maxFieldBytes
 }
 
 // Snapshot is one provider account's complete refresh result. RefreshState and
