@@ -108,3 +108,26 @@ export type EventMessage =
   | { type: "state"; state: ServiceState }
   | { type: "refresh"; state: ServiceState; complete: boolean }
   | { type: "probe"; nodeId: string; health: NodeHealth; tcpLatencyMs?: number; probedAt: string };
+
+export interface SmartProxyStatus {
+  candidateCount?: number;
+  incomplete?: boolean;
+  enabled: boolean;
+  intervalMinutes: number;
+  running: boolean;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  selectedNodeId?: string;
+  selectedName?: string;
+  targets: { name: string; url: string }[];
+  results: {
+    nodeId: string; name: string; provider: string; successes: number; latencyMs?: number;
+    measurements: { target: string; ok: boolean; latencyMs?: number; error?: string }[];
+  }[];
+}
+export interface SmartProxyDetails {
+  socksAddress: string;
+  socksUsername: string;
+  socksPassword: string;
+  url: string;
+}

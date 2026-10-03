@@ -9,6 +9,8 @@ import type {
   ProbeResult,
   ServiceState,
   StatusResponse,
+  SmartProxyStatus,
+  SmartProxyDetails,
   SubscriptionURLResponse,
 } from "./types";
 
@@ -184,6 +186,18 @@ export class ApiClient {
     });
   }
 
+
+  async smartProxy(): Promise<SmartProxyStatus> { return this.request<SmartProxyStatus>("/smart-proxy"); }
+
+  async configureSmartProxy(enabled: boolean, intervalMinutes: number): Promise<SmartProxyStatus> {
+    return this.request<SmartProxyStatus>("/smart-proxy/config", { method: "PUT", body: { enabled, intervalMinutes } });
+  }
+
+  async probeSmartProxy(): Promise<void> {
+    return this.request<void>("/smart-proxy/probe", { method: "POST", body: {}, expectEmptyResponse: true });
+  }
+
+  async smartProxyDetails(): Promise<SmartProxyDetails> { return this.request<SmartProxyDetails>("/smart-proxy/details"); }
 
   async subscriptionURL(): Promise<SubscriptionURLResponse> {
     return this.request<SubscriptionURLResponse>("/subscription/url");

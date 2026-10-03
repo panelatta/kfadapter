@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -173,7 +174,7 @@ func TestV8StoreMigratesToRosterSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, statement := range []string{"DROP TABLE subscription_account_roster", "UPDATE schema_version SET version = 8 WHERE id = 1"} {
+	for _, statement := range []string{"DROP TABLE smart_proxy_preferences", "DROP TABLE subscription_account_roster", "UPDATE schema_version SET version = 8 WHERE id = 1"} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
 		}
@@ -486,5 +487,61 @@ func TestClosedStoreDoesNotReopen(t *testing.T) {
 	}
 	if err := store.Ping(); !errors.Is(err, ErrStoreClosed) {
 		t.Fatalf("Ping after Close = %v", err)
+	}
+}
+
+func TestV9StoreMigratesSmartPreferencesWithoutChangingInstallation(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.LoadOrCreate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "state.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{"DROP TABLE smart_proxy_preferences", "UPDATE schema_version SET version = 9 WHERE id = 1"} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewSQLiteStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	migrated, err := reopened.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.InstallationID != before.InstallationID || !reflect.DeepEqual(migrated.Subscription, before.Subscription) || migrated.Preferences.SmartProxy.Enabled {
+		t.Fatal("migration changed authority or enabled smart proxy")
+	}
+	if _, err := reopened.Update(func(p *PersistentState) error {
+		p.Preferences.SmartProxy = SmartProxyPreferences{Enabled: true, IntervalMinutes: 60}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := reopened.Load()
+	if err != nil || saved.Preferences.SmartProxy != (SmartProxyPreferences{Enabled: true, IntervalMinutes: 60}) {
+		t.Fatal("preferences did not round trip", err)
+	}
+	if err := ValidateSQLiteFile(path); err != nil {
+		t.Fatal(err)
 	}
 }

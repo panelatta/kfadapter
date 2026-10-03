@@ -31,6 +31,7 @@ var persistentStateTables = []sqliteTable{
 	{name: "subscription_authority", keys: []string{"id"}, columns: []string{"selector_key", "proxy_auth_key", "account_binding", "activated_at_ns"}},
 	{name: "subscription_account_roster", keys: []string{"provider_id"}, columns: []string{"authority_id", "account_digest"}},
 	{name: "preferences", keys: []string{"id"}, columns: []string{"reveal_endpoints", "refresh_policy"}},
+	{name: "smart_proxy_preferences", keys: []string{"id"}, columns: []string{"enabled", "interval_minutes"}},
 	{name: "excluded_node_ids", keys: []string{"node_id"}, columns: []string{"preference_id"}},
 	{name: "last_good", keys: []string{"id"}, columns: []string{"created_at_ns", "rendered_subscription"}},
 	{name: "last_good_nodes", keys: []string{"position"}, columns: []string{"last_good_id", "node_id", "selector", "provider", "host", "port", "name", "group_name", "eligible", "excluded"}},
@@ -97,6 +98,7 @@ func persistentStateRows(state *PersistentState) map[string][]sqliteRow {
 		add("subscription_account_roster", []any{string(id)}, 1, subscription.AccountRoster[id])
 	}
 	add("preferences", one, boolInt(state.Preferences.RevealEndpoints), state.Preferences.RefreshPolicy)
+	add("smart_proxy_preferences", one, boolInt(state.Preferences.SmartProxy.Enabled), state.Preferences.SmartProxy.IntervalMinutes)
 	for _, nodeID := range sortedKeys(state.Preferences.ExcludedNodeIDs) {
 		add("excluded_node_ids", []any{nodeID}, 1)
 	}

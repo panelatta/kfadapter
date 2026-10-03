@@ -11,6 +11,7 @@ import { isSessionProblem, describeError } from "@/lib/errors";
 import { formatTime, formatCompactTime, describeSubscriptionValidity } from "@/lib/format";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { selectClassName, ProviderCredentialsForm, Field, FormError } from "@/components/AuthCards";
+import { SmartProxyCard } from "@/components/SmartProxyCard";
 import { NodeList } from "@/components/NodeList";
 import type { NodeRecord, StatusResponse } from "@/types";
 
@@ -661,6 +662,8 @@ export function StatusConsole({
                         </Card>
                     </section>
                 ) : null}
+
+                <SmartProxyCard api={api} getSessionRevision={getSessionRevision} onAccessLost={onAccessLost} />
 
                 {activeAccount ? (
                     <NodeList

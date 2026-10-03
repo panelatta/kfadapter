@@ -39,8 +39,16 @@ type SnapshotSource interface {
 	SessionCurrentPin(pin state.TunnelPin, now time.Time) bool
 }
 
+// SmartSelector resolves the automatic route once per connection. Established
+// flows retain that route while later connections can select another node.
+type SmartSelector interface {
+	Resolve() (string, error)
+	Enabled() bool
+}
+
 // Config defines the SOCKS listener's dependency boundaries.
 type Config struct {
+	Smart     SmartSelector
 	Snapshots SnapshotSource
 	Selectors *selector.Registry
 	Providers *provider.Registry
@@ -54,6 +62,7 @@ type Config struct {
 // replaceable for subscription rotation; every established session retains
 // only a compact state tunnel pin, never a runtime snapshot.
 type Server struct {
+	smart            SmartSelector
 	snapshots        SnapshotSource
 	providers        *provider.Registry
 	dial             provider.DialContextFunc
@@ -104,7 +113,7 @@ func New(config Config) (*Server, error) {
 	}
 	drained := make(chan struct{})
 	close(drained)
-	server := &Server{snapshots: config.Snapshots, providers: config.Providers, dial: dial, handshakeTimeout: timeout, slots: make(chan struct{}, maxConnections), active: make(map[net.Conn]context.CancelFunc), drained: drained, handshakes: make(map[netip.Addr]int), revalidateEvery: defaultFlowRevalidation}
+	server := &Server{smart: config.Smart, snapshots: config.Snapshots, providers: config.Providers, dial: dial, handshakeTimeout: timeout, slots: make(chan struct{}, maxConnections), active: make(map[net.Conn]context.CancelFunc), drained: drained, handshakes: make(map[netip.Addr]int), revalidateEvery: defaultFlowRevalidation}
 	server.selectors.Store(config.Selectors)
 	return server, nil
 }
@@ -329,7 +338,20 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		_ = writeAuthStatus(client, false)
 		return state.ErrSelectorUnknown
 	}
-	pin, err := s.snapshots.CompactPin(username, now)
+	routeUsername := username
+	isSmart := username == registry.SmartCredentials().Selector
+	if isSmart {
+		if s.smart == nil || !s.smart.Enabled() {
+			_ = writeAuthStatus(client, false)
+			return state.ErrSelectorUnknown
+		}
+		routeUsername, err = s.smart.Resolve()
+		if err != nil {
+			_ = writeAuthStatus(client, false)
+			return err
+		}
+	}
+	pin, err := s.snapshots.CompactPin(routeUsername, now)
 	node := pin.Node
 	if err != nil || !node.TunnelEligible() {
 		_ = writeAuthStatus(client, false)
@@ -373,11 +395,11 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		return state.ErrSelectorUnknown
 	}
 	authenticated = registry.Authenticate(username, password)
-	if !authenticated {
+	if !authenticated || (isSmart && !s.smart.Enabled()) {
 		_ = writeReply(client, replyGeneralFailure, target{})
 		return state.ErrSelectorUnknown
 	}
-	revalidatedPin, resolveErr := s.snapshots.CompactPin(username, now)
+	revalidatedPin, resolveErr := s.snapshots.CompactPin(routeUsername, now)
 	revalidatedNode := revalidatedPin.Node
 	if resolveErr != nil || s.selectors.Load() != registry || !samePinAuthority(pin, revalidatedPin) || !revalidatedNode.TunnelEligible() || !sameCanonicalNode(node, revalidatedNode) {
 		_ = writeReply(client, replyGeneralFailure, target{})
@@ -420,10 +442,10 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 			return false
 		}
 		authenticated := currentRegistry.Authenticate(username, password)
-		if !authenticated {
+		if !authenticated || (isSmart && !s.smart.Enabled()) {
 			return false
 		}
-		finalPin, resolveErr := s.snapshots.CompactPin(username, now)
+		finalPin, resolveErr := s.snapshots.CompactPin(routeUsername, now)
 		finalNode := finalPin.Node
 		if resolveErr != nil || s.selectors.Load() != currentRegistry || !samePinAuthority(pin, finalPin) || !finalNode.TunnelEligible() || !sameCanonicalNode(node, finalNode) {
 			return false
@@ -441,7 +463,7 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 	}
 	// Established flows end when their credentials are rotated or their
 	// provider account is logged out or expires, not only at disconnect.
-	stopWatch := s.watchFlow(client, username, password, node)
+	stopWatch := s.watchFlow(client, username, password, routeUsername, isSmart, node)
 	defer stopWatch()
 	if association != nil {
 		err = transport.RelayDatagrams(ctx, provider.DatagramRequest{
@@ -572,7 +594,7 @@ func remoteIP(remote net.Addr) (netip.Addr, bool) {
 
 // watchFlow closes client once the flow's selector credentials stop
 // authenticating or its node leaves the current provider snapshot.
-func (s *Server) watchFlow(client net.Conn, username, password string, node state.Node) func() {
+func (s *Server) watchFlow(client net.Conn, username, password, routeUsername string, isSmart bool, node state.Node) func() {
 	interval := s.revalidateEvery
 	if interval <= 0 {
 		return func() {}
@@ -586,7 +608,7 @@ func (s *Server) watchFlow(client net.Conn, username, password string, node stat
 			case <-done:
 				return
 			case <-ticker.C:
-				if !s.flowAuthorized(username, password, node) {
+				if !s.flowAuthorized(username, password, routeUsername, isSmart, node) {
 					_ = client.Close()
 					return
 				}
@@ -597,11 +619,11 @@ func (s *Server) watchFlow(client net.Conn, username, password string, node stat
 	return func() { once.Do(func() { close(done) }) }
 }
 
-func (s *Server) flowAuthorized(username, password string, node state.Node) bool {
+func (s *Server) flowAuthorized(username, password, routeUsername string, isSmart bool, node state.Node) bool {
 	registry := s.selectors.Load()
-	if registry == nil || !registry.Authenticate(username, password) {
+	if registry == nil || !registry.Authenticate(username, password) || (isSmart && (s.smart == nil || !s.smart.Enabled())) {
 		return false
 	}
-	pin, err := s.snapshots.CompactPin(username, time.Now())
+	pin, err := s.snapshots.CompactPin(routeUsername, time.Now())
 	return err == nil && pin.Node.TunnelEligible() && sameCanonicalNode(node, pin.Node)
 }

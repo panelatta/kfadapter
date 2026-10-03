@@ -20,7 +20,7 @@ import (
 
 const (
 	sqliteStateFileName     = "state.db"
-	sqliteSchemaVersion     = 9
+	sqliteSchemaVersion     = 10
 	MaxPersistentStateBytes = 10 << 20
 	maxSQLiteStateBytes     = MaxPersistentStateBytes + 8<<20
 	maxBrowserSessions      = 4096
@@ -32,7 +32,7 @@ var sqliteSchemaTables = map[string]int{
 	"last_good": 6, "last_good_nodes": 7, "active_session": 8,
 	"active_session_providers": 9, "active_session_authorities": 10,
 	"active_session_nodes": 11, "active_session_selectors": 12, "browser_sessions": 13,
-	"subscription_account_roster": 14,
+	"subscription_account_roster": 14, "smart_proxy_preferences": 15,
 }
 
 // SQLiteStore owns one secure, relational state database. The store exposes one
@@ -542,6 +542,7 @@ var sqliteSchemaStatements = []string{
 	`CREATE TABLE active_session_selectors (selector TEXT PRIMARY KEY, session_id INTEGER NOT NULL REFERENCES active_session(id) ON DELETE CASCADE, node_id TEXT NOT NULL)`,
 	`CREATE TABLE browser_sessions (token TEXT PRIMARY KEY, csrf TEXT NOT NULL, expires_at_ns INTEGER NOT NULL)`,
 	`CREATE TABLE subscription_account_roster (provider_id TEXT PRIMARY KEY, authority_id INTEGER NOT NULL REFERENCES subscription_authority(id) ON DELETE CASCADE, account_digest BLOB NOT NULL)`,
+	`CREATE TABLE smart_proxy_preferences (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES preferences(id) ON DELETE CASCADE, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL)`,
 }
 
 // validateSQLiteSchema is the full open-time check, including a page-level
@@ -897,6 +898,14 @@ func loadPersistentStateTx(tx *sql.Tx) (PersistentState, error) {
 		return PersistentState{}, corruptDatabase(err)
 	}
 	value, err := intBool(reveal)
+	if err != nil {
+		return PersistentState{}, corruptDatabase(err)
+	}
+	var smartEnabled int64
+	if err := tx.QueryRow("SELECT enabled, interval_minutes FROM smart_proxy_preferences WHERE id = 1").Scan(&smartEnabled, &state.Preferences.SmartProxy.IntervalMinutes); err != nil {
+		return PersistentState{}, corruptDatabase(err)
+	}
+	state.Preferences.SmartProxy.Enabled, err = intBool(smartEnabled)
 	if err != nil {
 		return PersistentState{}, corruptDatabase(err)
 	}

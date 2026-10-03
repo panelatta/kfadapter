@@ -6,6 +6,17 @@ import (
 	"time"
 )
 
+var sqliteSchemaV9Tables = func() map[string]int {
+	tables := make(map[string]int)
+	for name, index := range sqliteSchemaTables {
+		if name != "smart_proxy_preferences" {
+			tables[name] = index
+		}
+	}
+	return tables
+}()
+var sqliteSchemaV9Statements = sqliteSchemaStatements[:15]
+
 var sqliteSchemaV8Tables = map[string]int{
 	"schema_version": 0, "state_metadata": 1, "access_token_verifier": 2,
 	"subscription_authority": 3, "preferences": 4, "excluded_node_ids": 5,
@@ -117,13 +128,36 @@ func migrateSQLiteSchema(db *sql.DB) error {
 		}
 		version = 8
 	}
-	if version != 8 {
+	if version == 8 {
+		if err := validateSQLiteSchemaDefinition(db, 8, sqliteSchemaV8Tables, sqliteSchemaV8Statements); err != nil {
+			return err
+		}
+		if err := migrateSQLiteV8ToV9(db); err != nil {
+			return err
+		}
+		version = 9
+	}
+	if version != 9 {
 		return corruptDatabase(errors.New("unsupported SQLite schema version"))
 	}
-	if err := validateSQLiteSchemaDefinition(db, 8, sqliteSchemaV8Tables, sqliteSchemaV8Statements); err != nil {
+	if err := validateSQLiteSchemaDefinition(db, 9, sqliteSchemaV9Tables, sqliteSchemaV9Statements); err != nil {
 		return err
 	}
-	return migrateSQLiteV8ToV9(db)
+	tx, err := db.Begin()
+	if err != nil {
+		return corruptDatabase(err)
+	}
+	defer tx.Rollback()
+	for _, statement := range []string{
+		sqliteSchemaStatements[15],
+		"INSERT INTO smart_proxy_preferences (id, enabled, interval_minutes) VALUES (1, 0, 0)",
+		"UPDATE schema_version SET version = 10 WHERE id = 1",
+	} {
+		if _, err := tx.Exec(statement); err != nil {
+			return corruptDatabase(err)
+		}
+	}
+	return tx.Commit()
 }
 
 // migrateSQLiteV8ToV9 adds the per-provider account roster. Existing epochs

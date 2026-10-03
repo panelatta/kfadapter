@@ -51,3 +51,28 @@ func TestExactIdentityReactivationIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestSmartCredentialsHaveSeparateNamespaceAndRotateWithEpoch(t *testing.T) {
+	authority := state.SubscriptionAuthority{SelectorKey: bytes.Repeat([]byte{1}, 32), ProxyAuthKey: bytes.Repeat([]byte{2}, 32)}
+	registry, err := NewRegistry(authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	smart := registry.SmartCredentials()
+	node, ok := registry.Credentials(NodeIdentity{NodeID: "smart"})
+	if !ok {
+		t.Fatal("node credential missing")
+	}
+	if smart.Selector == node.Selector || !registry.Authenticate(smart.Selector, smart.Password) || registry.Authenticate(smart.Selector, node.Password) {
+		t.Fatal("smart credential isolation failed")
+	}
+	authority.SelectorKey = bytes.Repeat([]byte{3}, 32)
+	authority.ProxyAuthKey = bytes.Repeat([]byte{4}, 32)
+	next, err := NewRegistry(authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Authenticate(smart.Selector, smart.Password) || next.SmartCredentials() == smart {
+		t.Fatal("old smart credential survived rotation")
+	}
+}

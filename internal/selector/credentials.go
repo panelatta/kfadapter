@@ -149,7 +149,7 @@ func (r *Registry) Credentials(identity NodeIdentity) (Credentials, bool) {
 // Authenticate verifies an RFC 1929 selector/password pair in constant time.
 // Credentials carry no expiry; revocation happens by rotating the registry.
 func (r *Registry) Authenticate(selector, password string) bool {
-	if r == nil || !validSelector(selector) || !validPassword(password) {
+	if r == nil || (!validSelector(selector) && selector != r.SmartCredentials().Selector) || !validPassword(password) {
 		return false
 	}
 	expectedMAC := mac(r.proxyAuthKey[:], []byte("selector-password\x00"+selector))
@@ -208,4 +208,16 @@ func validPassword(password string) bool {
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(password[len(passwordPrefix):])
 	return err == nil && len(decoded) == passwordBytes
+}
+
+// SmartCredentials uses a separate namespace so no provider node can collide
+// with the stable automatic route. It rotates with the account credential epoch.
+func (r *Registry) SmartCredentials() Credentials {
+	if r == nil {
+		return Credentials{}
+	}
+	digest := mac(r.selectorKey[:], []byte("smart-selector\x00"))
+	username := "a_" + base64.RawURLEncoding.EncodeToString(digest[:selectorBytes])
+	password := mac(r.proxyAuthKey[:], []byte("selector-password\x00"+username))
+	return Credentials{Selector: username, Password: passwordPrefix + base64.RawURLEncoding.EncodeToString(password[:passwordBytes])}
 }

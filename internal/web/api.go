@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kfadapter/kfadapter/internal/endpoint"
+	"github.com/kfadapter/kfadapter/internal/smart"
 )
 
 var (
@@ -72,6 +73,7 @@ type BrowserSessionPersistence interface {
 // Dependencies are injected by cmd. Backend implementations normally adapt
 // control/state/SOCKS services; this package never receives their secrets.
 type Dependencies struct {
+	Smart         *smart.Service
 	Backend       Backend
 	Subscriptions SubscriptionService
 	Liveness      Liveness
@@ -226,6 +228,7 @@ type Event struct {
 }
 
 type API struct {
+	smart         *smart.Service
 	config        Config
 	backend       Backend
 	subscriptions SubscriptionService
@@ -303,7 +306,7 @@ func NewAPI(config Config, dependencies Dependencies) (*API, error) {
 		return nil, fmt.Errorf("restore browser sessions: %w", err)
 	}
 	requests, cancelRequests := context.WithCancel(context.Background())
-	return &API{
+	return &API{smart: dependencies.Smart,
 		config: config, backend: dependencies.Backend, subscriptions: dependencies.Subscriptions,
 		liveness: dependencies.Liveness, listenIP: listenIP, listenPort: listenPort, hostname: config.Hostname,
 		socksIP: socksIP, socksPort: socksPort,
@@ -415,6 +418,8 @@ func (a *API) serveAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case strings.HasPrefix(r.URL.Path, "/api/v1/smart-proxy"):
+		a.smartProxy(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/status":
 		a.status(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/nodes":
@@ -1039,6 +1044,12 @@ func subscriptionPath(requestPath string) (string, bool) {
 // allowedAPIMethod returns the one method a known API path accepts.
 func allowedAPIMethod(requestPath string) string {
 	switch requestPath {
+	case "/api/v1/smart-proxy", "/api/v1/smart-proxy/details":
+		return http.MethodGet
+	case "/api/v1/smart-proxy/config":
+		return http.MethodPut
+	case "/api/v1/smart-proxy/probe":
+		return http.MethodPost
 	case "/api/v1/status", "/api/v1/nodes", "/api/v1/subscription/url", "/api/v1/events", "/api/v1/access/status":
 		return http.MethodGet
 	case "/api/v1/auth/login", "/api/v1/auth/logout", "/api/v1/access/logout", "/api/v1/control/refresh", "/api/v1/diagnostics/export", "/api/v1/access/setup", "/api/v1/access/login":

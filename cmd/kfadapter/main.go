@@ -29,6 +29,7 @@ import (
 	providercoordinator "github.com/kfadapter/kfadapter/internal/provider/coordinator"
 	"github.com/kfadapter/kfadapter/internal/quickfox"
 	"github.com/kfadapter/kfadapter/internal/selector"
+	"github.com/kfadapter/kfadapter/internal/smart"
 	"github.com/kfadapter/kfadapter/internal/socks"
 	"github.com/kfadapter/kfadapter/internal/state"
 	"github.com/kfadapter/kfadapter/internal/subscription"
@@ -201,6 +202,7 @@ func serve(arguments []string, logger *slog.Logger) error {
 }
 
 type adapter struct {
+	smart              *smart.Service
 	runtime            *app.Runtime
 	manager            *state.Manager
 	store              *state.SQLiteStore
@@ -291,14 +293,24 @@ func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string, logger
 		return nil, err
 	}
 	mutationMu := &sync.Mutex{}
+	var selectorCoordinator *app.SelectorCoordinator
+	smartService, err := smart.New(smart.Config{Manager: manager, Store: store, Providers: providers, Dial: dialer.DialContext, MutationMu: mutationMu, Registry: func() *selector.Registry {
+		if selectorCoordinator == nil {
+			return registry
+		}
+		return selectorCoordinator.Registry()
+	}})
+	if err != nil {
+		return nil, err
+	}
 	socksServer, err := socks.New(socks.Config{
-		Snapshots: manager, Selectors: registry, Providers: providers, DialContext: dialer.DialContext,
+		Smart: smartService, Snapshots: manager, Selectors: registry, Providers: providers, DialContext: dialer.DialContext,
 		HandshakeTimeout: cfg.Proxy.HandshakeTimeout.Value(),
 	})
 	if err != nil {
 		return nil, err
 	}
-	selectorCoordinator, err := app.NewSelectorCoordinator(socksServer, registry)
+	selectorCoordinator, err = app.NewSelectorCoordinator(socksServer, registry)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +349,7 @@ func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string, logger
 	server, api, err := web.NewHTTPServer(web.Config{
 		Listen: managementAddress, Hostname: cfg.Hostname, SocksListen: proxyAddress,
 		Version: version, StartedAt: startedAt, SessionTTL: cfg.Management.SessionTTL.Value(),
-	}, web.Dependencies{Backend: runtimeFacade, Subscriptions: web.NewSubscriptionAdapter(subscriptionService), Sessions: store, Liveness: runtimeFacade})
+	}, web.Dependencies{Smart: smartService, Backend: runtimeFacade, Subscriptions: web.NewSubscriptionAdapter(subscriptionService), Sessions: store, Liveness: runtimeFacade})
 	if err != nil {
 		return nil, fmt.Errorf("management server: %w", err)
 	}
@@ -350,7 +362,7 @@ func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string, logger
 		_ = httpListener.Close()
 		return nil, fmt.Errorf("listen for proxy: %w", err)
 	}
-	return &adapter{runtime: runtimeFacade, manager: manager, store: store, httpServer: server, api: api, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, logger: logger, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
+	return &adapter{smart: smartService, runtime: runtimeFacade, manager: manager, store: store, httpServer: server, api: api, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, logger: logger, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
 }
 
 func validateListenInterface(listen string) error {
@@ -439,6 +451,7 @@ func (d *adapter) runContext(ctx context.Context) (result error) {
 		{Name: "proxy", Run: d.runSOCKS, Shutdown: d.shutdownSOCKS},
 		{Name: "management", Run: d.runWeb, Shutdown: d.shutdownWeb},
 		{Name: "heartbeat", Run: d.runHeartbeat, Shutdown: func(context.Context) error { d.runtime.Stop(); return nil }},
+		{Name: "smart-proxy", Run: d.runSmartProxy},
 		{Name: "watchdog", Run: lifecycle.Watchdog(10*time.Second, 3, d.watchdog)},
 	})
 	if err != nil {
@@ -493,4 +506,12 @@ func (d *adapter) watchdog(context.Context) error {
 		return errors.New("runtime is stopped")
 	}
 	return d.store.Ping()
+}
+
+func (d *adapter) runSmartProxy(ctx context.Context) error {
+	if d.smart == nil {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return d.smart.Run(ctx)
 }

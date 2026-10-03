@@ -337,7 +337,17 @@ func nodeMatchesProviderSnapshot(node Node, snapshot provider.Snapshot) bool {
 
 // Preferences are durable, non-secret user choices. ExcludedNodeIDs does not
 // affect runtime tunnel selection.
+type SmartProxyPreferences struct {
+	Enabled         bool `json:"enabled"`
+	IntervalMinutes int  `json:"intervalMinutes"`
+}
+
+func (p SmartProxyPreferences) Valid() bool {
+	return p.IntervalMinutes == 30 || p.IntervalMinutes == 60 || (!p.Enabled && p.IntervalMinutes == 0)
+}
+
 type Preferences struct {
+	SmartProxy      SmartProxyPreferences
 	ExcludedNodeIDs map[string]bool
 	RevealEndpoints bool
 	RefreshPolicy   string
@@ -831,6 +841,9 @@ func EnsureSubscriptionAccountBinding(p *PersistentState, bindingID string, now 
 }
 
 func validatePreferences(preferences Preferences) error {
+	if !preferences.SmartProxy.Valid() {
+		return fmt.Errorf("invalid smart proxy policy")
+	}
 	for nodeID, excluded := range preferences.ExcludedNodeIDs {
 		if nodeID == "" || !excluded {
 			return fmt.Errorf("invalid excluded node preference")
