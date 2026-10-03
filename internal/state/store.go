@@ -13,8 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	_ "modernc.org/sqlite"
-
 	"github.com/kfadapter/kfadapter/internal/provider"
 )
 
@@ -437,10 +435,7 @@ func openSQLite(path string, readOnly bool) (*sql.DB, error) {
 		query.Set("mode", "ro")
 	}
 	uri := &url.URL{Scheme: "file", Path: absolute, RawQuery: query.Encode()}
-	db, err := sql.Open("sqlite", uri.String())
-	if err != nil {
-		return nil, err
-	}
+	db := sql.OpenDB(&sqliteStateConnector{dsn: uri.String()})
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	if err := db.Ping(); err != nil {

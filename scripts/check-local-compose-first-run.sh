@@ -27,8 +27,14 @@ command -v docker >/dev/null 2>&1 || fail "Docker is required"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "image is not available locally"
 
 compose() {
-    KFADAPTER_LOCAL_IMAGE=$IMAGE docker compose -f "$COMPOSE_FILE" "$@"
+    KFADAPTER_LOCAL_IMAGE=$IMAGE docker compose --env-file /dev/null --project-name "$PROJECT" -f "$COMPOSE_FILE" "$@"
 }
+
+# Validate before installing the cleanup trap: even a failing check must not
+# run down -v against a misconfigured project or production state volume.
+command -v python3 >/dev/null 2>&1 || fail "python3 is required for developer Compose isolation validation"
+local_config=$(compose config --format json) || fail "could not render developer Compose configuration"
+printf '%s\n' "$local_config" | python3 "$SCRIPT_DIR/verify-local-compose.py" || fail "developer Compose isolation validation failed"
 
 cleanup() {
     compose down -v --remove-orphans >/dev/null 2>&1 || true

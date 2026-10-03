@@ -48,12 +48,26 @@ if grep -En 'uses: [^ ]+@v[0-9]' "$workflow"; then
     fail "every action in $workflow must be pinned to a commit SHA"
 fi
 
+# Production defaults to this project's published image. A release summary
+# includes both inputs so copied deployments also work from another repository.
+require '  IMAGE_NAME: ghcr.io/${{ github.repository }}' "$workflow"
+require '${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/kfadapter}' compose.yaml
+require 'DEFAULT_IMAGE_REPOSITORY = "ghcr.io/panelatta/kfadapter"' scripts/check-compose-security.py
+require 'export KFADAPTER_IMAGE_REPOSITORY=ghcr.io/panelatta/kfadapter' README.md
+require 'echo "export KFADAPTER_IMAGE_REPOSITORY=$IMAGE_NAME"' "$workflow"
+require 'echo "export KFADAPTER_IMAGE_DIGEST=$DIGEST"' "$workflow"
+require 'sudo --preserve-env=KFADAPTER_IMAGE_REPOSITORY,KFADAPTER_IMAGE_DIGEST scripts/preflight.sh' "$workflow"
+require 'sudo --preserve-env=KFADAPTER_IMAGE_REPOSITORY,KFADAPTER_IMAGE_DIGEST scripts/preflight.sh' README.md
+
 # Production runs one immutable, digest-pinned image.
 require '${KFADAPTER_IMAGE_DIGEST:?' compose.yaml
 if grep -Eq 'image: .*:latest' compose.yaml; then
     fail "production Compose must not run a mutable tag"
 fi
 [ -f deploy/compose.local-build.yaml ] || fail "developer Compose file is missing"
+for local_instructions in README.md deploy/compose.local-build.yaml "$workflow"; do
+    require 'docker compose --env-file /dev/null --project-name kfadapter-local -f deploy/compose.local-build.yaml' "$local_instructions"
+done
 
 # Secrets and generated artifacts must never enter the Docker context.
 for exclusion in .git/ .github/ .env .env.\* state/ backups/ account_cred\* credentials/ secrets/ deploy/ internal/web/static/ node_modules/ web/node_modules/; do

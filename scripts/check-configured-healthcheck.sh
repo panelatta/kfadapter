@@ -60,7 +60,7 @@ config = Path(sys.argv[1]).resolve()
 rendered = json.loads(Path(sys.argv[2]).read_text())
 service = rendered["services"]["kfadapter"]
 assert service["working_dir"] == "/kfadapter"
-assert service["image"] == "ghcr.io/oshinop/kfadapter@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+assert service["image"] == "ghcr.io/panelatta/kfadapter@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 # The probe takes no arguments: it reads ./config.yaml from the working
 # directory, so a custom mount changes the probed ports without a new command.
 assert service["healthcheck"]["test"] == ["CMD", "./kfadapter", "healthcheck"]

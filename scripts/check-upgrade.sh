@@ -6,7 +6,7 @@ umask 077
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 OLD_REPOSITORY=registry.invalid/kfadapter-old
-NEW_REPOSITORY=ghcr.io/oshinop/kfadapter
+NEW_REPOSITORY=ghcr.io/panelatta/kfadapter
 EXPLICIT_REPOSITORY=registry.invalid/kfadapter-explicit
 OLD_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111
 NEW_DIGEST=sha256:2222222222222222222222222222222222222222222222222222222222222222
@@ -49,10 +49,13 @@ database.chmod(0o600)
 PY
 cp "$state_dir/state.db" "$work/baseline-state.db"
 cp "$PROJECT_ROOT/scripts/docker-local-context.sh" "$PROJECT_ROOT/scripts/upgrade.sh" "$PROJECT_ROOT/scripts/verify-state-path.py" "$PROJECT_ROOT/scripts/state-volume-path.sh" "$work/scripts/"
+cp "$PROJECT_ROOT/scripts/preflight.sh" "$work/scripts/preflight-real.sh"
+cp "$PROJECT_ROOT/scripts/restore-state.sh" "$work/scripts/restore-state-real.sh"
+cp "$PROJECT_ROOT/scripts/restore-state-archive.py" "$PROJECT_ROOT/scripts/restore-state-commit.py" "$work/scripts/"
 cat >"$work/scripts/preflight.sh" <<'SH'
 #!/usr/bin/env sh
 printf '%s\n' "preflight $*" >>"$FAKE_LOG"
-exit 0
+exec "$(dirname -- "$0")/preflight-real.sh" "$@"
 SH
 cat >"$work/scripts/backup-state.sh" <<'SH'
 #!/usr/bin/env sh
@@ -101,40 +104,12 @@ printf '%s\n' "restore archive=$archive state=$state_dir repository=$KFADAPTER_I
 [ "$KFADAPTER_IMAGE_REPOSITORY" = "$OLD_REPOSITORY" ] || exit 1
 [ "$KFADAPTER_IMAGE_DIGEST" = "$OLD_DIGEST" ] || exit 1
 [ "${FAIL_ROLLBACK:-}" != restore ] || exit 1
-python3 - "$archive" "$state_dir/state.db" <<'PY'
-from pathlib import Path
-import sqlite3
-import stat
-import sys
-from tarfile import open as taropen
-
-archive = Path(sys.argv[1])
-destination = Path(sys.argv[2])
-with taropen(archive, "r:gz") as bundle:
-    members = bundle.getmembers()
-    assert len(members) == 1
-    member = members[0]
-    assert member.name == "state.db" and member.isreg() and stat.S_IMODE(member.mode) == 0o600
-    source = bundle.extractfile(member)
-    assert source is not None
-    payload = source.read()
-destination.write_bytes(payload)
-destination.chmod(0o600)
-connection = sqlite3.connect(f"{destination.as_uri()}?mode=ro", uri=True)
-assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
-assert connection.execute("SELECT marker FROM deployment_verification").fetchall() == [("pre-upgrade",)]
-connection.close()
-PY
-replacement_state_dir="${state_dir}.restore-fixture"
-previous_state_dir="${state_dir}.previous-fixture"
-rm -rf -- "$replacement_state_dir" "$previous_state_dir"
-mkdir "$replacement_state_dir"
-chmod 0700 "$replacement_state_dir"
-mv "$state_dir/state.db" "$replacement_state_dir/state.db"
-mv "$state_dir" "$previous_state_dir"
-mv "$replacement_state_dir" "$state_dir"
-rm -rf -- "$previous_state_dir"
+"$(dirname -- "$0")/restore-state-real.sh" "$archive"
 printf '%s\n' "validate-state restore=$state_dir/state.db archive=$archive" >>"$FAKE_LOG"
+SH
+cat >"$work/bin/uname" <<'SH'
+#!/usr/bin/env sh
+printf '%s\n' Linux
 SH
 cat >"$work/bin/id" <<'SH'
 #!/usr/bin/env sh
@@ -153,11 +128,43 @@ log() {
     printf '%s\n' "$*" >>"$FAKE_LOG"
 }
 case "${1:-}" in
+    version) printf '%s\n' linux ;;
+    info) printf '%s\n' "Debian GNU/Linux" ;;
+    ps)
+        [ "${2:-}" = --filter ] && [ "${3:-}" = volume=kfadapter_db_data ] && [ "${4:-}" = -q ] || exit 2
+        [ "$state" = stopped ] || printf '%s\n' active-container
+        ;;
+    run)
+        mount=
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                -v) mount=$2; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        case "$mount" in /*:/restore:ro) ;; *) exit 2 ;; esac
+        stage=${mount%:/restore:ro}
+        python3 - "$stage/state.db" "$FAKE_BASELINE_DB" <<'PY'
+from pathlib import Path
+import sqlite3
+import sys
+
+database = Path(sys.argv[1])
+assert database.read_bytes() == Path(sys.argv[2]).read_bytes()
+connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+assert connection.execute("PRAGMA quick_check").fetchone() == ("ok",)
+connection.close()
+PY
+        ;;
     context)
         [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${4:-}" = '{{.Endpoints.docker.Host}}' ] || exit 2
         printf '%s\n' unix:///var/run/docker.sock
         ;;
     volume)
+        if [ "${2:-}" = ls ]; then
+            printf '%s\n' kfadapter_db_data
+            exit 0
+        fi
         [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${5:-}" = kfadapter_db_data ] || exit 2
         case "${4:-}" in
             '{{.Name}}') printf '%s\n' kfadapter_db_data ;;
@@ -168,6 +175,7 @@ case "${1:-}" in
         esac
         ;;
     compose)
+        [ "${2:-}" != version ] || exit 0
         shift
         [ "${1:-}" = --env-file ] && [ "${2:-}" = /dev/null ] || exit 2
         shift 2
@@ -180,6 +188,14 @@ case "${1:-}" in
         action=${1:-}
         shift || true
         case "$action" in
+            version) exit 0 ;;
+            config)
+                if [ "${1:-}" = --images ]; then
+                    printf '%s\n' "${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/kfadapter}@$KFADAPTER_IMAGE_DIGEST"
+                else
+                    [ "${1:-}" = --quiet ] || exit 2
+                fi
+                ;;
             ps)
                 log "ps"
                 case "$state" in
@@ -192,7 +208,7 @@ case "${1:-}" in
                 printf '%s\n' stopped >"$FAKE_RUNTIME_STATE"
                 ;;
             pull)
-                image=${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/oshinop/kfadapter}@$KFADAPTER_IMAGE_DIGEST
+                image=${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/kfadapter}@$KFADAPTER_IMAGE_DIGEST
                 log "pull $image"
                 if [ "$image" != "$OLD_IMAGE" ] && [ "${FAIL_PHASE:-}" = pull ]; then
                     exit 1
@@ -203,7 +219,7 @@ case "${1:-}" in
                 fi
                 ;;
             up)
-                image=${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/oshinop/kfadapter}@$KFADAPTER_IMAGE_DIGEST
+                image=${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/kfadapter}@$KFADAPTER_IMAGE_DIGEST
                 log "up $image"
                 if [ "$image" = "$OLD_IMAGE" ]; then
                     : >"$FAKE_ROLLBACK_MARKER"
@@ -232,6 +248,26 @@ connection.close()
 PY
                     printf '%s\n' "validate-state replacement=$FAKE_STATE_MOUNTPOINT/state.db" >>"$FAKE_LOG"
                     log "replacement mutated SQLite state"
+                    if [ -n "${FAKE_STATE_DAMAGE:-}" ]; then
+                        python3 - "$FAKE_STATE_MOUNTPOINT" "$FAKE_STATE_DAMAGE" <<'PY'
+from pathlib import Path
+import sys
+
+state = Path(sys.argv[1])
+kind = sys.argv[2]
+if kind == "empty":
+    (state / "state.db").write_bytes(b"")
+elif kind == "oversized":
+    with (state / "state.db").open("r+b") as payload:
+        payload.truncate((18 << 20) + 1)
+elif kind == "journal":
+    (state / "state.db-journal").write_bytes(b"interrupted SQLite journal")
+    (state / "state.db-journal").chmod(0o600)
+else:
+    raise AssertionError(kind)
+PY
+                        log "replacement damaged state: $FAKE_STATE_DAMAGE"
+                    fi
                     [ "${FAIL_PHASE:-}" != up ] || exit 1
                     printf '%s\n' new-running >"$FAKE_RUNTIME_STATE"
                 fi
@@ -286,7 +322,7 @@ PY
     *) exit 2 ;;
 esac
 SH
-chmod 0755 "$work/scripts/docker-local-context.sh" "$work/scripts/upgrade.sh" "$work/scripts/verify-state-path.py" "$work/scripts/state-volume-path.sh" "$work/scripts/preflight.sh" "$work/scripts/backup-state.sh" "$work/scripts/restore-state.sh" "$work/bin/id" "$work/bin/docker"
+chmod 0755 "$work/bin/uname" "$work/scripts/preflight-real.sh" "$work/scripts/restore-state-real.sh" "$work/scripts/docker-local-context.sh" "$work/scripts/upgrade.sh" "$work/scripts/verify-state-path.py" "$work/scripts/state-volume-path.sh" "$work/scripts/preflight.sh" "$work/scripts/backup-state.sh" "$work/scripts/restore-state.sh" "$work/bin/id" "$work/bin/docker"
 
 run_upgrade() {
     image_repository=${1:-}
@@ -297,6 +333,8 @@ run_upgrade() {
         PATH="$work/bin:$PATH" \
             FAKE_RUNTIME_STATE="$work/runtime-state" \
             FAKE_LOG="$work/log" \
+            FAKE_BASELINE_DB="$work/baseline-state.db" \
+            FAKE_STATE_DAMAGE="${FAKE_STATE_DAMAGE:-}" \
             FAKE_ROLLBACK_MARKER="$work/rollback-marker" \
             FAKE_ID_UID="${FAKE_ID_UID:-0}" \
             OLD_IMAGE="${FAKE_OLD_IMAGE:-$OLD_IMAGE}" \
@@ -457,6 +495,30 @@ fi
 for phase in backup pull up health; do
     assert_rollback "$phase"
 done
+
+# Exercise real restore/exchange code when the replacement leaves damaged
+# state. The failing upgrade must recover its protected archive and old image.
+for damage in empty oversized journal; do
+    FAKE_STATE_DAMAGE=$damage
+    assert_rollback up
+    grep -Fq "replacement damaged state: $damage" "$work/log" || fail "$damage fixture did not damage state"
+    grep -Fq 'preflight --restore-existing ' "$work/log" || fail "$damage rollback bypassed recovery preflight"
+    python3 - "$work" "$damage" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+kind = sys.argv[2]
+previous = [item / "state" for item in root.glob(".alternate-state.pre-restore-*")]
+if kind == "empty":
+    assert any((item / "state.db").stat().st_size == 0 for item in previous)
+elif kind == "oversized":
+    assert any((item / "state.db").stat().st_size > 18 << 20 for item in previous)
+else:
+    assert any((item / "state.db-journal").is_file() and (item / "state.db-journal").read_bytes() == b"interrupted SQLite journal" for item in previous)
+PY
+done
+unset FAKE_STATE_DAMAGE FAIL_PHASE
 
 cp "$work/baseline-state.db" "$state_dir/state.db"
 printf '%s\n' old-running >"$work/runtime-state"

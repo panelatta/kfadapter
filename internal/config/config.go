@@ -65,8 +65,9 @@ func (p *Port) UnmarshalYAML(node *yaml.Node) error {
 func (p Port) String() string { return strconv.FormatUint(uint64(p), 10) }
 
 type Management struct {
-	Port       Port     `yaml:"port"`
-	SessionTTL Duration `yaml:"sessionTTL"`
+	Port         Port     `yaml:"port"`
+	PublicOrigin string   `yaml:"publicOrigin,omitempty"`
+	SessionTTL   Duration `yaml:"sessionTTL"`
 }
 
 type Proxy struct {
@@ -190,6 +191,11 @@ func (c Config) Validate() error {
 	}
 	if err := validateHostname("hostname", c.Hostname); err != nil {
 		return err
+	}
+	if c.Management.PublicOrigin != "" {
+		if _, err := endpoint.ParseHTTPSOrigin(c.Management.PublicOrigin); err != nil {
+			return fmt.Errorf("management.publicOrigin %w", err)
+		}
 	}
 	if c.Management.Port == c.Proxy.Port {
 		return errors.New("management.port and proxy.port must be different")

@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -71,8 +72,9 @@ type sessionStore struct {
 	pending        map[string]struct{}
 	accessAttempts map[string]accessAttempt
 	loginAttempts  map[string]loginAttempt
-	// undeleted holds revoked session keys whose durable deletion failed; each
-	// later persistence round retries them.
+	// undeleted holds revoked session keys awaiting durable deletion. Locking
+	// retries the queue before reporting success; other session operations also
+	// make one attempt so a recovered store can clear earlier failures.
 	undeleted   map[string]struct{}
 	persistence BrowserSessionPersistence
 	now         func() time.Time
@@ -174,6 +176,11 @@ func (s *sessionStore) create() (string, browserSession, error) {
 			s.deleteBrowserSessions(expired)
 			continue
 		}
+		if _, revoked := s.undeleted[token]; revoked {
+			s.mu.Unlock()
+			s.deleteBrowserSessions(expired)
+			continue
+		}
 		s.pending[token] = struct{}{}
 		s.mu.Unlock()
 		s.deleteBrowserSessions(expired)
@@ -222,49 +229,8 @@ func (s *sessionStore) valid(cookieToken string) (browserSession, bool) {
 	return session, true
 }
 
-func (s *sessionStore) revoke(cookieToken string) error {
-	if cookieToken == "" {
-		return nil
-	}
-	token := sessionKey(cookieToken)
-	// Revocation takes effect in memory first, so a failed durable delete can
-	// never leave the console unlocked for this process.
-	s.mu.Lock()
-	s.removeSessionLocked(token)
-	s.mu.Unlock()
-	if s.persistence != nil {
-		if err := s.persistence.DeleteBrowserSession(token); err != nil {
-			s.mu.Lock()
-			s.undeleted[token] = struct{}{}
-			s.mu.Unlock()
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *sessionStore) deleteBrowserSessions(tokens []string) {
-	if s.persistence == nil {
-		return
-	}
-	s.mu.Lock()
-	for token := range s.undeleted {
-		tokens = append(tokens, token)
-	}
-	s.mu.Unlock()
-	for _, token := range tokens {
-		if token == "" {
-			continue
-		}
-		err := s.persistence.DeleteBrowserSession(token)
-		s.mu.Lock()
-		if err == nil {
-			delete(s.undeleted, token)
-		} else if _, active := s.sessions[token]; !active {
-			s.undeleted[token] = struct{}{}
-		}
-		s.mu.Unlock()
-	}
+	_ = s.persistBrowserSessionDeletes(context.Background(), tokens)
 }
 
 // matches verifies that the exact session which started a stream remains
@@ -604,9 +570,9 @@ func readJSONBody(w http.ResponseWriter, r *http.Request, limit int, target any)
 // unless Fetch Metadata identifies a cross-site or same-site request. The
 // session cookie is SameSite=Strict and HttpOnly, so cross-site requests are
 // unauthenticated regardless; this check is defense in depth.
-func eventStreamOriginAllowed(r *http.Request) bool {
+func eventStreamOriginAllowed(r *http.Request, expectedOrigin string) bool {
 	if origin := r.Header.Get("Origin"); origin != "" {
-		return originAllowed(origin, "http://"+r.Host)
+		return originAllowed(origin, expectedOrigin)
 	}
 	switch r.Header.Get("Sec-Fetch-Site") {
 	case "", "same-origin", "none":
@@ -621,7 +587,7 @@ func originAllowed(header, expected string) bool {
 		return false
 	}
 	parsed, err := url.Parse(header)
-	return err == nil && parsed.Scheme == "http" && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == ""
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == ""
 }
 
 func setSecurityHeaders(header http.Header) {
@@ -636,24 +602,26 @@ func setNoStore(header http.Header) {
 	header.Set("Pragma", "no-cache")
 }
 
-func setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
+func setSessionCookie(w http.ResponseWriter, token string, expires time.Time, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/api/v1",
 		Expires:  expires,
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
-func clearSessionCookie(w http.ResponseWriter) {
+func clearSessionCookie(w http.ResponseWriter, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/api/v1",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }

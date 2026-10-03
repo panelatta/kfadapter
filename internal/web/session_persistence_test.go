@@ -16,14 +16,16 @@ type persistedBrowserSession struct {
 }
 
 type fakeBrowserSessionPersistence struct {
-	mu           sync.Mutex
-	sessions     map[string]persistedBrowserSession
-	restoreErr   error
-	saveErr      error
-	deleteErr    error
-	restoreCalls int
-	saveCalls    int
-	deleteCalls  int
+	mu             sync.Mutex
+	sessions       map[string]persistedBrowserSession
+	restoreErr     error
+	saveErr        error
+	deleteErr      error
+	deleteFailures int
+	deleteErrors   map[string]error
+	restoreCalls   int
+	saveCalls      int
+	deleteCalls    int
 }
 
 func (p *fakeBrowserSessionPersistence) RestoreBrowserSessions(now time.Time, max int, add func(token, csrf string, expiresAt time.Time) error) error {
@@ -75,8 +77,15 @@ func (p *fakeBrowserSessionPersistence) DeleteBrowserSession(token string) error
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.deleteCalls++
+	if p.deleteFailures > 0 {
+		p.deleteFailures--
+		return errors.New("temporary delete failure")
+	}
 	if p.deleteErr != nil {
 		return p.deleteErr
+	}
+	if err := p.deleteErrors[token]; err != nil {
+		return err
 	}
 	delete(p.sessions, token)
 	return nil
@@ -140,7 +149,7 @@ func TestBrowserSessionLockRevokesDurablyAcrossAPIRecreation(t *testing.T) {
 		t.Fatalf("access lock = %d %#v", locked.Code, locked.Header())
 	}
 	persistence.mu.Lock()
-	_, persisted := persistence.sessions[cookie.Value]
+	_, persisted := persistence.sessions[sessionKey(cookie.Value)]
 	persistence.mu.Unlock()
 	if persisted {
 		t.Fatal("locked browser session remains persisted")
@@ -218,7 +227,7 @@ func TestBrowserSessionPersistenceFailuresFailClosed(t *testing.T) {
 		persistence.mu.Unlock()
 
 		locked := requestWithCSRF(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, csrf)
-		if locked.Code != http.StatusNoContent || !strings.Contains(locked.Header().Get("Set-Cookie"), sessionCookieName+"=;") {
+		if locked.Code != http.StatusServiceUnavailable || !strings.Contains(locked.Header().Get("Set-Cookie"), sessionCookieName+"=;") {
 			t.Fatalf("lock with failed durable delete = %d %#v", locked.Code, locked.Header())
 		}
 		if response := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusUnauthorized {

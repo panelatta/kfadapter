@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-DEFAULT_IMAGE_REPOSITORY = "ghcr.io/oshinop/kfadapter"
+DEFAULT_IMAGE_REPOSITORY = "ghcr.io/panelatta/kfadapter"
 REPOSITORY_RE = re.compile(
     r"^(?:[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*(?::[0-9]+)?(?:/[a-z0-9][a-z0-9._-]*)+)$"
 )

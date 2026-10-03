@@ -53,7 +53,7 @@ export function StatusConsole({
 }) {
     const detail = stateDetails[status.state];
     const [selectedProvider, setActiveProvider] = useState("all");
-    const [filterProvider, setFilterProvider] = useState("");
+    const [selectedFilterProvider, setFilterProvider] = useState("");
     const [selectedGroup, setFilterGroup] = useState("");
     const [filterName, setFilterName] = useState("");
     const [providerError, setProviderError] = useState("");
@@ -83,6 +83,11 @@ export function StatusConsole({
             ),
         [eligibleNodes],
     );
+    // As with groups, retain the preference but apply it only while available.
+    // The select, group options, and URL must all use this effective value.
+    const filterProvider = nodeProviders.includes(selectedFilterProvider)
+        ? selectedFilterProvider
+        : "";
     const filterGroups = useMemo(
         () =>
             [

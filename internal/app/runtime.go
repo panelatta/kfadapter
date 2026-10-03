@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -33,8 +34,8 @@ var errRuntimeStopped = errors.New("app: runtime stopped")
 // in use. Callers must retry later rather than creating an unbounded dial queue.
 var ErrProbeBusy = errors.New("app: probe capacity reached")
 
-// ErrStaleProbe means a refresh or node replacement invalidated the pinned
-// probe target before its result could be applied.
+// ErrStaleProbe means the pinned target changed or a newer probe superseded
+// this observation before its result could be applied.
 var ErrStaleProbe = errors.New("app: stale probe")
 
 // accessError is a browser-safe access-token failure. It retains the internal
@@ -214,6 +215,8 @@ type Runtime struct {
 	dial         func(context.Context, string, string) (net.Conn, error)
 	probeTimeout time.Duration
 	probeSlots   chan struct{}
+	// probes retains only the latest in-flight request per node, under mutations.
+	probes map[string]*probeTarget
 
 	mutations     *sync.Mutex
 	mu            sync.RWMutex
@@ -334,7 +337,8 @@ func (r *Runtime) RefreshEvery() time.Duration {
 }
 
 // RefreshDue reports whether a previously scheduled authenticated refresh is
-// due. A zero schedule means no login has completed in this process.
+// due. A zero schedule means no usable account remains or retries are waiting
+// for an account whose refresh window has closed to expire.
 func (r *Runtime) RefreshDue(now time.Time) bool {
 	if r == nil || !r.alive.Load() {
 		return false
@@ -613,6 +617,7 @@ func (r *Runtime) Logout(ctx context.Context, providerID string) error {
 	if err := r.providers.Logout(ctx, id); err != nil {
 		return err
 	}
+	r.rescheduleRemainingProvidersLocked()
 	r.publishState()
 	return nil
 }
@@ -671,6 +676,9 @@ func (r *Runtime) Heartbeat(ctx context.Context, refresh bool) error {
 		return errRuntimeStopped
 	}
 	expired, err := r.providers.Expire(r.now())
+	if err == nil && expired {
+		r.rescheduleRemainingProvidersLocked()
+	}
 	r.mutations.Unlock()
 
 	if err != nil {
@@ -732,8 +740,25 @@ func (r *Runtime) Probe(ctx context.Context, nodeID string) (web.ProbeResult, er
 		r.mutations.Unlock()
 		return web.ProbeResult{}, &probeProblem{cause: errors.New("node ineligible"), code: "node_ineligible", status: http.StatusConflict}
 	}
-	target := probeTarget{generation: current.Generation, id: node.ID, selector: node.Selector, provider: string(node.Provider), host: node.Host, port: node.Port}
+	authority, available := current.Authority(node)
+	providerSnapshot := current.Providers[node.Provider]
+	if !available || !providerSnapshot.ExpiresAt.After(r.now()) {
+		r.mutations.Unlock()
+		return web.ProbeResult{}, &probeProblem{cause: provider.ErrNoSession, code: "node_snapshot_unavailable", status: http.StatusConflict}
+	}
+	target := &probeTarget{node: node, authority: authority, accountID: providerSnapshot.Account.UserID, expiresAt: providerSnapshot.ExpiresAt}
+	if r.probes == nil {
+		r.probes = make(map[string]*probeTarget)
+	}
+	r.probes[nodeID] = target
 	r.mutations.Unlock()
+	defer func() {
+		r.mutations.Lock()
+		if r.probes[nodeID] == target {
+			delete(r.probes, nodeID)
+		}
+		r.mutations.Unlock()
+	}()
 
 	probeCtx, cancel := context.WithTimeout(ctx, r.probeTimeout)
 	defer cancel()
@@ -765,7 +790,7 @@ func (r *Runtime) Probe(ctx context.Context, nodeID string) (web.ProbeResult, er
 		return web.ProbeResult{}, errRuntimeStopped
 	}
 	latest := r.manager.Current()
-	if !target.matches(latest) || !state.SessionUsable(latest, r.now()) {
+	if r.probes[nodeID] != target || !target.matches(latest, r.now()) || !state.SessionUsable(latest, r.now()) {
 		r.mutations.Unlock()
 		return result, staleProbeError{}
 	}
@@ -784,21 +809,31 @@ func (r *Runtime) Probe(ctx context.Context, nodeID string) (web.ProbeResult, er
 	return result, nil
 }
 
+// probeTarget pins the selected route and its authority, not the aggregate
+// generation: observations for unrelated nodes must not invalidate a probe.
 type probeTarget struct {
-	generation uint64
-	id         string
-	selector   string
-	provider   string
-	host       string
-	port       uint16
+	node      state.Node
+	authority provider.Authority
+	accountID string
+	expiresAt time.Time
 }
 
-func (target probeTarget) matches(snapshot *state.RuntimeSnapshot) bool {
-	if snapshot == nil || snapshot.Generation != target.generation {
+func (target probeTarget) matches(snapshot *state.RuntimeSnapshot, now time.Time) bool {
+	if snapshot == nil {
 		return false
 	}
-	node, found := snapshot.NodeByID(target.id)
-	return found && node.ID == target.id && node.Selector == target.selector && string(node.Provider) == target.provider && node.Host == target.host && node.Port == target.port
+	node, found := snapshot.NodeByID(target.node.ID)
+	if !found || !node.TunnelEligible() || node.Selector != target.node.Selector ||
+		node.Provider != target.node.Provider || node.Protocol != target.node.Protocol ||
+		node.AuthorityID != target.node.AuthorityID || node.Host != target.node.Host || node.Port != target.node.Port ||
+		snapshot.Selectors[node.Selector].NodeID != node.ID {
+		return false
+	}
+	providerSnapshot, available := snapshot.Providers[node.Provider]
+	authority, authorityAvailable := snapshot.Authority(node)
+	return available && providerSnapshot.Account.UserID == target.accountID &&
+		providerSnapshot.ExpiresAt.Equal(target.expiresAt) && providerSnapshot.ExpiresAt.After(now) &&
+		authorityAvailable && authority.Protocol == target.authority.Protocol && bytes.Equal(authority.Data, target.authority.Data)
 }
 
 func (r *Runtime) updateProbe(current *state.RuntimeSnapshot, nodeID string, health state.NodeHealth, latency time.Duration, observed time.Time) (*state.RuntimeSnapshot, error) {
@@ -968,15 +1003,45 @@ func (r *Runtime) recordRefresh() {
 	r.mu.Unlock()
 }
 
+// rescheduleRemainingProvidersLocked recomputes the deadline after authority
+// is removed. In particular, removing an account whose retry window closed
+// must resume scheduling for the remaining accounts. Removal is not a refresh,
+// so preserve lastRefreshAt and any refresh already due from that cadence.
+// The caller holds mutations to keep the account set and schedule consistent.
+func (r *Runtime) rescheduleRemainingProvidersLocked() {
+	now := r.now().UTC()
+	current := r.manager.Current()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !state.SessionUsable(current, now) {
+		r.nextRefreshAt = time.Time{}
+		return
+	}
+	base := r.lastRefreshAt
+	if base.IsZero() {
+		base = now
+	}
+	r.nextRefreshAt = boundedRefreshAt(base, providerRefreshExpiry(current), r.refreshEvery)
+}
+
 func (r *Runtime) scheduleRefreshRetry() {
 	if r == nil {
 		return
 	}
+	// Refresh releases mutations before the periodic worker reaches this
+	// method. Serialize with logout/expiry so an old failure cannot recreate a
+	// refresh schedule after the final account has been removed.
+	r.mutations.Lock()
+	defer r.mutations.Unlock()
 	now := r.now().UTC()
-	expiresAt := time.Time{}
-	if current := r.manager.Current(); current != nil {
-		expiresAt = providerRefreshExpiry(current)
+	current := r.manager.Current()
+	if !r.alive.Load() || !state.SessionUsable(current, now) {
+		r.mu.Lock()
+		r.nextRefreshAt = time.Time{}
+		r.mu.Unlock()
+		return
 	}
+	expiresAt := providerRefreshExpiry(current)
 	next := now.Add(minRefreshPolicy)
 	if !expiresAt.IsZero() {
 		deadline := expiresAt.UTC().Add(-refreshRetryAttemptBudget)

@@ -53,7 +53,7 @@ jobs:
           KFADAPTER_IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
         run: |
           docker compose --env-file /dev/null -f compose.yaml config --quiet
-          docker compose --env-file /dev/null -f deploy/compose.local-build.yaml config --quiet
+          docker compose --env-file /dev/null --project-name kfadapter-local -f deploy/compose.local-build.yaml config --quiet
       - name: Build and smoke-test image
         run: |
           docker build --build-arg VERSION=0.0.0-ci -t kfadapter:ci .
@@ -82,6 +82,8 @@ jobs:
         run: ./scripts/check-configured-healthcheck.sh
       - name: Assert first-run and existing-volume preflight behavior
         run: ./scripts/check-preflight.sh
+      - name: Assert developer Compose isolation with inherited environment
+        run: sh scripts/check-local-compose-isolation.sh
       - name: Validate deployment preflight
         run: sudo --preserve-env=KFADAPTER_IMAGE_DIGEST ./scripts/preflight.sh
       - name: Assert Compose isolation structure
@@ -133,5 +135,12 @@ jobs:
           {
             echo "### Published image"
             echo
-            echo "Deploy with: \`KFADAPTER_IMAGE_DIGEST=$DIGEST\`"
+            echo "Image: \`$IMAGE_NAME@$DIGEST\`"
+            echo
+            echo '```sh'
+            echo "export KFADAPTER_IMAGE_REPOSITORY=$IMAGE_NAME"
+            echo "export KFADAPTER_IMAGE_DIGEST=$DIGEST"
+            echo 'sudo --preserve-env=KFADAPTER_IMAGE_REPOSITORY,KFADAPTER_IMAGE_DIGEST scripts/preflight.sh'
+            echo 'docker compose --env-file /dev/null -f compose.yaml up -d'
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

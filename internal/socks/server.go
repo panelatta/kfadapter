@@ -110,7 +110,8 @@ func New(config Config) (*Server, error) {
 }
 
 // SetSelectors atomically adopts an immutable registry containing the current
-// subscription authority. Existing TCP flows are unaffected.
+// subscription authority. Existing flows using old credentials end at their
+// next authorization check.
 func (s *Server) SetSelectors(registry *selector.Registry) error {
 	if s == nil || registry == nil {
 		return errors.New("socks: selector registry is required")
@@ -441,15 +442,17 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 	}
 	// Established flows end when their credentials are rotated or their
 	// provider account is logged out or expires, not only at disconnect.
-	stopWatch := s.watchFlow(client, username, password, node)
+	relayCtx, cancelRelay := context.WithCancel(ctx)
+	defer cancelRelay()
+	stopWatch := s.watchFlow(client, cancelRelay, username, password, node)
 	defer stopWatch()
 	if association != nil {
-		err = transport.RelayDatagrams(ctx, provider.DatagramRequest{
+		err = transport.RelayDatagrams(relayCtx, provider.DatagramRequest{
 			Dial: s.dial, Control: client, Packets: association, NodeHost: node.Host, NodePort: node.Port,
 			Authority: pin.Authority.Data, HandshakeTimeout: s.handshakeTimeout, Admit: admit, Ready: readyRelay,
 		})
 	} else {
-		err = transport.RelayStream(ctx, provider.RelayRequest{
+		err = transport.RelayStream(relayCtx, provider.RelayRequest{
 			Dial: s.dial, Client: client, NodeHost: node.Host, NodePort: node.Port,
 			Target: provider.Target{Host: destination.Host, Port: destination.Port}, Authority: pin.Authority.Data,
 			HandshakeTimeout: s.handshakeTimeout, Admit: admit, Ready: readyRelay,
@@ -570,9 +573,9 @@ func remoteIP(remote net.Addr) (netip.Addr, bool) {
 	return address.Unmap(), ok
 }
 
-// watchFlow closes client once the flow's selector credentials stop
-// authenticating or its node leaves the current provider snapshot.
-func (s *Server) watchFlow(client net.Conn, username, password string, node state.Node) func() {
+// watchFlow cancels the transport and closes client once the flow's selector
+// credentials stop authenticating or its node leaves the provider snapshot.
+func (s *Server) watchFlow(client net.Conn, cancel context.CancelFunc, username, password string, node state.Node) func() {
 	interval := s.revalidateEvery
 	if interval <= 0 {
 		return func() {}
@@ -587,6 +590,7 @@ func (s *Server) watchFlow(client net.Conn, username, password string, node stat
 				return
 			case <-ticker.C:
 				if !s.flowAuthorized(username, password, node) {
+					cancel()
 					_ = client.Close()
 					return
 				}

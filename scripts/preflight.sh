@@ -12,6 +12,7 @@ IMAGE_REPOSITORY=${KFADAPTER_IMAGE_REPOSITORY:-}
 IMAGE_DIGEST=${KFADAPTER_IMAGE_DIGEST:-}
 LOCAL_BUILD=0
 STATE_ONLY=0
+RESTORE_EXISTING=0
 
 fail() {
     printf '%s\n' "preflight: $*" >&2
@@ -24,18 +25,22 @@ fi
 
 usage() {
     cat >&2 <<'USAGE'
-usage: scripts/preflight.sh [--local-build] [--state-only] [--state-dir DIR] [--image-repository REPOSITORY] [--image-digest DIGEST]
+usage: scripts/preflight.sh [--local-build] [--state-only] [--restore-existing] [--state-dir DIR] [--image-repository REPOSITORY] [--image-digest DIGEST]
 
 Production mode requires an immutable KFADAPTER_IMAGE_DIGEST=sha256:<64-hex>
 and the Compose-managed protected Docker state volume. The repository defaults
-to ghcr.io/oshinop/kfadapter; set KFADAPTER_IMAGE_REPOSITORY to an untagged
+to ghcr.io/panelatta/kfadapter; set KFADAPTER_IMAGE_REPOSITORY to an untagged
 repository only for migration or exact rollback. After preflight passes, run
 docker compose --env-file /dev/null -f compose.yaml up -d so project .env
 cannot change the validated image inputs. --local-build validates the
-isolated developer Compose file and its Docker-managed state volume. For
+isolated developer Compose file and its Docker-managed state volume. Use
+--project-name kfadapter-local on every developer Compose command to override
+an inherited COMPOSE_PROJECT_NAME. For
 rootless Docker or userns-remap production, set KFADAPTER_HOST_UID and
 KFADAPTER_HOST_GID to the mapped state owner. For manual or test state-only
 validation, set KFADAPTER_STATE_DIR (or STATE_DIR) to an explicit state directory.
+--restore-existing is only for offline recovery: it checks the safety of old
+regular state files without requiring a healthy payload size or layout.
 USAGE
     exit 2
 }
@@ -44,6 +49,9 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --local-build)
             LOCAL_BUILD=1
+            ;;
+        --restore-existing)
+            RESTORE_EXISTING=1
             ;;
         --state-only)
             STATE_ONLY=1
@@ -72,6 +80,10 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+if [ "$RESTORE_EXISTING" -eq 1 ] && { [ "$STATE_ONLY" -eq 1 ] || [ "$LOCAL_BUILD" -eq 1 ]; }; then
+    fail "--restore-existing requires production recovery mode"
+fi
 
 if [ -n "$state_dir" ] && [ -n "$manual_state_dir" ] && [ "$state_dir" != "$manual_state_dir" ]; then
     fail "--state-dir must match KFADAPTER_STATE_DIR or STATE_DIR when both are set"
@@ -105,20 +117,24 @@ resolve_production_state_dir() {
 }
 
 validate_state() {
+    set --
+    if [ "$RESTORE_EXISTING" -eq 1 ]; then
+        set -- --allow-damaged-payload
+    fi
     resolve_state_dir
     command -v python3 >/dev/null 2>&1 || fail "python3 is required for no-follow state validation"
     state_identity=$(python3 "$SCRIPT_DIR/verify-state-path.py" \
         --state-dir "$state_dir" \
         --base "$PROJECT_ROOT" \
         --uid "$STATE_UID" \
-        --gid "$STATE_GID")
+        --gid "$STATE_GID" "$@")
     state_dir=$(python3 "$SCRIPT_DIR/verify-state-path.py" \
         --state-dir "$state_dir" \
         --base "$PROJECT_ROOT" \
         --uid "$STATE_UID" \
         --gid "$STATE_GID" \
         --expect-identity "$state_identity" \
-        --print-canonical-path)
+        --print-canonical-path "$@")
 }
 
 
@@ -155,7 +171,12 @@ fi
 
 validate_native_docker
 if [ "$LOCAL_BUILD" -eq 1 ]; then
-    docker compose --env-file /dev/null -f "$PROJECT_ROOT/deploy/compose.local-build.yaml" config --quiet
+    command -v python3 >/dev/null 2>&1 || fail "python3 is required for developer Compose isolation validation"
+    local_config=$(docker compose --env-file /dev/null --project-name kfadapter-local \
+        -f "$PROJECT_ROOT/deploy/compose.local-build.yaml" config --format json) ||
+        fail "could not render developer Compose configuration"
+    printf '%s\n' "$local_config" | python3 "$SCRIPT_DIR/verify-local-compose.py" ||
+        fail "developer Compose project and state volume must be isolated from production"
 else
     if resolve_production_state_dir; then
         validate_state

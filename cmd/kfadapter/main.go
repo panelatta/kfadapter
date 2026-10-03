@@ -335,7 +335,7 @@ func newAdapterAtStateDirectory(cfg config.Config, stateDirectory string, logger
 		return nil, err
 	}
 	server, api, err := web.NewHTTPServer(web.Config{
-		Listen: managementAddress, Hostname: cfg.Hostname, SocksListen: proxyAddress,
+		Listen: managementAddress, Hostname: cfg.Hostname, SocksListen: proxyAddress, PublicOrigin: cfg.Management.PublicOrigin,
 		Version: version, StartedAt: startedAt, SessionTTL: cfg.Management.SessionTTL.Value(),
 	}, web.Dependencies{Backend: runtimeFacade, Subscriptions: web.NewSubscriptionAdapter(subscriptionService), Sessions: store, Liveness: runtimeFacade})
 	if err != nil {

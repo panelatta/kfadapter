@@ -119,7 +119,7 @@ describe("node inventory", () => {
     await openGroup("West China");
     await userEvent.click(screen.getAllByRole("button", { name: "Check TCP reachability for Chengdu 02" })[0]);
     expect(await screen.findByText("Ineligible")).toBeTruthy();
-    expect(screen.getByLabelText("TCP reachability Ineligible, Unhealthy")).toBeTruthy();
+    expect(screen.getByLabelText("TCP reachability Ineligible, Degraded")).toBeTruthy();
   });
 
   it("prioritizes special groups and sorts China routes and their nodes", async () => {
