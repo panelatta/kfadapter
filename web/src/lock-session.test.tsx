@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { ApiClient } from "./api";
-import { currentConsumerURL, nodes, readyStatus } from "./test/fixtures";
+import { currentConsumerURL, disabledSmartProxy, nodes, readyStatus } from "./test/fixtures";
 import { TestEventSource } from "./test/setup";
 
 const accessToken = "valid-access-token-1234";
@@ -30,6 +30,7 @@ function sessionRequests() {
       return Promise.resolve(response({ expiresAt: "2026-07-15T18:00:00Z" }));
     if (path === "/api/v1/status") return Promise.resolve(response(readyStatus()));
     if (path === "/api/v1/nodes") return Promise.resolve(response({ nodes }));
+    if (path === "/api/v1/smart-proxy") return Promise.resolve(response(disabledSmartProxy()));
     if (path === "/api/v1/subscription/url") return Promise.resolve(response({ url: currentConsumerURL }));
     if (path === "/api/v1/control/refresh") return Promise.resolve(response(null, 204));
     throw new Error(`Unexpected request: ${path}`);

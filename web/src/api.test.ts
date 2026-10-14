@@ -109,4 +109,30 @@ describe("API response contracts", () => {
     expect(fetchMock.mock.calls[0][1].headers).toEqual({ Accept: "application/json", "Content-Type": "application/json" });
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({});
   });
+
+  it("uses the smart proxy endpoints with JSON bodies for mutations", async () => {
+    const status = { enabled: true, intervalMinutes: 60, running: false, targets: [], results: [] };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(status), { status: 200, headers: jsonHeaders }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(status), { status: 200, headers: jsonHeaders }))
+      .mockResolvedValueOnce(new Response(null, { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ url: "socks5://u:p@127.0.0.1:10808" }), { status: 200, headers: jsonHeaders }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient();
+
+    await expect(api.smartProxy()).resolves.toEqual(status);
+    await expect(api.configureSmartProxy(true, 60)).resolves.toEqual(status);
+    await expect(api.probeSmartProxy()).resolves.toBeUndefined();
+    await expect(api.smartProxyDetails()).resolves.toMatchObject({ url: "socks5://u:p@127.0.0.1:10808" });
+
+    expect(fetchMock.mock.calls.map(([path, init]) => [path, init.method])).toEqual([
+      ["/api/v1/smart-proxy", "GET"],
+      ["/api/v1/smart-proxy/config", "PUT"],
+      ["/api/v1/smart-proxy/probe", "POST"],
+      ["/api/v1/smart-proxy/details", "GET"],
+    ]);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ enabled: true, intervalMinutes: 60 });
+    expect(fetchMock.mock.calls[1][1].headers).toEqual({ Accept: "application/json", "Content-Type": "application/json" });
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body)).toEqual({});
+  });
 });

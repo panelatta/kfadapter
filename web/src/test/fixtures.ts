@@ -1,10 +1,15 @@
 import { vi } from "vitest";
 import { type ApiClient } from "../api";
-import type { NodeDetails, NodeRecord, StatusResponse } from "../types";
+import type { NodeDetails, NodeRecord, SmartProxyStatus, StatusResponse } from "../types";
 
 export const currentConsumerURL = "http://127.0.0.1:10809/sub/00112233-4455-8677-8899-aabbccddeeff";
 /** A second capability URL, for tests where the subscription link changes. */
 export const updatedConsumerURL = "http://127.0.0.1:10809/sub/ffeeddcc-bbaa-8988-8766-554433221100";
+
+export const disabledSmartProxy = (): SmartProxyStatus => ({
+  enabled: false, intervalMinutes: 30, running: false, candidateCount: 0,
+  incomplete: false, targets: [], results: [],
+});
 
 export const readyStatus = (): StatusResponse => ({
   state: "ready",
@@ -61,6 +66,10 @@ export function makeApi(initialStatus = readyStatus(), initialNodes = nodes): Ap
     status: vi.fn().mockImplementation(async () => state.statusValue),
     nodes: vi.fn().mockImplementation(async () => ({ nodes: state.nodeList })),
     nodeDetails: vi.fn().mockResolvedValue(chengduDetails),
+    smartProxy: vi.fn().mockImplementation(async () => disabledSmartProxy()),
+    configureSmartProxy: vi.fn().mockImplementation(async (enabled: boolean, intervalMinutes: number) => ({ enabled, intervalMinutes, running: false, targets: [], results: [] })),
+    probeSmartProxy: vi.fn().mockResolvedValue(undefined),
+    smartProxyDetails: vi.fn().mockResolvedValue({ url: "socks5://automatic:secret@127.0.0.1:10808" }),
     diagnostics: vi.fn().mockResolvedValue(new Blob(["{}"], { type: "application/json" })),
     subscriptionURL: vi.fn().mockResolvedValue({ url: currentConsumerURL }),
     login: vi.fn().mockImplementation(async (provider: string) => { state.statusValue = readyStatus(); return state.statusValue.accounts?.[provider] ?? { provider, tier: "Standard", subscriptionActive: false }; }),

@@ -33,6 +33,13 @@ const problemMessages: Record<string, string> = {
     login_unavailable: "The provider could not be reached. Try again later.",
     account_exists:
         "That provider already has a connected account. Remove it first to switch accounts.",
+    invalid_smart_policy: "Choose a probe interval of 30 or 60 minutes.",
+    smart_config_failed:
+        "The smart proxy settings could not be saved. Try again.",
+    smart_probe_unavailable:
+        "Enable the smart proxy and wait for the current probe to finish.",
+    smart_proxy_unavailable:
+        "The smart proxy address is not available yet. Try again in a moment.",
 };
 
 export function describeError(error: unknown): string {

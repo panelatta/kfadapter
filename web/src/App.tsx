@@ -25,6 +25,7 @@ import { StatusBadge, stateDetails } from "@/features/accounts/StatusBadge";
 import { useAccountViews } from "@/features/accounts/useAccountViews";
 import { useDiagnosticsExport } from "@/features/diagnostics/useDiagnosticsExport";
 import { NodeList } from "@/features/nodes/NodeList";
+import { SmartProxyCard } from "@/features/smart/SmartProxyCard";
 import { SubscriptionLinkCard } from "@/features/subscription/SubscriptionLinkCard";
 import { useSubscriptionLink } from "@/features/subscription/useSubscriptionLink";
 import { formatTime } from "@/lib/time";
@@ -340,6 +341,12 @@ function StatusConsole({
                         <SubscriptionLinkCard link={subscriptionLink} />
                     </section>
                 ) : null}
+
+                <SmartProxyCard
+                    api={api}
+                    getSessionRevision={getSessionRevision}
+                    onAccessLost={onAccessLost}
+                />
 
                 {activeAccount ? (
                     <NodeList

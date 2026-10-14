@@ -9,6 +9,8 @@ import type {
   NodesResponse,
   ProbeResult,
   ServiceState,
+  SmartProxyDetails,
+  SmartProxyStatus,
   StatusResponse,
   SubscriptionURLResponse,
 } from "./types";
@@ -169,6 +171,22 @@ export class ApiClient {
 
   async subscriptionURL(): Promise<SubscriptionURLResponse> {
     return this.request<SubscriptionURLResponse>("/subscription/url");
+  }
+
+  async smartProxy(): Promise<SmartProxyStatus> {
+    return this.request<SmartProxyStatus>("/smart-proxy");
+  }
+
+  async configureSmartProxy(enabled: boolean, intervalMinutes: number): Promise<SmartProxyStatus> {
+    return this.request<SmartProxyStatus>("/smart-proxy/config", { method: "PUT", body: { enabled, intervalMinutes } });
+  }
+
+  async probeSmartProxy(): Promise<void> {
+    await this.request<void>("/smart-proxy/probe", { method: "POST", body: {}, expectEmptyResponse: true });
+  }
+
+  async smartProxyDetails(): Promise<SmartProxyDetails> {
+    return this.request<SmartProxyDetails>("/smart-proxy/details");
   }
 
   /** Downloads the redacted diagnostics report as a JSON blob. */
