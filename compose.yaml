@@ -2,7 +2,10 @@ name: chinadapter
 
 services:
   chinadapter:
-    image: ghcr.io/oshinop/chinadapter:latest
+    # Production runs one immutable image. scripts/preflight.sh validates these
+    # inputs and scripts/upgrade.sh swaps them with automatic rollback. The
+    # digest of each published image is shown in the CI job summary.
+    image: "${CHINADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/chinadapter}@${CHINADAPTER_IMAGE_DIGEST:?set CHINADAPTER_IMAGE_DIGEST=sha256:<digest> (see scripts/preflight.sh)}"
     network_mode: host
     user: "65532:65532"
     working_dir: /chinadapter

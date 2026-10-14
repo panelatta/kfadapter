@@ -6,6 +6,7 @@
 .env.*
 *.env
 state/
+backups/
 account_cred*
 credentials/
 secrets/
@@ -27,6 +28,8 @@ node_modules/
 web/node_modules/
 internal/web/static/
 deploy/
+scripts/__pycache__/
+__pycache__/
 .npm/
 .pnpm-store/
 .yarn/

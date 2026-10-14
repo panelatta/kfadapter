@@ -1,6 +1,7 @@
 # Local deployment state and generated operational configuration can contain
 # capabilities or selector credentials. They are never source-controlled.
 /state/
+/backups/
 .env
 .env.*
 *.env
@@ -14,6 +15,7 @@
 coverage.out
 *.coverprofile
 *.log
+__pycache__/
 
 # JavaScript dependencies and generated frontend assets.
 /node_modules/
@@ -21,7 +23,8 @@ coverage.out
 /internal/web/static/*
 !/internal/web/static/.gitkeep
 
-# Editor and operating-system files.
+# Editor, agent, and operating-system files.
 .DS_Store
 .idea/
 .vscode/
+.claude/

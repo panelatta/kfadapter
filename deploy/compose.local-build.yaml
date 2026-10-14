@@ -1,5 +1,10 @@
-# Developer-only Compose project: builds the image locally instead of pulling
-# ghcr.io/oshinop/chinadapter:latest like the production compose.yaml.
+# Developer deployment built from this checkout. It mirrors the production
+# hardening in ../compose.yaml. Pin the project name on every invocation so an
+# inherited COMPOSE_PROJECT_NAME cannot select production containers or state.
+# Validate with:
+#   scripts/preflight.sh --local-build
+# and run with:
+#   docker compose --env-file /dev/null --project-name chinadapter-local -f deploy/compose.local-build.yaml up -d --build
 name: chinadapter-local
 
 services:
@@ -10,9 +15,7 @@ services:
       dockerfile: Dockerfile
       args:
         VERSION: 0.0.0-local
-    ports:
-      - "10809:10809"
-      - "10808:10808"
+    network_mode: host
     user: "65532:65532"
     working_dir: /chinadapter
     init: true
