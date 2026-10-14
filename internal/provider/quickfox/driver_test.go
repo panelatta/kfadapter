@@ -90,12 +90,49 @@ func TestDriverLoginAndRefreshEncryptedControlProtocol(t *testing.T) {
 	}
 }
 
-func TestDriverRejectsMalformedCatalogLine(t *testing.T) {
+func TestDriverSkipsMalformedCatalogLines(t *testing.T) {
 	t.Parallel()
+	for name, corrupt := range map[string]func(*linePool){
+		"non-IPv4 connectIp": func(line *linePool) { line.ConnectIP = "example.com" },
+		"hidden":             func(line *linePool) { line.Hidden = 1 },
+		"unknown feeType":    func(line *linePool) { line.FeeType = 9 },
+		"pool name mismatch": func(line *linePool) { line.PoolName = "other" },
+		"non-socks protocol": func(line *linePool) { line.ProtocolType = "http" },
+	} {
+		fixture := catalogFixture()
+		corrupt(&fixture.Groups[0].Regions[0].Lines[0])
+		nodes, err := nodesFromCatalog(fixture.Groups, vipTier)
+		if err != nil || len(nodes) != 1 || nodes[0].Name != "西雅图专线" {
+			t.Fatalf("%s: nodes = %#v, %v; want only the intact line", name, nodes, err)
+		}
+	}
+
 	fixture := catalogFixture()
-	fixture.Groups[0].Regions[0].Lines[0].ConnectIP = "example.com"
+	stray := catalogFixture().Groups[0]
+	stray.Regions[0].Lines = []linePool{stray.Regions[0].Lines[0]}
+	stray.Regions[0].Lines[0].ConnectIP = "117.24.248.148"
+	badGroup, badRegion := stray, stray
+	badGroup.TypeID = 0
+	badRegion.Regions = []lineRegion{stray.Regions[0]}
+	badRegion.Regions[0].Name = ""
+	fixture.Groups = append(fixture.Groups, badGroup, badRegion)
+	nodes, err := nodesFromCatalog(fixture.Groups, vipTier)
+	if err != nil || len(nodes) != 2 {
+		t.Fatalf("malformed group or region was not skipped: %#v, %v", nodes, err)
+	}
+
+	fixture = catalogFixture()
+	for index := range fixture.Groups[0].Regions[0].Lines {
+		fixture.Groups[0].Regions[0].Lines[index].ConnectIP = "example.com"
+	}
 	if _, err := nodesFromCatalog(fixture.Groups, vipTier); !errors.Is(err, ErrInvalidLine) {
-		t.Fatalf("nodesFromCatalog error = %v, want ErrInvalidLine", err)
+		t.Fatalf("all-malformed catalog error = %v, want ErrInvalidLine", err)
+	}
+
+	fixture = catalogFixture()
+	fixture.Groups[0].Regions[0].Lines = make([]linePool, maxCatalogLines+1)
+	if _, err := nodesFromCatalog(fixture.Groups, vipTier); !errors.Is(err, ErrInvalidLine) {
+		t.Fatalf("over-cap catalog error = %v, want ErrInvalidLine", err)
 	}
 }
 
@@ -217,18 +254,34 @@ func TestAccountVIPTimeAcceptsNumberOrQuotedInteger(t *testing.T) {
 	}
 }
 
-func TestPaidProfileRequiresFutureExactExpiry(t *testing.T) {
+// A paid flag never grants access without an exact future expiry; it degrades
+// to the standard tier instead of failing login.
+func TestPaidProfileWithoutFutureExactExpiryIsStandard(t *testing.T) {
 	now := time.Date(2026, 7, 22, 6, 0, 0, 0, time.UTC)
+	shanghai := time.FixedZone("Asia/Shanghai", 8*60*60)
 	profiles := []accountPayload{
 		{UserID: 15904241, Email: "alice@example.com", VIPTime: 98},
 		{UserID: 15904241, Email: "alice@example.com", SVIP: svipStatus{Time: 1}},
 		{UserID: 15904241, Email: "alice@example.com", VIPTime: 98, VIPSubscription: []vipPeriod{{EndTime: "2026-07-21 14:00:00", Grade: 1}}},
 		{UserID: 15904241, Email: "alice@example.com", SVIP: svipStatus{Time: 1}, VIPSubscription: []vipPeriod{{EndTime: "2026-07-21 14:00:00", Grade: 2}}},
+		{UserID: 15904241, Email: "alice@example.com", VIPTime: 98, VIPSubscription: []vipPeriod{{EndTime: "2026-08-22 14:00:00", Grade: 3}}},
+		{UserID: 15904241, Email: "alice@example.com", VIPTime: 98, VIPSubscription: []vipPeriod{{EndTime: "garbage", Grade: 1}}},
 	}
 	for _, profile := range profiles {
-		if _, err := profile.account(time.FixedZone("Asia/Shanghai", 8*60*60), now); !errors.Is(err, ErrSchema) {
+		account, err := profile.account(shanghai, now)
+		if err != nil {
 			t.Fatalf("paid profile without a future exact expiry error = %v", err)
 		}
+		if account.Tier != standardTier || account.SubscriptionActive || !account.SubscriptionEndsAt.IsZero() || !account.Valid() {
+			t.Fatalf("account = %#v, want inactive standard", account)
+		}
+	}
+	active, err := accountPayload{
+		UserID: 15904241, Email: "alice@example.com", VIPTime: 98,
+		VIPSubscription: []vipPeriod{{EndTime: "2026-08-22 14:00:00", Grade: 1}, {EndTime: "garbage", Grade: 1}, {EndTime: "2026-09-22 14:00:00", Grade: 7}},
+	}.account(shanghai, now)
+	if err != nil || active.Tier != vipTier || !active.SubscriptionActive || !active.SubscriptionEndsAt.Equal(time.Date(2026, 8, 22, 6, 0, 0, 0, time.UTC)) {
+		t.Fatalf("active VIP = %#v, %v", active, err)
 	}
 }
 

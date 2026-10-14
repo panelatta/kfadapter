@@ -76,18 +76,17 @@ func (payload accountPayload) account(location *time.Location, now time.Time) (p
 	// vipInfo grades do not reliably match the tier: a live SVIP account lists
 	// its only period as grade 1. Prefer a period whose grade matches the tier,
 	// otherwise use the latest listed period. Either way the expiry is an exact
-	// server-supplied time, never inferred from day counters.
+	// server-supplied time, never inferred from day counters. Unknown grades and
+	// unparseable periods are ignored: a new provider tier must not make every
+	// login fail.
 	var subscriptionEndsAt, latestEndsAt time.Time
 	for _, period := range payload.VIPSubscription {
-		if period.Grade != 1 && period.Grade != 2 {
-			return provider.Account{}, ErrSchema
-		}
-		if period.EndTime == "" {
+		if (period.Grade != 1 && period.Grade != 2) || period.EndTime == "" {
 			continue
 		}
 		parsed, err := time.ParseInLocation("2006-01-02 15:04:05", period.EndTime, location)
 		if err != nil {
-			return provider.Account{}, ErrSchema
+			continue
 		}
 		if parsed.After(latestEndsAt) {
 			latestEndsAt = parsed.UTC()
@@ -99,9 +98,12 @@ func (payload accountPayload) account(location *time.Location, now time.Time) (p
 	if subscriptionGrade != 0 && subscriptionEndsAt.IsZero() {
 		subscriptionEndsAt = latestEndsAt
 	}
-	active := subscriptionGrade != 0
-	if active && !subscriptionEndsAt.After(now) {
-		return provider.Account{}, ErrSchema
+	active := subscriptionGrade != 0 && subscriptionEndsAt.After(now)
+	if !active {
+		// A paid flag without a current exact period is treated as a standard
+		// account, which only ever narrows node eligibility.
+		tier = standardTier
+		subscriptionEndsAt = time.Time{}
 	}
 	return provider.Account{
 		UserID: strconv.FormatInt(payload.UserID, 10), Display: provider.RedactAccount(identity), Tier: tier,

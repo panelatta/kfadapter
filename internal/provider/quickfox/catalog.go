@@ -44,21 +44,30 @@ func nodesFromCatalog(groups []lineGroup, tier string) ([]provider.Node, error) 
 	seen := make(map[string]struct{}, 512)
 	regionCount := 0
 	lineCount := 0
+	valid := 0
 	for _, group := range groups {
-		if group.TypeID <= 0 || !validMetadata(group.TypeName) || len(group.Regions) > maxCatalogRegions-regionCount {
+		if len(group.Regions) > maxCatalogRegions-regionCount {
 			return nil, ErrInvalidLine
 		}
 		regionCount += len(group.Regions)
+		// Individually malformed, hidden, or unsupported groups, regions, and
+		// lines are skipped so one unexpected catalog entry cannot fail login.
+		// The count caps still bound the whole catalog.
+		validGroup := group.TypeID > 0 && validMetadata(group.TypeName)
 		for _, region := range group.Regions {
-			if !validMetadata(region.Name) || len(region.Lines) > maxCatalogLines-lineCount {
+			if len(region.Lines) > maxCatalogLines-lineCount {
 				return nil, ErrInvalidLine
 			}
 			lineCount += len(region.Lines)
+			if !validGroup || !validMetadata(region.Name) {
+				continue
+			}
 			for _, line := range region.Lines {
 				node, err := catalogNode(group, region, line, tier)
 				if err != nil {
-					return nil, err
+					continue
 				}
+				valid++
 				if !node.Eligible {
 					continue
 				}
@@ -70,7 +79,7 @@ func nodesFromCatalog(groups []lineGroup, tier string) ([]provider.Node, error) 
 			}
 		}
 	}
-	if lineCount == 0 || lineCount > maxCatalogLines {
+	if valid == 0 {
 		return nil, ErrInvalidLine
 	}
 	return nodes, nil

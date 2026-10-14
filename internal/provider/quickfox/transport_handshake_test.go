@@ -263,6 +263,28 @@ func TestResolveTargetWithoutIPv4ReturnsAddressUnsupported(t *testing.T) {
 	}
 }
 
+func TestResolveTargetSkipsNonPublicAnswers(t *testing.T) {
+	t.Parallel()
+	answers := []netip.Addr{
+		netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("10.0.0.8"), netip.MustParseAddr("100.64.1.1"),
+		netip.MustParseAddr("169.254.1.1"), netip.MustParseAddr("0.0.0.0"), netip.MustParseAddr("224.0.0.1"),
+		netip.MustParseAddr("::ffff:192.168.1.1"), netip.MustParseAddr("::ffff:34.160.111.145"),
+	}
+	transport := NewTransport()
+	transport.lookup = func(context.Context, string, string) ([]netip.Addr, error) { return answers, nil }
+	address, err := transport.resolveTarget(context.Background(), "target.example", time.Second)
+	if err != nil || address != netip.MustParseAddr("34.160.111.145") {
+		t.Fatalf("resolved %v, %v", address, err)
+	}
+	answers = answers[:len(answers)-1]
+	if address, err := transport.resolveTarget(context.Background(), "target.example", time.Second); address.IsValid() || !errors.Is(err, provider.ErrAddressUnsupported) {
+		t.Fatalf("non-public answers resolved to %v, %v", address, err)
+	}
+	if address, err := transport.resolveTarget(context.Background(), "192.168.1.1", time.Second); err != nil || address.String() != "192.168.1.1" {
+		t.Fatalf("explicit literal target = %v, %v", address, err)
+	}
+}
+
 func loopbackTCPPair(t *testing.T) (*net.TCPConn, *net.TCPConn) {
 	t.Helper()
 	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
