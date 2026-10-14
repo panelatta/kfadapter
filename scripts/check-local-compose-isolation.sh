@@ -5,7 +5,7 @@ umask 077
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
-work=$(mktemp -d "${TMPDIR:-/tmp}/kfadapter-local-isolation.XXXXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/chinadapter-local-isolation.XXXXXXXX")
 trap 'rm -rf -- "$work"' EXIT HUP INT TERM
 
 fail() {
@@ -17,14 +17,15 @@ mkdir -p "$work/deploy" "$work/scripts" "$work/bin"
 cp "$PROJECT_ROOT/deploy/compose.local-build.yaml" "$work/deploy/"
 cp "$SCRIPT_DIR/preflight.sh" "$SCRIPT_DIR/verify-local-compose.py" "$SCRIPT_DIR/check-local-compose-first-run.sh" "$work/scripts/"
 printf '%s\n' '{}' >"$work/config.yaml"
-printf '%s\n' 'COMPOSE_PROJECT_NAME=kfadapter' 'KFADAPTER_LOCAL_IMAGE=wrong:dotenv' >"$work/.env"
+printf '%s\n' 'COMPOSE_PROJECT_NAME=chinadapter' 'CHINADAPTER_LOCAL_IMAGE=wrong:dotenv' >"$work/.env"
 cp "$work/.env" "$work/deploy/.env"
 
 # Compose config needs only the CLI, not a running daemon. Verify both the
-# colliding inherited name and .env are overridden, while the image is retained.
-for inherited_project in kfadapter another-project; do
-    COMPOSE_PROJECT_NAME=$inherited_project KFADAPTER_LOCAL_IMAGE=kfadapter:test-override \
-        docker compose --env-file /dev/null --project-name kfadapter-local \
+# colliding inherited names (current and pre-rename production projects) and
+# .env are overridden, while the image is retained.
+for inherited_project in chinadapter kfadapter another-project; do
+    COMPOSE_PROJECT_NAME=$inherited_project CHINADAPTER_LOCAL_IMAGE=chinadapter:test-override \
+        docker compose --env-file /dev/null --project-name chinadapter-local \
         -f "$work/deploy/compose.local-build.yaml" config --format json >"$work/valid.json"
     python3 "$SCRIPT_DIR/verify-local-compose.py" <"$work/valid.json"
     python3 - "$work/valid.json" <<'PY'
@@ -32,12 +33,12 @@ import json
 import sys
 with open(sys.argv[1]) as source:
     config = json.load(source)
-assert config["services"]["kfadapter"]["image"] == "kfadapter:test-override"
+assert config["services"]["chinadapter"]["image"] == "chinadapter:test-override"
 PY
 done
 (
-    unset KFADAPTER_LOCAL_IMAGE
-    COMPOSE_PROJECT_NAME=kfadapter docker compose --env-file /dev/null --project-name kfadapter-local \
+    unset CHINADAPTER_LOCAL_IMAGE
+    COMPOSE_PROJECT_NAME=chinadapter docker compose --env-file /dev/null --project-name chinadapter-local \
         -f "$work/deploy/compose.local-build.yaml" config --format json >"$work/default.json"
 )
 python3 "$SCRIPT_DIR/verify-local-compose.py" <"$work/default.json"
@@ -46,7 +47,7 @@ import json
 import sys
 with open(sys.argv[1]) as source:
     config = json.load(source)
-assert config["services"]["kfadapter"]["image"] == "kfadapter:local"
+assert config["services"]["chinadapter"]["image"] == "chinadapter:local"
 PY
 
 cat >"$work/bin/uname" <<'SH'
@@ -62,7 +63,7 @@ import sys
 
 args = sys.argv[1:]
 with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
-    log.write(json.dumps({"args": args, "image": os.environ.get("KFADAPTER_LOCAL_IMAGE")}) + "\n")
+    log.write(json.dumps({"args": args, "image": os.environ.get("CHINADAPTER_LOCAL_IMAGE")}) + "\n")
 if args == ["version", "--format", "{{.Server.Os}}"]:
     print("linux")
 elif args == ["info", "--format", "{{.OperatingSystem}}"]:
@@ -71,7 +72,7 @@ elif args == ["compose", "version"]:
     print("Docker Compose version v2.fixture")
 elif args[:2] == ["image", "inspect"]:
     pass
-elif args[:5] == ["compose", "--env-file", "/dev/null", "--project-name", "kfadapter-local"] and args[5] == "-f":
+elif args[:5] == ["compose", "--env-file", "/dev/null", "--project-name", "chinadapter-local"] and args[5] == "-f":
     operation = args[7:]
     if operation == ["config", "--format", "json"]:
         with open(os.environ["FAKE_CONFIG"]) as config:
@@ -89,9 +90,9 @@ chmod 0755 "$work/bin/uname" "$work/bin/docker"
 
 fake_command() {
     (
-        unset KFADAPTER_STATE_DIR STATE_DIR
-        PATH="$work/bin:$PATH" COMPOSE_PROJECT_NAME=kfadapter \
-            KFADAPTER_LOCAL_IMAGE=kfadapter:test-override \
+        unset CHINADAPTER_STATE_DIR STATE_DIR
+        PATH="$work/bin:$PATH" COMPOSE_PROJECT_NAME=chinadapter \
+            CHINADAPTER_LOCAL_IMAGE=chinadapter:test-override \
             FAKE_DOCKER_LOG="$work/docker.log" FAKE_CONFIG="$FAKE_CONFIG" "$@"
     )
 }
@@ -101,7 +102,7 @@ FAKE_CONFIG=$work/valid.json
 fake_command sh "$work/scripts/preflight.sh" --local-build >"$work/output" 2>&1 ||
     fail "local preflight rejected the pinned project under a production environment override"
 grep -Fqx 'preflight: passed' "$work/output" || fail "local preflight did not pass"
-if fake_command sh "$work/scripts/check-local-compose-first-run.sh" kfadapter:test-override >"$work/output" 2>&1; then
+if fake_command sh "$work/scripts/check-local-compose-first-run.sh" chinadapter:test-override >"$work/output" 2>&1; then
     fail "first-run fixture did not stop at the simulated startup boundary"
 fi
 grep -Fq 'simulated stop before startup' "$work/output" || fail "first-run fixture failed before isolation was checked"
@@ -115,8 +116,8 @@ for call in calls:
     args = call["args"]
     if args[0] != "compose" or args[1:] == ["version"]:
         continue
-    assert args[:5] == ["compose", "--env-file", "/dev/null", "--project-name", "kfadapter-local"]
-    assert call["image"] == "kfadapter:test-override"
+    assert args[:5] == ["compose", "--env-file", "/dev/null", "--project-name", "chinadapter-local"]
+    assert call["image"] == "chinadapter:test-override"
     operations.append(args[7])
 assert operations == ["config", "config", "down", "up", "down"], operations
 PY
@@ -131,23 +132,23 @@ root = pathlib.Path(sys.argv[1])
 config = json.loads((root / "valid.json").read_text())
 cases = {}
 value = copy.deepcopy(config)
-value["name"] = "kfadapter"
+value["name"] = "chinadapter"
 cases["production-project"] = value
 value = copy.deepcopy(config)
-value["volumes"]["db_data"]["name"] = "kfadapter_db_data"
+value["volumes"]["db_data"]["name"] = "chinadapter_db_data"
 cases["production-volume"] = value
 value = copy.deepcopy(config)
 value["volumes"]["db_data"]["external"] = True
 cases["external-volume"] = value
 value = copy.deepcopy(config)
-state = next(m for m in value["services"]["kfadapter"]["volumes"] if m["target"] == "/kfadapter/data")
+state = next(m for m in value["services"]["chinadapter"]["volumes"] if m["target"] == "/chinadapter/data")
 state.update(type="bind", source="/production-state")
 cases["bind-state"] = value
 value = copy.deepcopy(config)
-value["services"]["kfadapter"]["volumes"].append({"type": "volume", "source": "kfadapter_db_data", "target": "/other"})
+value["services"]["chinadapter"]["volumes"].append({"type": "volume", "source": "chinadapter_db_data", "target": "/other"})
 cases["extra-volume"] = value
 value = copy.deepcopy(config)
-value["services"]["kfadapter"]["container_name"] = "kfadapter"
+value["services"]["chinadapter"]["container_name"] = "chinadapter"
 cases["unscoped-container"] = value
 for name, value in cases.items():
     (root / f"invalid-{name}.json").write_text(json.dumps(value))
@@ -158,7 +159,7 @@ for FAKE_CONFIG in "$work"/invalid-*.json; do
         fail "local preflight accepted $FAKE_CONFIG"
     fi
     grep -Fq 'local-compose-isolation:' "$work/output" || fail "invalid rendered configuration was not diagnosed"
-    if fake_command sh "$work/scripts/check-local-compose-first-run.sh" kfadapter:test-override >"$work/output" 2>&1; then
+    if fake_command sh "$work/scripts/check-local-compose-first-run.sh" chinadapter:test-override >"$work/output" 2>&1; then
         fail "first-run check accepted $FAKE_CONFIG"
     fi
     python3 - "$work/docker.log" <<'PY'

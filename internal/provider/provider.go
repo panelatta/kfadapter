@@ -14,7 +14,8 @@ import (
 // MaxNodes bounds the nodes one provider snapshot may carry.
 const MaxNodes = 4096
 
-// MaxNodeGroupBytes bounds group metadata and exact subscription group filters.
+// MaxNodeGroupBytes bounds node group metadata and exact subscription group
+// filters.
 const MaxNodeGroupBytes = maxFieldBytes
 
 const (
@@ -22,7 +23,6 @@ const (
 	maxFieldBytes      = 4096
 	maxStateBytes      = 1 << 20
 	maxAuthorities     = 16
-	maxNodes           = MaxNodes
 )
 
 var (
@@ -33,10 +33,13 @@ var (
 	ErrLoginRejected    = errors.New("provider: login rejected")
 	ErrAccountExists    = errors.New("provider: account already exists")
 	ErrNoSession        = errors.New("provider: no refreshable session")
-	// ErrCommandUnsupported and ErrAddressUnsupported let transports report
-	// SOCKS-visible capability limits (RFC 1928 replies 0x07 and 0x08).
-	ErrCommandUnsupported = errors.New("provider: command unsupported")
-	ErrAddressUnsupported = errors.New("provider: address type unsupported")
+	// ErrSessionRejected means the upstream explicitly invalidated the stored
+	// session. Only explicit rejection codes map here; every other driver error
+	// is transient and must never delete provider state.
+	ErrSessionRejected = errors.New("provider: session rejected by upstream")
+	// ErrAddressUnsupported means the transport cannot reach the requested
+	// destination address type. SOCKS maps it to reply 0x08.
+	ErrAddressUnsupported = errors.New("provider: destination address type unsupported")
 )
 
 // ID is a stable provider implementation identifier, such as "kuaifan".
@@ -158,7 +161,7 @@ type Snapshot struct {
 func (snapshot Snapshot) Valid() bool {
 	if !snapshot.Provider.Valid() || !snapshot.Account.Valid() || snapshot.ExpiresAt.IsZero() ||
 		len(snapshot.RefreshState) == 0 || len(snapshot.RefreshState) > maxStateBytes ||
-		len(snapshot.Authorities) == 0 || len(snapshot.Authorities) > maxAuthorities || len(snapshot.Nodes) > maxNodes {
+		len(snapshot.Authorities) == 0 || len(snapshot.Authorities) > maxAuthorities || len(snapshot.Nodes) > MaxNodes {
 		return false
 	}
 	for id, authority := range snapshot.Authorities {
@@ -180,10 +183,10 @@ func (snapshot Snapshot) Valid() bool {
 	return true
 }
 
-// UsableAt reports whether a structurally valid snapshot may establish a new
-// provider tunnel at now.
-func (snapshot Snapshot) UsableAt(now time.Time) bool {
-	return snapshot.Valid() && snapshot.ExpiresAt.After(now)
+// UsableAt reports whether the snapshot contains structurally valid authority.
+// ExpiresAt is a refresh hint, never an admission or deletion deadline.
+func (snapshot Snapshot) UsableAt(_ time.Time) bool {
+	return snapshot.Valid()
 }
 
 func (snapshot Snapshot) Clone() Snapshot {

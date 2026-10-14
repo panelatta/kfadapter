@@ -38,7 +38,7 @@ func TestHTTPSReverseProxyConsole(t *testing.T) {
 	client.Jar, _ = cookiejar.New(nil)
 	client.Timeout = 3 * time.Second
 
-	do := func(method, route, body, origin, csrf string) *http.Response {
+	do := func(method, route, body, origin string) *http.Response {
 		t.Helper()
 		req, err := http.NewRequest(method, proxy.URL+route, strings.NewReader(body))
 		if err != nil {
@@ -50,9 +50,6 @@ func TestHTTPSReverseProxyConsole(t *testing.T) {
 		}
 		if origin != "" {
 			req.Header.Set("Origin", origin)
-		}
-		if csrf != "" {
-			req.Header.Set(csrfHeaderName, csrf)
 		}
 		response, err := client.Do(req)
 		if err != nil {
@@ -72,12 +69,12 @@ func TestHTTPSReverseProxyConsole(t *testing.T) {
 	}
 
 	// A reverse proxy's loopback connection cannot claim first-time setup.
-	status := assertStatus(do(http.MethodGet, "/api/v1/access/status", "", "", ""), http.StatusOK)
+	status := assertStatus(do(http.MethodGet, "/api/v1/access/status", "", ""), http.StatusOK)
 	if !strings.Contains(string(status), `"setupAllowed":false`) {
 		t.Fatalf("public setup availability = %s", status)
 	}
 	body := `{"token":"` + validTestToken + `"}`
-	assertStatus(do(http.MethodPost, "/api/v1/access/setup", body, publicTestOrigin, ""), http.StatusForbidden)
+	assertStatus(do(http.MethodPost, "/api/v1/access/setup", body, publicTestOrigin), http.StatusForbidden)
 	if backend.accessSetupCalls != 0 {
 		t.Fatal("public proxy reached bootstrap backend")
 	}
@@ -100,40 +97,40 @@ func TestHTTPSReverseProxyConsole(t *testing.T) {
 	}
 	assertStatus(setupResponse, http.StatusCreated)
 
-	login := do(http.MethodPost, "/api/v1/access/login", body, publicTestOrigin, "")
+	login := do(http.MethodPost, "/api/v1/access/login", body, publicTestOrigin)
 	cookies := login.Cookies()
 	if len(cookies) != 1 || !cookies[0].Secure || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
 		t.Fatalf("HTTPS login cookies = %#v", cookies)
 	}
 	var session struct {
-		CSRF string `json:"csrfToken"`
+		Authenticated bool `json:"authenticated"`
 	}
-	if err := json.Unmarshal(assertStatus(login, http.StatusOK), &session); err != nil || session.CSRF == "" {
+	if err := json.Unmarshal(assertStatus(login, http.StatusOK), &session); err != nil || !session.Authenticated {
 		t.Fatalf("session = %#v, %v", session, err)
 	}
-	assertStatus(do(http.MethodPost, "/api/v1/control/refresh", `{}`, publicTestOrigin, session.CSRF), http.StatusAccepted)
-	assertStatus(do(http.MethodPost, "/api/v1/control/refresh", `{}`, publicTestOrigin, "bad-csrf"), http.StatusForbidden)
-	for _, origin := range []string{"http://" + publicTestHost, "https://evil.example", publicTestOrigin + "/", ""} {
-		assertStatus(do(http.MethodPost, "/api/v1/control/refresh", `{}`, origin, session.CSRF), http.StatusForbidden)
-	}
+	refresh := `{"provider":"kuaifan"}`
+	assertStatus(do(http.MethodPost, "/api/v1/control/refresh", refresh, publicTestOrigin), http.StatusAccepted)
+	// Cross-origin protection compares the Origin authority with the Host the
+	// proxy forwards, so a foreign HTTPS origin is refused.
+	assertStatus(do(http.MethodPost, "/api/v1/control/refresh", refresh, "https://evil.example"), http.StatusForbidden)
 
-	status = assertStatus(do(http.MethodGet, "/api/v1/status", "", "", ""), http.StatusOK)
+	status = assertStatus(do(http.MethodGet, "/api/v1/status", "", ""), http.StatusOK)
 	if !strings.Contains(string(status), `"socksAddress":"socks.example.com:10808"`) {
 		t.Fatalf("public SOCKS advertisement = %s", status)
 	}
-	subscription := assertStatus(do(http.MethodGet, "/api/v1/subscription/url", "", "", ""), http.StatusOK)
+	subscription := assertStatus(do(http.MethodGet, "/api/v1/subscription/url", "", ""), http.StatusOK)
 	if !strings.Contains(string(subscription), publicTestOrigin+"/sub/"+subscriptions.binding) {
 		t.Fatalf("public subscription URL = %s", subscription)
 	}
-	assertStatus(do(http.MethodGet, "/sub/"+subscriptions.binding, "", "", ""), http.StatusOK)
+	assertStatus(do(http.MethodGet, "/sub/"+subscriptions.binding, "", ""), http.StatusOK)
 
 	// An authenticated browser event stream accepts the HTTPS origin.
-	stream := do(http.MethodGet, "/api/v1/events", "", publicTestOrigin, "")
+	stream := do(http.MethodGet, "/api/v1/events", "", publicTestOrigin)
 	if stream.StatusCode != http.StatusOK {
 		t.Fatalf("HTTPS SSE = %d", stream.StatusCode)
 	}
 	stream.Body.Close()
-	locked := do(http.MethodPost, "/api/v1/access/logout", `{}`, publicTestOrigin, session.CSRF)
+	locked := do(http.MethodPost, "/api/v1/access/logout", `{}`, publicTestOrigin)
 	if cookies := locked.Cookies(); len(cookies) != 1 || !cookies[0].Secure || cookies[0].MaxAge != -1 {
 		t.Fatalf("HTTPS logout cookie = %#v", cookies)
 	}

@@ -5,9 +5,9 @@ umask 077
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-OLD_REPOSITORY=registry.invalid/kfadapter-old
-NEW_REPOSITORY=ghcr.io/panelatta/kfadapter
-EXPLICIT_REPOSITORY=registry.invalid/kfadapter-explicit
+OLD_REPOSITORY=registry.invalid/chinadapter-old
+NEW_REPOSITORY=ghcr.io/panelatta/chinadapter
+EXPLICIT_REPOSITORY=registry.invalid/chinadapter-explicit
 OLD_DIGEST=sha256:1111111111111111111111111111111111111111111111111111111111111111
 NEW_DIGEST=sha256:2222222222222222222222222222222222222222222222222222222222222222
 OLD_IMAGE=$OLD_REPOSITORY@$OLD_DIGEST
@@ -21,7 +21,7 @@ fail() {
 
 tmp_root=${TMPDIR:-/tmp}
 tmp_root=${tmp_root%/}
-work=$(mktemp -d "$tmp_root/kfadapter-upgrade.XXXXXXXX")
+work=$(mktemp -d "$tmp_root/chinadapter-upgrade.XXXXXXXX")
 work=$(CDPATH= cd -- "$work" && pwd -P)
 cleanup() {
     rm -rf -- "$work"
@@ -99,10 +99,10 @@ set -eu
 [ "$#" -eq 1 ] || exit 2
 state_dir=${FAKE_STATE_MOUNTPOINT:?}
 archive=$1
-printf '%s\n' "restore archive=$archive state=$state_dir repository=$KFADAPTER_IMAGE_REPOSITORY digest=$KFADAPTER_IMAGE_DIGEST" >>"$FAKE_LOG"
+printf '%s\n' "restore archive=$archive state=$state_dir repository=$CHINADAPTER_IMAGE_REPOSITORY digest=$CHINADAPTER_IMAGE_DIGEST" >>"$FAKE_LOG"
 [ "$(cat "$FAKE_RUNTIME_STATE")" = stopped ] || exit 1
-[ "$KFADAPTER_IMAGE_REPOSITORY" = "$OLD_REPOSITORY" ] || exit 1
-[ "$KFADAPTER_IMAGE_DIGEST" = "$OLD_DIGEST" ] || exit 1
+[ "$CHINADAPTER_IMAGE_REPOSITORY" = "$OLD_REPOSITORY" ] || exit 1
+[ "$CHINADAPTER_IMAGE_DIGEST" = "$OLD_DIGEST" ] || exit 1
 [ "${FAIL_ROLLBACK:-}" != restore ] || exit 1
 "$(dirname -- "$0")/restore-state-real.sh" "$archive"
 printf '%s\n' "validate-state restore=$state_dir/state.db archive=$archive" >>"$FAKE_LOG"
@@ -131,7 +131,7 @@ case "${1:-}" in
     version) printf '%s\n' linux ;;
     info) printf '%s\n' "Debian GNU/Linux" ;;
     ps)
-        [ "${2:-}" = --filter ] && [ "${3:-}" = volume=kfadapter_db_data ] && [ "${4:-}" = -q ] || exit 2
+        [ "${2:-}" = --filter ] && [ "${3:-}" = volume=chinadapter_db_data ] && [ "${4:-}" = -q ] || exit 2
         [ "$state" = stopped ] || printf '%s\n' active-container
         ;;
     run)
@@ -162,12 +162,16 @@ PY
         ;;
     volume)
         if [ "${2:-}" = ls ]; then
-            printf '%s\n' kfadapter_db_data
+            [ "${3:-}" = --format ] && [ "${4:-}" = '{{.Name}}' ] || exit 2
+            log "volume ls"
+            for name in $FAKE_VOLUMES; do
+                printf '%s\n' "$name"
+            done
             exit 0
         fi
-        [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${5:-}" = kfadapter_db_data ] || exit 2
+        [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${5:-}" = chinadapter_db_data ] || exit 2
         case "${4:-}" in
-            '{{.Name}}') printf '%s\n' kfadapter_db_data ;;
+            '{{.Name}}') printf '%s\n' chinadapter_db_data ;;
             '{{.Driver}}') printf '%s\n' local ;;
             '{{.Mountpoint}}') printf '%s\n' "${FAKE_STATE_MOUNTPOINT:?}" ;;
             '{{json .Options}}') printf '%s\n' null ;;
@@ -191,7 +195,7 @@ PY
             version) exit 0 ;;
             config)
                 if [ "${1:-}" = --images ]; then
-                    printf '%s\n' "${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/kfadapter}@$KFADAPTER_IMAGE_DIGEST"
+                    printf '%s\n' "${CHINADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/chinadapter}@$CHINADAPTER_IMAGE_DIGEST"
                 else
                     [ "${1:-}" = --quiet ] || exit 2
                 fi
@@ -208,7 +212,7 @@ PY
                 printf '%s\n' stopped >"$FAKE_RUNTIME_STATE"
                 ;;
             pull)
-                image=${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/kfadapter}@$KFADAPTER_IMAGE_DIGEST
+                image=${CHINADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/chinadapter}@$CHINADAPTER_IMAGE_DIGEST
                 log "pull $image"
                 if [ "$image" != "$OLD_IMAGE" ] && [ "${FAIL_PHASE:-}" = pull ]; then
                     exit 1
@@ -219,7 +223,7 @@ PY
                 fi
                 ;;
             up)
-                image=${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/kfadapter}@$KFADAPTER_IMAGE_DIGEST
+                image=${CHINADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/chinadapter}@$CHINADAPTER_IMAGE_DIGEST
                 log "up $image"
                 if [ "$image" = "$OLD_IMAGE" ]; then
                     : >"$FAKE_ROLLBACK_MARKER"
@@ -294,9 +298,9 @@ PY
                     *) exit 1 ;;
                 esac
                 ;;
-            *'Destination "/kfadapter/data"'*'{{.Type}}'*) printf '%s\n' volume ;;
-            *'Destination "/kfadapter/data"'*'{{.Name}}'*) printf '%s\n' "${FAKE_RUNNING_STATE_VOLUME:-kfadapter_db_data}" ;;
-            *'Destination "/kfadapter/data"'*'{{.Source}}'*) printf '%s\n' "${FAKE_RUNNING_STATE_MOUNTPOINT:-$FAKE_STATE_MOUNTPOINT}" ;;
+            *'Destination "/chinadapter/data"'*'{{.Type}}'*) printf '%s\n' volume ;;
+            *'Destination "/chinadapter/data"'*'{{.Name}}'*) printf '%s\n' "${FAKE_RUNNING_STATE_VOLUME:-chinadapter_db_data}" ;;
+            *'Destination "/chinadapter/data"'*'{{.Source}}'*) printf '%s\n' "${FAKE_RUNNING_STATE_MOUNTPOINT:-$FAKE_STATE_MOUNTPOINT}" ;;
             *State.Health*)
                 case "$container:$state" in
                     old-container:old-running)
@@ -328,8 +332,8 @@ run_upgrade() {
     image_repository=${1:-}
     rm -f -- "$work/rollback-marker"
     (
-        unset KFADAPTER_IMAGE_REPOSITORY
-        [ -z "$image_repository" ] || export KFADAPTER_IMAGE_REPOSITORY="$image_repository"
+        unset CHINADAPTER_IMAGE_REPOSITORY
+        [ -z "$image_repository" ] || export CHINADAPTER_IMAGE_REPOSITORY="$image_repository"
         PATH="$work/bin:$PATH" \
             FAKE_RUNTIME_STATE="$work/runtime-state" \
             FAKE_LOG="$work/log" \
@@ -348,9 +352,10 @@ run_upgrade() {
             FAKE_STATE_MOUNTPOINT="$state_dir" \
             FAKE_RUNNING_STATE_VOLUME="${FAKE_RUNNING_STATE_VOLUME:-}" \
             FAKE_RUNNING_STATE_MOUNTPOINT="${FAKE_RUNNING_STATE_MOUNTPOINT:-}" \
-            KFADAPTER_HOST_UID="$actual_uid" \
-            KFADAPTER_HOST_GID="$actual_gid" \
-            KFADAPTER_IMAGE_DIGEST="$NEW_DIGEST" \
+            FAKE_VOLUMES="${FAKE_VOLUMES:-chinadapter_db_data}" \
+            CHINADAPTER_HOST_UID="$actual_uid" \
+            CHINADAPTER_HOST_GID="$actual_gid" \
+            CHINADAPTER_IMAGE_DIGEST="$NEW_DIGEST" \
             "$work/scripts/upgrade.sh"
     )
 }
@@ -477,7 +482,7 @@ assert_rollback() {
 }
 
 
-tagged_old_image=registry.invalid/kfadapter-old:legacy@$OLD_DIGEST
+tagged_old_image=registry.invalid/chinadapter-old:legacy@$OLD_DIGEST
 cp "$work/baseline-state.db" "$state_dir/state.db"
 printf '%s\n' old-running >"$work/runtime-state"
 : >"$work/log"
@@ -523,7 +528,9 @@ unset FAKE_STATE_DAMAGE FAIL_PHASE
 cp "$work/baseline-state.db" "$state_dir/state.db"
 printf '%s\n' old-running >"$work/runtime-state"
 : >"$work/log"
-run_upgrade >"$work/output" 2>&1
+# A retained pre-rename volume beside the migrated one must not block upgrades.
+FAKE_VOLUMES='kfadapter_db_data chinadapter_db_data' run_upgrade >"$work/output" 2>&1
+unset FAKE_VOLUMES
 assert_named_volume_flow
 grep -Fq "up $NEW_IMAGE" "$work/log" || fail "new service did not use the requested immutable image"
 grep -Fq 'replacement is healthy' "$work/output" || fail "healthy replacement was not reported"
@@ -531,6 +538,22 @@ if grep -Fq 'restore archive=' "$work/log"; then
     fail "healthy replacement unexpectedly restored state"
 fi
 assert_replacement_state
+
+# A healthy replacement may hold a transient journal while it migrates or
+# writes; verifying its running mount must not roll the upgrade back.
+cp "$work/baseline-state.db" "$state_dir/state.db"
+printf '%s\n' old-running >"$work/runtime-state"
+: >"$work/log"
+if ! FAKE_STATE_DAMAGE=journal run_upgrade >"$work/output" 2>&1; then
+    fail "transient replacement journal caused a rollback: $(cat "$work/output")"
+fi
+# bash keeps a prefix assignment to a function call; dash does not.
+unset FAKE_STATE_DAMAGE
+grep -Fq 'replacement is healthy' "$work/output" || fail "replacement with a transient journal was not reported healthy"
+if grep -Fq 'restore archive=' "$work/log"; then
+    fail "transient replacement journal restored state"
+fi
+rm -f "$state_dir/state.db-journal"
 
 cp "$work/baseline-state.db" "$state_dir/state.db"
 printf '%s\n' old-running >"$work/runtime-state"
@@ -632,6 +655,35 @@ grep -Fq 'running service does not use the Compose-managed Docker state volume' 
 if grep -Eq '^(stop|backup )' "$work/log"; then
     fail "state-volume mismatch reached service stop or backup"
 fi
+
+# A host that still has only the pre-rename volume must be migrated, not
+# upgraded; the diagnostic comes before any state resolution or service change.
+: >"$work/log"
+if FAKE_VOLUMES=kfadapter_db_data run_upgrade >"$work/output" 2>&1; then
+    fail "upgrade accepted a host that has only the pre-rename state volume"
+fi
+unset FAKE_VOLUMES
+grep -Fq 'found the pre-rename kfadapter_db_data state volume but no chinadapter_db_data volume' "$work/output" ||
+    fail "unmigrated legacy state volume was not diagnosed"
+grep -Fq 'scripts/migrate-legacy-state.sh' "$work/output" || fail "legacy state diagnostic did not name the migration script"
+[ "$(cat "$work/runtime-state")" = old-running ] || fail "legacy state diagnostic changed the running service"
+if grep -Eq '^(ps|stop|backup )' "$work/log"; then
+    fail "legacy state diagnostic reached the upgrade"
+fi
+if grep -Fq 'preflight ' "$work/log"; then
+    fail "legacy state diagnostic reached preflight"
+fi
+: >"$work/log"
+if FAKE_VOLUMES=none run_upgrade >"$work/output" 2>&1; then
+    fail "upgrade accepted a host without a state volume"
+fi
+unset FAKE_VOLUMES
+grep -Fq 'Docker state volume chinadapter_db_data does not exist' "$work/output" || fail "missing state volume was not diagnosed"
+if grep -Fq 'migrate-legacy-state.sh' "$work/output"; then
+    fail "missing state volume without a legacy volume suggested a migration"
+fi
+[ "$(cat "$work/runtime-state")" = old-running ] || fail "missing state volume changed the running service"
+
 : >"$work/log"
 if FAKE_ID_UID=501 run_upgrade >"$work/output" 2>&1; then
     fail "non-root upgrade did not fail"

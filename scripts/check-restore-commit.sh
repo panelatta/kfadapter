@@ -12,7 +12,7 @@ fail() {
 
 tmp_root=${TMPDIR:-/tmp}
 tmp_root=${tmp_root%/}
-work=$(mktemp -d "$tmp_root/kfadapter-restore-commit.XXXXXXXX")
+work=$(mktemp -d "$tmp_root/chinadapter-restore-commit.XXXXXXXX")
 work=$(CDPATH= cd -- "$work" && pwd -P)
 cleanup() {
     rm -rf -- "$work"

@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 # Prove SQLite backups archive only the payload, never follow attacker-controlled
-# paths, and take online snapshots only from the kfadapter service container.
+# paths, and take online snapshots only from the chinadapter service container.
 set -eu
 umask 077
 
@@ -14,7 +14,7 @@ fail() {
 
 tmp_root=${TMPDIR:-/tmp}
 tmp_root=${tmp_root%/}
-work=$(mktemp -d "$tmp_root/kfadapter-backup-state.XXXXXXXX")
+work=$(mktemp -d "$tmp_root/chinadapter-backup-state.XXXXXXXX")
 work=$(CDPATH= cd -- "$work" && pwd -P)
 cleanup() {
     rm -rf -- "$work"
@@ -37,9 +37,9 @@ case "${1:-}" in
         printf '%s\n' "${FAKE_DOCKER_CONTEXT_HOST:-unix:///var/run/docker.sock}"
         ;;
     volume)
-        [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${5:-}" = kfadapter_db_data ] || exit 2
+        [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${5:-}" = chinadapter_db_data ] || exit 2
         case "${4:-}" in
-            '{{.Name}}') printf '%s\n' kfadapter_db_data ;;
+            '{{.Name}}') printf '%s\n' chinadapter_db_data ;;
             '{{.Driver}}') printf '%s\n' local ;;
             '{{.Mountpoint}}') printf '%s\n' "${FAKE_STATE_MOUNTPOINT:?}" ;;
             '{{json .Options}}') printf '%s\n' null ;;
@@ -47,7 +47,7 @@ case "${1:-}" in
         esac
         ;;
     ps)
-        [ "${2:-}" = --filter ] && [ "${3:-}" = volume=kfadapter_db_data ] && [ "${4:-}" = -q ] || exit 2
+        [ "${2:-}" = --filter ] && [ "${3:-}" = volume=chinadapter_db_data ] && [ "${4:-}" = -q ] || exit 2
         [ "${FAKE_DOCKER_PS_FAIL:-}" != 1 ] || exit 1
         case "${FAKE_DOCKER_RUNNING:-}" in
             1) printf '%s\n' running-container ;;
@@ -57,17 +57,17 @@ case "${1:-}" in
     inspect)
         [ "${2:-}" = --format ] && [ "${4:-}" = running-container ] && [ "$#" -eq 4 ] || exit 2
         case "${3:-}" in
-            *com.docker.compose.project*com.docker.compose.service*/kfadapter/data*) ;;
+            *com.docker.compose.project*com.docker.compose.service*/chinadapter/data*) ;;
             *) exit 2 ;;
         esac
-        printf '%s\n' "${FAKE_CONTAINER_IDENTITY:-kfadapter/kfadapter volume:kfadapter_db_data}"
+        printf '%s\n' "${FAKE_CONTAINER_IDENTITY:-chinadapter/chinadapter volume:chinadapter_db_data}"
         ;;
     exec)
-        [ "$#" -eq 6 ] && [ "$2" = --workdir ] && [ "$3" = /kfadapter ] && [ "$4" = running-container ] && [ "$5" = ./kfadapter ] && [ "$6" = backup ] || exit 2
+        [ "$#" -eq 6 ] && [ "$2" = --workdir ] && [ "$3" = /chinadapter ] && [ "$4" = running-container ] && [ "$5" = ./chinadapter ] && [ "$6" = backup ] || exit 2
         case "${FAKE_EXEC:-snapshot}" in
             snapshot) cat "${FAKE_SNAPSHOT:?}" ;;
             fail)
-                printf '%s\n' 'kfadapter: backup failed: persistent state is corrupt' >&2
+                printf '%s\n' 'chinadapter: backup failed: persistent state is corrupt' >&2
                 exit 1
                 ;;
             fail-after-output)
@@ -121,8 +121,8 @@ run_backup() {
         FAKE_SNAPSHOT="$work/hot.db" \
         FAKE_CONTAINER_IDENTITY="${FAKE_CONTAINER_IDENTITY:-}" \
         BACKUP_DIR="$backup_dir" \
-        KFADAPTER_HOST_UID="$actual_uid" \
-        KFADAPTER_HOST_GID="$actual_gid" \
+        CHINADAPTER_HOST_UID="$actual_uid" \
+        CHINADAPTER_HOST_GID="$actual_gid" \
         "$work/scripts/backup-state.sh" "$@"
 }
 
@@ -224,7 +224,9 @@ grep -Fq 'Docker state volume is in use' "$work/running-output" || fail "backup 
 cmp -s "$work/state.db.expected" "$work/state/state.db" || fail "mounted-state rejection changed state.db bytes"
 
 # A running service is backed up online by default and on request, even while a
-# transient rollback journal sits beside the live database.
+# transient rollback journal sits beside the live database. Set the fixture
+# explicitly: dash does not keep a prefix assignment after a function call.
+FAKE_DOCKER_RUNNING=1
 online_archive="$work/online/auto.tar.gz"
 run_backup "$work/online" "$online_archive" >"$work/online-output" || fail "online backup of a running service failed"
 grep -Fq 'created protected online state archive' "$work/online-output" || fail "running service was not backed up online"
@@ -259,10 +261,10 @@ assert_rejected_online stopped-service 'no running service mounts the Docker sta
 FAKE_DOCKER_RUNNING=2
 assert_rejected_online two-containers 'more than one container mounts the Docker state volume'
 FAKE_DOCKER_RUNNING=1
-FAKE_CONTAINER_IDENTITY='other/kfadapter volume:kfadapter_db_data'
-assert_rejected_online foreign-project 'is not the kfadapter service'
-FAKE_CONTAINER_IDENTITY='kfadapter/kfadapter bind:'
-assert_rejected_online bind-mounted-state 'is not the kfadapter service'
+FAKE_CONTAINER_IDENTITY='other/chinadapter volume:chinadapter_db_data'
+assert_rejected_online foreign-project 'is not the chinadapter service'
+FAKE_CONTAINER_IDENTITY='chinadapter/chinadapter bind:'
+assert_rejected_online bind-mounted-state 'is not the chinadapter service'
 FAKE_CONTAINER_IDENTITY=
 for exec_mode in fail fail-after-output; do
     FAKE_EXEC=$exec_mode

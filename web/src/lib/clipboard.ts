@@ -1,4 +1,7 @@
-export async function copyText(value: string, isCurrent: () => boolean = () => true): Promise<boolean> {
+export async function copyText(
+    value: string,
+    isCurrent: () => boolean = () => true,
+): Promise<boolean> {
     if (!isCurrent()) return false;
     try {
         if (navigator.clipboard?.writeText) {

@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api";
-import { NodeList } from "./components/NodeList";
+import { NodeList } from "./features/nodes/NodeList";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { makeApi, nodes } from "./test/fixtures";
 import type { NodeRecord } from "./types";

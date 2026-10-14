@@ -24,9 +24,9 @@ image = json.load(sys.stdin)[0]
 config = image["Config"]
 if config.get("User") != "65532:65532":
     raise SystemExit("image-security: runtime user must be numeric 65532:65532")
-if config.get("WorkingDir") != "/kfadapter":
-    raise SystemExit("image-security: runtime working directory must be /kfadapter")
-if config.get("Entrypoint") != ["./kfadapter"]:
+if config.get("WorkingDir") != "/chinadapter":
+    raise SystemExit("image-security: runtime working directory must be /chinadapter")
+if config.get("Entrypoint") != ["./chinadapter"]:
     raise SystemExit("image-security: entrypoint must be the adapter binary relative to its working directory")
 if config.get("Volumes"):
     raise SystemExit("image-security: final image must not declare a volume")
@@ -50,7 +50,7 @@ trap cleanup EXIT HUP INT TERM
 files=$(mktemp)
 trap 'rm -f "$files"; cleanup' EXIT HUP INT TERM
 docker export "$container" | tar -tf - >"$files"
-grep -Eq '(^|/)kfadapter/kfadapter$' "$files" || fail "adapter binary is missing"
+grep -Eq '(^|/)chinadapter/chinadapter$' "$files" || fail "adapter binary is missing"
 grep -Eq '(^|/)etc/alpine-release$' "$files" || fail "final image is not Alpine"
 grep -Eq '(^|/)bin/sh$' "$files" || fail "Alpine shell is missing"
 docker export "$container" | python3 -c '
@@ -60,15 +60,15 @@ import tarfile
 found = False
 with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as archive:
     for member in archive:
-        if member.name.rstrip("/") != "kfadapter/data":
+        if member.name.rstrip("/") != "chinadapter/data":
             continue
         found = True
         if not member.isdir() or member.uid != 65532 or member.gid != 65532 or member.mode & 0o7777 != 0o700:
-            raise SystemExit("image-security: /kfadapter/data must be a 0700 directory owned by 65532:65532")
+            raise SystemExit("image-security: /chinadapter/data must be a 0700 directory owned by 65532:65532")
 if not found:
-    raise SystemExit("image-security: /kfadapter/data is missing")
+    raise SystemExit("image-security: /chinadapter/data is missing")
 '
-if ! docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'test -x /kfadapter/kfadapter'; then
+if ! docker run --rm --entrypoint /bin/sh "$IMAGE" -c 'test -x /chinadapter/chinadapter'; then
     fail "Alpine runtime cannot execute the adapter binary"
 fi
 printf '%s\n' "image-security: passed"

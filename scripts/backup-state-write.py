@@ -2,7 +2,7 @@
 """Create a state backup through verified directory descriptors only.
 
 Offline backups copy the stopped service's state.db. Online backups archive the
-validated snapshot that `kfadapter backup` streams from the running container.
+validated snapshot that `chinadapter backup` streams from the running container.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ STATE_FILE_NAME = "state.db"
 MAX_STATE_BYTES = 18 << 20
 SQLITE_HEADER = b"SQLite format 3\x00"
 CHUNK_SIZE = 1024 * 1024
-CONTAINER_WORKDIR = "/kfadapter"
+CONTAINER_WORKDIR = "/chinadapter"
 
 
 class BackupError(Exception):
@@ -220,8 +220,8 @@ def validate_snapshot(image: bytes) -> None:
 
 
 def read_online_snapshot(container: str) -> bytes:
-    """Run `kfadapter backup` in the service container and bound its output."""
-    command = ["docker", "exec", "--workdir", CONTAINER_WORKDIR, container, "./kfadapter", "backup"]
+    """Run `chinadapter backup` in the service container and bound its output."""
+    command = ["docker", "exec", "--workdir", CONTAINER_WORKDIR, container, "./chinadapter", "backup"]
     try:
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
     except OSError as error:

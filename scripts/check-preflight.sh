@@ -5,7 +5,7 @@ umask 077
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
-IMAGE_REPOSITORY=ghcr.io/panelatta/kfadapter
+IMAGE_REPOSITORY=ghcr.io/panelatta/chinadapter
 IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
 
 fail() {
@@ -15,7 +15,7 @@ fail() {
 
 tmp_root=${TMPDIR:-/tmp}
 tmp_root=${tmp_root%/}
-work=$(mktemp -d "$tmp_root/kfadapter-preflight.XXXXXXXX")
+work=$(mktemp -d "$tmp_root/chinadapter-preflight.XXXXXXXX")
 work=$(CDPATH= cd -- "$work" && pwd -P)
 cleanup() {
     rm -rf -- "$work"
@@ -54,8 +54,8 @@ case "${1:-}" in
                 ;;
             --env-file)
                 [ "${2:-}" = /dev/null ] && [ "${3:-}" = -f ] && [ "${5:-}" = config ] && [ "${6:-}" = --quiet ] || exit 2
-                [ "${KFADAPTER_IMAGE_REPOSITORY:-}" = "$FAKE_EXPECTED_IMAGE_REPOSITORY" ] || exit 2
-                [ "${KFADAPTER_IMAGE_DIGEST:-}" = "$FAKE_EXPECTED_IMAGE_DIGEST" ] || exit 2
+                [ "${CHINADAPTER_IMAGE_REPOSITORY:-}" = "$FAKE_EXPECTED_IMAGE_REPOSITORY" ] || exit 2
+                [ "${CHINADAPTER_IMAGE_DIGEST:-}" = "$FAKE_EXPECTED_IMAGE_DIGEST" ] || exit 2
                 ;;
             *) exit 2 ;;
         esac
@@ -68,15 +68,18 @@ case "${1:-}" in
         case "${2:-}" in
             ls)
                 [ "${3:-}" = --format ] && [ "${4:-}" = '{{.Name}}' ] || exit 2
-                if [ "${FAKE_VOLUME_EXISTS:-}" = 1 ]; then
+                if [ "${FAKE_LEGACY_VOLUME_EXISTS:-}" = 1 ]; then
                     printf '%s\n' kfadapter_db_data
+                fi
+                if [ "${FAKE_VOLUME_EXISTS:-}" = 1 ]; then
+                    printf '%s\n' chinadapter_db_data
                 fi
                 ;;
             inspect)
-                [ "${3:-}" = --format ] && [ "${5:-}" = kfadapter_db_data ] || exit 2
+                [ "${3:-}" = --format ] && [ "${5:-}" = chinadapter_db_data ] || exit 2
                 [ "${FAKE_VOLUME_EXISTS:-}" = 1 ] || exit 1
                 case "${4:-}" in
-                    '{{.Name}}') printf '%s\n' kfadapter_db_data ;;
+                    '{{.Name}}') printf '%s\n' chinadapter_db_data ;;
                     '{{.Driver}}') printf '%s\n' local ;;
                     '{{.Mountpoint}}') printf '%s\n' "${FAKE_STATE_MOUNTPOINT:?}" ;;
                     '{{json .Options}}') printf '%s\n' null ;;
@@ -95,18 +98,19 @@ run_preflight() {
     image_repository=$1
     image_digest=$2
     (
-        unset KFADAPTER_IMAGE_REPOSITORY KFADAPTER_IMAGE_DIGEST
-        [ -z "$image_repository" ] || export KFADAPTER_IMAGE_REPOSITORY="$image_repository"
-        export KFADAPTER_IMAGE_DIGEST="$image_digest"
+        unset CHINADAPTER_IMAGE_REPOSITORY CHINADAPTER_IMAGE_DIGEST
+        [ -z "$image_repository" ] || export CHINADAPTER_IMAGE_REPOSITORY="$image_repository"
+        export CHINADAPTER_IMAGE_DIGEST="$image_digest"
         DOCKER_HOST=unix:///var/run/docker.sock \
             PATH="$work/bin:$PATH" \
             FAKE_DOCKER_LOG="$work/docker.log" \
             FAKE_VOLUME_EXISTS="${FAKE_VOLUME_EXISTS:-}" \
+            FAKE_LEGACY_VOLUME_EXISTS="${FAKE_LEGACY_VOLUME_EXISTS:-}" \
             FAKE_STATE_MOUNTPOINT="${FAKE_STATE_MOUNTPOINT:-$work/state}" \
             FAKE_EXPECTED_IMAGE_REPOSITORY="$image_repository" \
             FAKE_EXPECTED_IMAGE_DIGEST="$image_digest" \
-            KFADAPTER_HOST_UID="$actual_uid" \
-            KFADAPTER_HOST_GID="$actual_gid" \
+            CHINADAPTER_HOST_UID="$actual_uid" \
+            CHINADAPTER_HOST_GID="$actual_gid" \
             "$work/scripts/preflight.sh"
     )
 }
@@ -141,9 +145,9 @@ grep -Fqx 'preflight: passed' "$work/override-output" || fail "repository overri
 grep -Fq 'compose --env-file /dev/null -f ' "$work/docker.log" || fail "repository override preflight did not validate production Compose with project .env disabled"
 
 : >"$work/docker.log"
-FAKE_VOLUME_EXISTS=1 run_preflight "" "$IMAGE_DIGEST" >"$work/existing-output" 2>&1 || fail "preflight rejected a valid existing kfadapter_db_data volume"
+FAKE_VOLUME_EXISTS=1 run_preflight "" "$IMAGE_DIGEST" >"$work/existing-output" 2>&1 || fail "preflight rejected a valid existing chinadapter_db_data volume"
 grep -Fqx 'preflight: passed' "$work/existing-output" || fail "existing-volume preflight did not report success"
-grep -Fq 'volume inspect --format {{.Mountpoint}} kfadapter_db_data' "$work/docker.log" || fail "existing-volume preflight did not resolve the managed mountpoint"
+grep -Fq 'volume inspect --format {{.Mountpoint}} chinadapter_db_data' "$work/docker.log" || fail "existing-volume preflight did not resolve the managed mountpoint"
 
 chmod 0755 "$work/state"
 : >"$work/docker.log"
@@ -156,12 +160,63 @@ if grep -Fq 'compose --env-file /dev/null -f ' "$work/docker.log"; then
     fail "unsafe existing state reached Compose validation"
 fi
 
-assert_preflight_rejected tagged-repository 'registry.invalid/kfadapter:latest' "$IMAGE_DIGEST" 'KFADAPTER_IMAGE_REPOSITORY must be an untagged registry repository'
-assert_preflight_rejected numeric-tag-repository 'kfadapter:5000' "$IMAGE_DIGEST" 'KFADAPTER_IMAGE_REPOSITORY must be an untagged registry repository'
-assert_preflight_rejected digest-qualified-repository "registry.invalid/kfadapter@$IMAGE_DIGEST" "$IMAGE_DIGEST" 'KFADAPTER_IMAGE_REPOSITORY must be an untagged registry repository'
-assert_preflight_rejected invalid-repository 'https://registry.invalid/kfadapter' "$IMAGE_DIGEST" 'KFADAPTER_IMAGE_REPOSITORY must be an untagged registry repository'
-assert_preflight_rejected missing-digest '' '' 'KFADAPTER_IMAGE_DIGEST is required in production mode'
-assert_preflight_rejected short-digest '' 'sha256:0' 'KFADAPTER_IMAGE_DIGEST must be sha256:<64-lowercase-hex>'
-assert_preflight_rejected uppercase-digest '' 'sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' 'KFADAPTER_IMAGE_DIGEST must be sha256:<64-lowercase-hex>'
+assert_preflight_rejected tagged-repository 'registry.invalid/chinadapter:latest' "$IMAGE_DIGEST" 'CHINADAPTER_IMAGE_REPOSITORY must be an untagged registry repository'
+assert_preflight_rejected numeric-tag-repository 'chinadapter:5000' "$IMAGE_DIGEST" 'CHINADAPTER_IMAGE_REPOSITORY must be an untagged registry repository'
+assert_preflight_rejected digest-qualified-repository "registry.invalid/chinadapter@$IMAGE_DIGEST" "$IMAGE_DIGEST" 'CHINADAPTER_IMAGE_REPOSITORY must be an untagged registry repository'
+assert_preflight_rejected invalid-repository 'https://registry.invalid/chinadapter' "$IMAGE_DIGEST" 'CHINADAPTER_IMAGE_REPOSITORY must be an untagged registry repository'
+assert_preflight_rejected missing-digest '' '' 'CHINADAPTER_IMAGE_DIGEST is required in production mode'
+assert_preflight_rejected short-digest '' 'sha256:0' 'CHINADAPTER_IMAGE_DIGEST must be sha256:<64-lowercase-hex>'
+assert_preflight_rejected uppercase-digest '' 'sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' 'CHINADAPTER_IMAGE_DIGEST must be sha256:<64-lowercase-hex>'
+
+# Pre-rename KFADAPTER_* variables are no longer read, so every mode rejects
+# them before contacting Docker instead of silently using the defaults.
+: >"$work/docker.log"
+if (
+    export KFADAPTER_IMAGE_DIGEST="$IMAGE_DIGEST"
+    run_preflight "" "$IMAGE_DIGEST"
+) >"$work/legacy-env-output" 2>&1; then
+    fail "production preflight accepted a renamed KFADAPTER_IMAGE_DIGEST variable"
+fi
+grep -Fq 'no longer read: KFADAPTER_IMAGE_DIGEST;' "$work/legacy-env-output" || fail "renamed production variable was not diagnosed"
+grep -Fq 'set the matching CHINADAPTER_* variables instead' "$work/legacy-env-output" || fail "renamed production variable diagnostic did not name the replacement"
+[ ! -s "$work/docker.log" ] || fail "renamed production variable reached Docker"
+
+run_state_only() {
+    PATH="$work/bin:$PATH" \
+        FAKE_DOCKER_LOG="$work/docker.log" \
+        CHINADAPTER_HOST_UID="$actual_uid" \
+        CHINADAPTER_HOST_GID="$actual_gid" \
+        "$work/scripts/preflight.sh" --state-only --state-dir "$work/state"
+}
+run_state_only >"$work/state-only-output" 2>&1 || fail "state-only preflight rejected a valid empty state directory"
+if (
+    export KFADAPTER_STATE_DIR="$work/state" KFADAPTER_HOST_UID="$actual_uid"
+    run_state_only
+) >"$work/legacy-state-env-output" 2>&1; then
+    fail "state-only preflight accepted renamed KFADAPTER_* variables"
+fi
+grep -Fq 'no longer read: KFADAPTER_HOST_UID KFADAPTER_STATE_DIR;' "$work/legacy-state-env-output" || fail "renamed state variables were not all diagnosed"
+
+# A host deployed before the rename still holds its state in kfadapter_db_data;
+# production preflight must send it to the migration instead of a first run.
+: >"$work/docker.log"
+if FAKE_VOLUME_EXISTS='' FAKE_LEGACY_VOLUME_EXISTS=1 run_preflight "" "$IMAGE_DIGEST" >"$work/legacy-volume-output" 2>&1; then
+    fail "preflight accepted a host that has only the pre-rename state volume"
+fi
+unset FAKE_VOLUME_EXISTS FAKE_LEGACY_VOLUME_EXISTS
+grep -Fq 'found the pre-rename kfadapter_db_data state volume but no chinadapter_db_data volume' "$work/legacy-volume-output" ||
+    fail "unmigrated legacy state volume was not diagnosed"
+grep -Fq 'sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY,CHINADAPTER_IMAGE_DIGEST scripts/migrate-legacy-state.sh' "$work/legacy-volume-output" ||
+    fail "unmigrated legacy state volume diagnostic did not name the migration command"
+if grep -Fq 'compose --env-file /dev/null -f ' "$work/docker.log"; then
+    fail "unmigrated legacy state volume reached Compose validation"
+fi
+
+: >"$work/docker.log"
+FAKE_VOLUME_EXISTS=1 FAKE_LEGACY_VOLUME_EXISTS=1 run_preflight "" "$IMAGE_DIGEST" >"$work/retained-legacy-output" 2>&1 ||
+    fail "preflight rejected a migrated host that retains the pre-rename volume"
+unset FAKE_VOLUME_EXISTS FAKE_LEGACY_VOLUME_EXISTS
+grep -Fqx 'preflight: passed' "$work/retained-legacy-output" || fail "migrated host preflight did not report success"
+grep -Fq 'volume inspect --format {{.Mountpoint}} chinadapter_db_data' "$work/docker.log" || fail "migrated host preflight did not validate chinadapter_db_data"
 
 printf '%s\n' "preflight-test: passed"

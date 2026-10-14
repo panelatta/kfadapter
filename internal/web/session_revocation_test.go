@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -35,12 +36,12 @@ func TestLockRetriesTransientDeletionBeforeReportingSuccess(t *testing.T) {
 	persistence := &fakeBrowserSessionPersistence{}
 	backend := &fakeBackend{}
 	api := newPersistentTestAPI(t, time.Now, backend, persistence)
-	cookie, csrf := establish(t, api)
+	cookie := establish(t, api)
 	persistence.mu.Lock()
 	persistence.deleteFailures = 2
 	persistence.mu.Unlock()
 
-	locked := requestWithCSRF(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, csrf)
+	locked := request(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, testOrigin)
 	if locked.Code != http.StatusNoContent {
 		t.Fatalf("transient deletion failure was not recovered: %d %s", locked.Code, locked.Body.String())
 	}
@@ -60,8 +61,8 @@ func TestLockRetriesTransientDeletionBeforeReportingSuccess(t *testing.T) {
 func TestLockReportsPersistentFailureWhileRevokingCurrentProcess(t *testing.T) {
 	persistence := &fakeBrowserSessionPersistence{}
 	api := newPersistentTestAPI(t, time.Now, &fakeBackend{}, persistence)
-	cookie, csrf := establish(t, api)
-	session, ok := api.sessions.valid(cookie.Value)
+	cookie := establish(t, api)
+	session, ok := api.sessions.valid(context.Background(), cookie.Value)
 	if !ok {
 		t.Fatal("initial session is not active")
 	}
@@ -69,7 +70,7 @@ func TestLockReportsPersistentFailureWhileRevokingCurrentProcess(t *testing.T) {
 	persistence.deleteErr = errors.New("private database failure detail")
 	persistence.mu.Unlock()
 
-	locked := requestWithCSRF(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, csrf)
+	locked := request(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, testOrigin)
 	assertRevocationPending(t, locked)
 	if strings.Contains(locked.Body.String(), "private database failure detail") {
 		t.Fatal("raw database failure leaked into the public response")
@@ -101,29 +102,29 @@ func TestLaterLockCannotHideAnEarlierPendingRevocation(t *testing.T) {
 	persistence := &fakeBrowserSessionPersistence{}
 	backend := &fakeBackend{}
 	api := newPersistentTestAPI(t, time.Now, backend, persistence)
-	firstCookie, firstCSRF := establish(t, api)
+	firstCookie := establish(t, api)
 	persistence.mu.Lock()
 	persistence.deleteErrors = map[string]error{sessionKey(firstCookie.Value): errors.New("first session delete unavailable")}
 	persistence.mu.Unlock()
-	assertRevocationPending(t, requestWithCSRF(api, http.MethodPost, "/api/v1/access/logout", `{}`, firstCookie, firstCSRF))
+	assertRevocationPending(t, request(api, http.MethodPost, "/api/v1/access/logout", `{}`, firstCookie, testOrigin))
 
 	// Creating a new session retries pending deletions, but a remaining failure
 	// must still be reported by its later lock even if that new row is deleted.
-	secondCookie, secondSession, err := api.sessions.create()
+	secondToken, _, err := api.sessions.create(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := &http.Cookie{Name: sessionCookieName, Value: secondCookie}
-	assertRevocationPending(t, requestWithCSRF(api, http.MethodPost, "/api/v1/access/logout", `{}`, second, secondSession.csrf))
+	second := &http.Cookie{Name: sessionCookieName, Value: secondToken}
+	assertRevocationPending(t, request(api, http.MethodPost, "/api/v1/access/logout", `{}`, second, testOrigin))
 	persistence.mu.Lock()
 	persistence.deleteErrors = nil
 	persistence.mu.Unlock()
-	thirdCookie, thirdSession, err := api.sessions.create()
+	thirdToken, _, err := api.sessions.create(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	third := &http.Cookie{Name: sessionCookieName, Value: thirdCookie}
-	if locked := requestWithCSRF(api, http.MethodPost, "/api/v1/access/logout", `{}`, third, thirdSession.csrf); locked.Code != http.StatusNoContent {
+	third := &http.Cookie{Name: sessionCookieName, Value: thirdToken}
+	if locked := request(api, http.MethodPost, "/api/v1/access/logout", `{}`, third, testOrigin); locked.Code != http.StatusNoContent {
 		t.Fatalf("recovered storage lock = %d: %s", locked.Code, locked.Body.String())
 	}
 	restarted := newPersistentTestAPI(t, time.Now, backend, persistence)
@@ -139,8 +140,8 @@ type notifyingSessionPersistence struct {
 	deleted chan struct{}
 }
 
-func (p *notifyingSessionPersistence) DeleteBrowserSession(token string) error {
-	err := p.fakeBrowserSessionPersistence.DeleteBrowserSession(token)
+func (p *notifyingSessionPersistence) DeleteBrowserSession(ctx context.Context, tokenHash []byte) error {
+	err := p.fakeBrowserSessionPersistence.DeleteBrowserSession(ctx, tokenHash)
 	p.deleted <- struct{}{}
 	return err
 }
@@ -151,14 +152,17 @@ func TestShutdownCancelsRevocationBackoffWithoutDetachedRetries(t *testing.T) {
 		deleted:                       make(chan struct{}, 8),
 	}
 	api := newPersistentTestAPI(t, time.Now, &fakeBackend{}, persistence)
-	cookie, csrf := establish(t, api)
+	cookie := establish(t, api)
 	persistence.mu.Lock()
 	persistence.deleteErr = errors.New("delete unavailable")
 	persistence.mu.Unlock()
-	req := httptest.NewRequest(http.MethodPost, testOrigin+"/api/v1/access/logout", strings.NewReader(`{}`)).WithContext(api.requests)
+	// The daemon's HTTP BaseContext is canceled at shutdown; model it here.
+	shutdown, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, testOrigin+"/api/v1/access/logout", strings.NewReader(`{}`)).WithContext(shutdown)
+	req.Host = testHost
 	req.Header.Set("Origin", testOrigin)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(csrfHeaderName, csrf)
 	req.AddCookie(cookie)
 	response := httptest.NewRecorder()
 	done := make(chan struct{})
@@ -171,7 +175,7 @@ func TestShutdownCancelsRevocationBackoffWithoutDetachedRetries(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("lock did not try durable deletion")
 	}
-	api.CancelRequests()
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(time.Second):

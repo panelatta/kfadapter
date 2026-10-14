@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { ApiError } from "./api";
-import { currentConsumerURL, makeApi, nodes, readyStatus, signedOutStatus } from "./test/fixtures";
+import { currentConsumerURL, makeApi, nodes, readyStatus, signedOutStatus, updatedConsumerURL } from "./test/fixtures";
 import type { NodeRecord, StatusResponse } from "./types";
 
 function accountStatus(display: string): StatusResponse {
@@ -56,7 +56,7 @@ describe("authenticated reload ordering", () => {
     emitState(api);
     await waitFor(() => expect(api.nodes).toHaveBeenCalledTimes(2));
 
-    const newURL = `${currentConsumerURL}-new`;
+    const newURL = updatedConsumerURL;
     api.statusValue = accountStatus("new-account");
     vi.mocked(api.nodes).mockResolvedValue({ nodes: [{ ...nodes[0], group: "Current group" }] });
     vi.mocked(api.subscriptionURL).mockResolvedValue({ url: newURL });
@@ -90,7 +90,6 @@ describe("authenticated reload ordering", () => {
 
     expect(screen.getByText("new-account")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Unlock console" })).toBeNull();
-    expect(api.clearSession).not.toHaveBeenCalled();
   });
 
   it("keeps the newest load failure visible and permits a subsequent retry", async () => {

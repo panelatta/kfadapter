@@ -12,17 +12,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kfadapter/kfadapter/internal/provider"
-	"github.com/kfadapter/kfadapter/internal/selector"
-	"github.com/kfadapter/kfadapter/internal/state"
+	"github.com/cenkalti/backoff/v5"
+
+	credentialspkg "github.com/oshinop/chinadapter/internal/credentials"
+	"github.com/oshinop/chinadapter/internal/provider"
+	"github.com/oshinop/chinadapter/internal/state"
 )
 
 const (
 	defaultHandshakeTimeout = 10 * time.Second
 	defaultMaxConnections   = 1024
 	maximumMaxConnections   = 65536
-	minAcceptRetryDelay     = 5 * time.Millisecond
-	maxAcceptRetryDelay     = time.Second
 	// maxHandshakesPerClient bounds unauthenticated connections from one IP,
 	// so a single LAN host cannot hold every slot through the setup timeout.
 	maxHandshakesPerClient = 32
@@ -48,19 +48,19 @@ type SmartSelector interface {
 
 // Config defines the SOCKS listener's dependency boundaries.
 type Config struct {
-	Smart     SmartSelector
-	Snapshots SnapshotSource
-	Selectors *selector.Registry
-	Providers *provider.Registry
+	Smart           SmartSelector
+	Snapshots       SnapshotSource
+	Identity        *credentialspkg.Identity
+	InitialSnapshot *state.RuntimeSnapshot
+	Providers       *provider.Registry
 
 	DialContext      provider.DialContextFunc
 	HandshakeTimeout time.Duration
 	MaxConnections   int
 }
 
-// Server is a SOCKS5/RFC1929 frontend. Its selector registry is atomically
-// replaceable for subscription rotation; every established session retains
-// only a compact state tunnel pin, never a runtime snapshot.
+// Server is a SOCKS5/RFC1929 frontend. Each immutable auth map is built from
+// the current snapshot; established flows retain only a compact tunnel pin.
 type Server struct {
 	smart            SmartSelector
 	snapshots        SnapshotSource
@@ -68,7 +68,7 @@ type Server struct {
 	dial             provider.DialContextFunc
 	handshakeTimeout time.Duration
 	slots            chan struct{}
-	selectors        atomic.Pointer[selector.Registry]
+	credentials      atomic.Pointer[credentialRegistry]
 	revalidateEvery  time.Duration
 
 	handshakeMu sync.Mutex
@@ -81,13 +81,34 @@ type Server struct {
 	drained      chan struct{}
 }
 
+type credentialRegistry struct {
+	identity *credentialspkg.Identity
+	nodes    map[string]struct{}
+	smart    string
+}
+
+func (registry *credentialRegistry) authenticate(username, password string) bool {
+	if registry == nil {
+		return false
+	}
+	_, available := registry.nodes[username]
+	return available && registry.identity.AuthenticatePassword(password)
+}
+
+// authenticateSmart accepts the automatic-route username, which lives in its
+// own namespace and never appears in the node map.
+func (registry *credentialRegistry) authenticateSmart(username, password string) bool {
+	return registry != nil && registry.smart != "" && subtle.ConstantTimeCompare([]byte(username), []byte(registry.smart)) == 1 &&
+		registry.identity.AuthenticatePassword(password)
+}
+
 // New constructs a server. Listener selection belongs to the caller.
 func New(config Config) (*Server, error) {
 	if config.Snapshots == nil {
 		return nil, errors.New("socks: snapshot source is required")
 	}
-	if config.Selectors == nil {
-		return nil, errors.New("socks: selector registry is required")
+	if config.Identity == nil {
+		return nil, errors.New("socks: installation identity is required")
 	}
 	if config.Providers == nil {
 		return nil, errors.New("socks: provider registry is required")
@@ -114,18 +135,44 @@ func New(config Config) (*Server, error) {
 	drained := make(chan struct{})
 	close(drained)
 	server := &Server{smart: config.Smart, snapshots: config.Snapshots, providers: config.Providers, dial: dial, handshakeTimeout: timeout, slots: make(chan struct{}, maxConnections), active: make(map[net.Conn]context.CancelFunc), drained: drained, handshakes: make(map[netip.Addr]int), revalidateEvery: defaultFlowRevalidation}
-	server.selectors.Store(config.Selectors)
+	if err := server.SetCredentials(config.Identity, config.InitialSnapshot); err != nil {
+		return nil, err
+	}
 	return server, nil
 }
 
-// SetSelectors atomically adopts an immutable registry containing the current
-// subscription authority. Existing flows using old credentials end at their
-// next authorization check.
-func (s *Server) SetSelectors(registry *selector.Registry) error {
-	if s == nil || registry == nil {
-		return errors.New("socks: selector registry is required")
+// SetCredentials swaps one coherent live username map and instance password.
+func (s *Server) SetCredentials(authority *credentialspkg.Identity, snapshot *state.RuntimeSnapshot) error {
+	if s == nil || authority == nil {
+		return errors.New("socks: installation identity is required")
 	}
-	s.selectors.Store(registry)
+	nodeCount := 0
+	if snapshot != nil {
+		nodeCount = len(snapshot.Nodes)
+	}
+	next := &credentialRegistry{identity: authority, nodes: make(map[string]struct{}, nodeCount)}
+	if smart, available := authority.SmartCredentials(); available {
+		next.smart = smart.Username
+	}
+	if snapshot != nil {
+		for _, node := range snapshot.Nodes {
+			if !node.TunnelEligible() {
+				continue
+			}
+			if _, available := snapshot.Providers[node.Provider]; !available {
+				continue
+			}
+			credentials, available := authority.Credentials(node.Route())
+			if !available {
+				return credentialspkg.ErrInvalidKey
+			}
+			if _, duplicate := next.nodes[credentials.Username]; duplicate {
+				return fmt.Errorf("%w: duplicate node route", state.ErrInvalidSnapshot)
+			}
+			next.nodes[credentials.Username] = struct{}{}
+		}
+	}
+	s.credentials.Store(next)
 	return nil
 }
 
@@ -242,7 +289,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	}()
 	defer close(stop)
 
-	var acceptDelay time.Duration
+	retry := newAcceptBackOff()
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
@@ -252,14 +299,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 			if !temporaryAcceptError(err) {
 				return err
 			}
-			// Descriptor exhaustion and aborted handshakes are transient: back off
-			// like net/http instead of stopping the whole adapter.
-			if acceptDelay == 0 {
-				acceptDelay = minAcceptRetryDelay
-			} else if acceptDelay *= 2; acceptDelay > maxAcceptRetryDelay {
-				acceptDelay = maxAcceptRetryDelay
-			}
-			timer := time.NewTimer(acceptDelay)
+			timer := time.NewTimer(retry.NextBackOff())
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -268,7 +308,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 			}
 			continue
 		}
-		acceptDelay = 0
+		retry.Reset()
 		releaseHandshake, admitted := s.beginHandshake(connection.RemoteAddr())
 		if !admitted {
 			_ = connection.Close()
@@ -276,7 +316,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 		}
 		select {
 		case s.slots <- struct{}{}:
-			handlerCtx, cancel := context.WithCancel(context.WithValue(context.Background(), handshakeReleaseKey{}, releaseHandshake))
+			handlerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 			if !s.addActiveHandler(connection, cancel) {
 				cancel()
 				releaseHandshake()
@@ -289,7 +329,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 				defer s.removeActiveHandler(connection)
 				defer cancel()
 				defer releaseHandshake()
-				_ = s.HandleConn(handlerCtx, connection)
+				_ = s.handleConn(handlerCtx, connection, releaseHandshake)
 			}(connection, handlerCtx, cancel)
 		default:
 			releaseHandshake()
@@ -298,9 +338,35 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	}
 }
 
+// temporaryAcceptError reports accept failures caused by transient resource
+// pressure, such as descriptor exhaustion, rather than a closed listener.
+func temporaryAcceptError(err error) bool {
+	if errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.ENOBUFS) || errors.Is(err, syscall.ENOMEM) ||
+		errors.Is(err, syscall.ECONNABORTED) || errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func newAcceptBackOff() backoff.ExponentialBackOff {
+	return backoff.ExponentialBackOff{
+		InitialInterval: 5 * time.Millisecond, RandomizationFactor: 0,
+		Multiplier: 2, MaxInterval: time.Second,
+	}
+}
+
 // HandleConn processes one SOCKS connection. It never logs credentials,
 // tunnel material, provider extensions, or requested destinations.
 func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
+	return s.handleConn(ctx, client, nil)
+}
+
+// handleConn calls releaseHandshake, when set, once authentication succeeds,
+// so an authenticated flow no longer counts against its client's setup limit.
+func (s *Server) handleConn(ctx context.Context, client net.Conn, releaseHandshake func()) error {
 	if s == nil || client == nil {
 		return errors.New("socks: server and client are required")
 	}
@@ -326,28 +392,27 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		return err
 	}
 
-	// Authenticate credentials first, then retain only a compact state-owned
-	// tunnel pin. No runtime snapshot or selector map escapes into this flow.
+	// Look up the username in the immutable current map before comparing the
+	// shared instance password. The flow retains only its compact tunnel pin.
 	now := time.Now()
-	registry := s.selectors.Load()
+	registry := s.credentials.Load()
 	if registry == nil {
 		_ = writeAuthStatus(client, false)
 		return state.ErrSelectorUnknown
 	}
-	authenticated := registry.Authenticate(username, password)
-	if !authenticated {
+	nodeCredentials := registry.authenticate(username, password)
+	isSmart := !nodeCredentials && registry.authenticateSmart(username, password)
+	if !nodeCredentials && !isSmart {
 		_ = writeAuthStatus(client, false)
 		return state.ErrSelectorUnknown
 	}
 	routeUsername := username
-	isSmart := username == registry.SmartCredentials().Selector
 	if isSmart {
 		if s.smart == nil || !s.smart.Enabled() {
 			_ = writeAuthStatus(client, false)
 			return state.ErrSelectorUnknown
 		}
-		routeUsername, err = s.smart.Resolve()
-		if err != nil {
+		if routeUsername, err = s.smart.Resolve(); err != nil {
 			_ = writeAuthStatus(client, false)
 			return err
 		}
@@ -364,8 +429,8 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 	if err := writeAuthStatus(client, true); err != nil {
 		return err
 	}
-	if release, ok := ctx.Value(handshakeReleaseKey{}).(func()); ok {
-		release()
+	if releaseHandshake != nil {
+		releaseHandshake()
 	}
 
 	command, destination, err := readRequest(client)
@@ -386,23 +451,22 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		return errBadAddress
 	}
 	// Authentication may have completed before a client supplies CONNECT. Do
-	// not let a stalled socket create a tunnel after logout, expiry, authority
+	// not let a stalled socket create a tunnel after logout, authority
 	// refresh, selector rotation, preference exclusion, or node replacement.
 	// Re-resolving returns a compact current pin and never clones a snapshot.
 	now = time.Now()
-	registry = s.selectors.Load()
+	registry = s.credentials.Load()
 	if registry == nil {
 		_ = writeReply(client, replyGeneralFailure, target{})
 		return state.ErrSelectorUnknown
 	}
-	authenticated = registry.Authenticate(username, password)
-	if !authenticated || (isSmart && !s.smart.Enabled()) {
+	if !s.credentialsCurrent(registry, username, password, isSmart) {
 		_ = writeReply(client, replyGeneralFailure, target{})
 		return state.ErrSelectorUnknown
 	}
 	revalidatedPin, resolveErr := s.snapshots.CompactPin(routeUsername, now)
 	revalidatedNode := revalidatedPin.Node
-	if resolveErr != nil || s.selectors.Load() != registry || !samePinAuthority(pin, revalidatedPin) || !revalidatedNode.TunnelEligible() || !sameCanonicalNode(node, revalidatedNode) {
+	if resolveErr != nil || s.credentials.Load() != registry || !samePinAuthority(pin, revalidatedPin) || !revalidatedNode.TunnelEligible() || !sameCanonicalNode(node, revalidatedNode) {
 		_ = writeReply(client, replyGeneralFailure, target{})
 		if resolveErr != nil {
 			return resolveErr
@@ -421,7 +485,14 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		return err
 	}
 	var association *udpAssociation
+	var datagrams provider.DatagramTransport
 	if command == commandUDP {
+		capable, ok := transport.(provider.DatagramTransport)
+		if !ok {
+			_ = writeReply(client, replyCommandUnsupported, target{})
+			return nil
+		}
+		datagrams = capable
 		association, err = newUDPAssociation(client, destination)
 		if err != nil {
 			code := replyGeneralFailure
@@ -431,24 +502,20 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 			_ = writeReply(client, code, target{})
 			return err
 		}
-		defer association.Close()
+		defer func() { _ = association.Close() }()
 	}
 	admit := func() bool {
 		now := time.Now()
 		if !s.snapshots.SessionCurrentPin(pin, now) {
 			return false
 		}
-		currentRegistry := s.selectors.Load()
-		if currentRegistry == nil {
-			return false
-		}
-		authenticated := currentRegistry.Authenticate(username, password)
-		if !authenticated || (isSmart && !s.smart.Enabled()) {
+		currentRegistry := s.credentials.Load()
+		if !s.credentialsCurrent(currentRegistry, username, password, isSmart) {
 			return false
 		}
 		finalPin, resolveErr := s.snapshots.CompactPin(routeUsername, now)
 		finalNode := finalPin.Node
-		if resolveErr != nil || s.selectors.Load() != currentRegistry || !samePinAuthority(pin, finalPin) || !finalNode.TunnelEligible() || !sameCanonicalNode(node, finalNode) {
+		if resolveErr != nil || s.credentials.Load() != currentRegistry || !samePinAuthority(pin, finalPin) || !finalNode.TunnelEligible() || !sameCanonicalNode(node, finalNode) {
 			return false
 		}
 		pin, node = finalPin, finalNode
@@ -463,13 +530,13 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 		return nil
 	}
 	// Established flows end when their credentials are rotated or their
-	// provider account is logged out or expires, not only at disconnect.
+	// provider account is logged out, not only at disconnect.
 	relayCtx, cancelRelay := context.WithCancel(ctx)
 	defer cancelRelay()
 	stopWatch := s.watchFlow(client, cancelRelay, username, password, routeUsername, isSmart, node)
 	defer stopWatch()
 	if association != nil {
-		err = transport.RelayDatagrams(relayCtx, provider.DatagramRequest{
+		err = datagrams.RelayDatagrams(relayCtx, provider.DatagramRequest{
 			Dial: s.dial, Control: client, Packets: association, NodeHost: node.Host, NodePort: node.Port,
 			Authority: pin.Authority.Data, HandshakeTimeout: s.handshakeTimeout, Admit: admit, Ready: readyRelay,
 		})
@@ -487,14 +554,14 @@ func (s *Server) HandleConn(ctx context.Context, client net.Conn) error {
 }
 
 func samePinAuthority(left, right state.TunnelPin) bool {
-	return left.ExpiresAt.Equal(right.ExpiresAt) && left.Authority.Protocol == right.Authority.Protocol &&
+	return left.Node.Provider == right.Node.Provider && left.Node.AuthorityID == right.Node.AuthorityID && left.Authority.Protocol == right.Authority.Protocol &&
 		subtle.ConstantTimeCompare(left.Authority.Data, right.Authority.Data) == 1
 }
 
 func sameCanonicalNode(left, right state.Node) bool {
-	leftIdentity, leftErr := selector.Canonicalize(selector.NodeIdentity{NodeID: left.ID, Provider: string(left.Provider), Host: left.Host, Port: int(left.Port)})
-	rightIdentity, rightErr := selector.Canonicalize(selector.NodeIdentity{NodeID: right.ID, Provider: string(right.Provider), Host: right.Host, Port: int(right.Port)})
-	return leftErr == nil && rightErr == nil && leftIdentity == rightIdentity
+	leftKey, leftErr := provider.NodeKey(left.Route())
+	rightKey, rightErr := provider.NodeKey(right.Route())
+	return leftErr == nil && rightErr == nil && leftKey == rightKey && left.AuthorityID == right.AuthorityID
 }
 
 func targetFromAddr(address net.Addr) target {
@@ -512,9 +579,6 @@ func targetFromAddr(address net.Addr) target {
 }
 
 func dialReply(err error) byte {
-	if errors.Is(err, provider.ErrCommandUnsupported) {
-		return replyCommandUnsupported
-	}
 	if errors.Is(err, provider.ErrAddressUnsupported) {
 		return replyAddressUnsupported
 	}
@@ -540,22 +604,14 @@ func dialReply(err error) byte {
 	return replyGeneralFailure
 }
 
-// temporaryAcceptError reports listener errors that clear up on their own,
-// such as file-descriptor exhaustion or a connection reset before Accept.
-func temporaryAcceptError(err error) bool {
-	if errors.Is(err, net.ErrClosed) {
-		return false
+// credentialsCurrent re-authenticates a flow's credentials against registry.
+// The automatic route also stops authenticating once it is disabled.
+func (s *Server) credentialsCurrent(registry *credentialRegistry, username, password string, isSmart bool) bool {
+	if isSmart {
+		return registry.authenticateSmart(username, password) && s.smart != nil && s.smart.Enabled()
 	}
-	for _, errno := range []syscall.Errno{syscall.EMFILE, syscall.ENFILE, syscall.ENOBUFS, syscall.ENOMEM, syscall.ECONNABORTED, syscall.ECONNRESET, syscall.EINTR, syscall.EAGAIN} {
-		if errors.Is(err, errno) {
-			return true
-		}
-	}
-	var timeout interface{ Timeout() bool }
-	return errors.As(err, &timeout) && timeout.Timeout()
+	return registry.authenticate(username, password)
 }
-
-type handshakeReleaseKey struct{}
 
 // beginHandshake admits a new connection unless its client IP already has
 // maxHandshakesPerClient connections that have not finished authentication.
@@ -595,8 +651,9 @@ func remoteIP(remote net.Addr) (netip.Addr, bool) {
 	return address.Unmap(), ok
 }
 
-// watchFlow cancels the transport and closes client once the flow's selector
+// watchFlow cancels the transport and closes client once the flow's
 // credentials stop authenticating or its node leaves the provider snapshot.
+// Authority bytes rotate on every provider refresh, so they are not compared.
 func (s *Server) watchFlow(client net.Conn, cancel context.CancelFunc, username, password, routeUsername string, isSmart bool, node state.Node) func() {
 	interval := s.revalidateEvery
 	if interval <= 0 {
@@ -624,8 +681,7 @@ func (s *Server) watchFlow(client net.Conn, cancel context.CancelFunc, username,
 }
 
 func (s *Server) flowAuthorized(username, password, routeUsername string, isSmart bool, node state.Node) bool {
-	registry := s.selectors.Load()
-	if registry == nil || !registry.Authenticate(username, password) || (isSmart && (s.smart == nil || !s.smart.Enabled())) {
+	if !s.credentialsCurrent(s.credentials.Load(), username, password, isSmart) {
 		return false
 	}
 	pin, err := s.snapshots.CompactPin(routeUsername, time.Now())

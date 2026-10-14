@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/kfadapter/kfadapter/internal/provider"
-	"github.com/kfadapter/kfadapter/internal/state"
+	"github.com/oshinop/chinadapter/internal/provider"
+	"github.com/oshinop/chinadapter/internal/state"
 )
 
 // tunnelProbe measures provider handshake, verified TLS, and HTTP headers.
@@ -91,7 +91,7 @@ func measureHTTPS(ctx context.Context, pin state.TunnelPin, target Target, manag
 		result.Error = "invalid_target"
 		return result
 	}
-	request.Header.Set("User-Agent", "Mozilla/5.0 (compatible; kfadapter-probe/1.0)")
+	request.Header.Set("User-Agent", "Mozilla/5.0 (compatible; chinadapter-probe/1.0)")
 	response, err := client.Do(request)
 	if err != nil {
 		result.Error = probeError(ctx, err)

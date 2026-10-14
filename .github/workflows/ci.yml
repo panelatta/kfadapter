@@ -13,9 +13,6 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  IMAGE_NAME: ghcr.io/${{ github.repository }}
-
 jobs:
   verify:
     runs-on: ubuntu-24.04
@@ -23,10 +20,7 @@ jobs:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
       - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          # Track the newest 1.26 patch release so standard-library security
-          # fixes land without a workflow edit; govulncheck below enforces it.
-          go-version: '1.26.x'
-          check-latest: true
+          go-version: '1.26.9'
           cache-dependency-path: go.sum
       - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
         with:
@@ -40,34 +34,53 @@ jobs:
           npm run lint
           npm run build
           npm test
-      - name: Vet Go
-        run: go vet ./...
-      - name: Staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
-      - name: Govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-      - name: Test Go
-        run: go test -race ./...
+      - name: Vet and test Go
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
       - name: Validate Compose
         env:
-          KFADAPTER_IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+          CHINADAPTER_IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
         run: |
           docker compose --env-file /dev/null -f compose.yaml config --quiet
-          docker compose --env-file /dev/null --project-name kfadapter-local -f deploy/compose.local-build.yaml config --quiet
+          docker compose --env-file /dev/null --project-name chinadapter-local -f deploy/compose.local-build.yaml config --quiet
       - name: Build and smoke-test image
         run: |
-          docker build --build-arg VERSION=0.0.0-ci -t kfadapter:ci .
-          docker run --rm kfadapter:ci version
+          docker build --build-arg VERSION=0.0.0-ci -t chinadapter:ci .
+          docker run --rm chinadapter:ci version
       - name: Assert image security structure
-        run: ./scripts/check-image-security.sh kfadapter:ci
+        run: ./scripts/check-image-security.sh chinadapter:ci
       - name: Prove local Compose first-run state initialization
-        run: ./scripts/check-local-compose-first-run.sh kfadapter:ci
+        run: ./scripts/check-local-compose-first-run.sh chinadapter:ci
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.26.9'
+          cache-dependency-path: go.sum
+      - uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8
+        with:
+          version: v2.14.0
+
+  vulncheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.26.9'
+          cache-dependency-path: go.sum
+      - name: Scan reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   deployment:
     name: Deployment scripts
     runs-on: ubuntu-24.04
     env:
-      KFADAPTER_IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      CHINADAPTER_IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
       - name: Assert static deployment supply-chain contract
@@ -78,6 +91,8 @@ jobs:
           ./scripts/check-restore-commit.sh
           ./scripts/check-backup-state.sh
           ./scripts/check-upgrade.sh
+      - name: Assert pre-rename state migration and rollback
+        run: ./scripts/check-migrate-legacy-state.sh
       - name: Assert config-derived healthcheck
         run: ./scripts/check-configured-healthcheck.sh
       - name: Assert first-run and existing-volume preflight behavior
@@ -85,18 +100,21 @@ jobs:
       - name: Assert developer Compose isolation with inherited environment
         run: sh scripts/check-local-compose-isolation.sh
       - name: Validate deployment preflight
-        run: sudo --preserve-env=KFADAPTER_IMAGE_DIGEST ./scripts/preflight.sh
+        run: sudo --preserve-env=CHINADAPTER_IMAGE_DIGEST ./scripts/preflight.sh
       - name: Assert Compose isolation structure
-        run: ./scripts/check-compose-security.py --image-repository registry.invalid/kfadapter-override --image-digest "$KFADAPTER_IMAGE_DIGEST"
+        run: ./scripts/check-compose-security.py --image-repository registry.invalid/chinadapter-override --image-digest "$CHINADAPTER_IMAGE_DIGEST"
 
   publish:
     # Images are published only from commits whose verification passed.
-    needs: [verify, deployment]
-    if: github.event_name == 'push'
+    needs: [verify, lint, vulncheck, deployment]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+    env:
+      # The image keeps the project name even though this repository does not.
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/chinadapter
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
       - name: Select image tag and labels
@@ -107,6 +125,18 @@ jobs:
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=match,pattern=^v(.+)$,group=1
+      - name: Select build version
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          TAG_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then
+            version="$TAG_VERSION"
+          else
+            version="0.0.0+${GITHUB_SHA:0:12}"
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to GitHub Container Registry
@@ -125,22 +155,25 @@ jobs:
           sbom: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
-          build-args: VERSION=${{ github.ref_type == 'tag' && steps.metadata.outputs.version || '0.0.0' }}
-          cache-from: type=gha,scope=kfadapter-image
-          cache-to: type=gha,mode=max,scope=kfadapter-image,ignore-error=true
+          build-args: VERSION=${{ steps.version.outputs.value }}
+          cache-from: type=gha,scope=chinadapter-image
+          cache-to: type=gha,mode=max,scope=chinadapter-image,ignore-error=true
       - name: Record image digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.version.outputs.value }}
         run: |
           {
             echo "### Published image"
             echo
             echo "Image: \`$IMAGE_NAME@$DIGEST\`"
             echo
+            echo "Version: \`$VERSION\`"
+            echo
             echo '```sh'
-            echo "export KFADAPTER_IMAGE_REPOSITORY=$IMAGE_NAME"
-            echo "export KFADAPTER_IMAGE_DIGEST=$DIGEST"
-            echo 'sudo --preserve-env=KFADAPTER_IMAGE_REPOSITORY,KFADAPTER_IMAGE_DIGEST scripts/preflight.sh'
+            echo "export CHINADAPTER_IMAGE_REPOSITORY=$IMAGE_NAME"
+            echo "export CHINADAPTER_IMAGE_DIGEST=$DIGEST"
+            echo 'sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY,CHINADAPTER_IMAGE_DIGEST scripts/preflight.sh'
             echo 'docker compose --env-file /dev/null -f compose.yaml up -d'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

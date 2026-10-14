@@ -5,11 +5,13 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
 state_dir=
-manual_state_dir=${KFADAPTER_STATE_DIR:-${STATE_DIR:-}}
-STATE_UID=${KFADAPTER_HOST_UID:-65532}
-STATE_GID=${KFADAPTER_HOST_GID:-65532}
-IMAGE_REPOSITORY=${KFADAPTER_IMAGE_REPOSITORY:-}
-IMAGE_DIGEST=${KFADAPTER_IMAGE_DIGEST:-}
+manual_state_dir=${CHINADAPTER_STATE_DIR:-${STATE_DIR:-}}
+STATE_UID=${CHINADAPTER_HOST_UID:-65532}
+STATE_GID=${CHINADAPTER_HOST_GID:-65532}
+IMAGE_REPOSITORY=${CHINADAPTER_IMAGE_REPOSITORY:-}
+IMAGE_DIGEST=${CHINADAPTER_IMAGE_DIGEST:-}
+STATE_VOLUME=chinadapter_db_data
+LEGACY_STATE_VOLUME=kfadapter_db_data
 LOCAL_BUILD=0
 STATE_ONLY=0
 RESTORE_EXISTING=0
@@ -19,28 +21,52 @@ fail() {
     exit 1
 }
 
-if [ -n "${KFADAPTER_STATE_DIR:-}" ] && [ -n "${STATE_DIR:-}" ] && [ "$KFADAPTER_STATE_DIR" != "$STATE_DIR" ]; then
-    fail "KFADAPTER_STATE_DIR and STATE_DIR must match when both are set"
+# kfadapter was renamed to chinadapter. A leftover KFADAPTER_* variable is no
+# longer read, so honoring the defaults silently could deploy a different image
+# or validate a different state owner than the operator intended.
+reject_legacy_environment() {
+    legacy_names=$(env | sed -n 's/^\(KFADAPTER_[A-Za-z0-9_]*\)=.*/\1/p' | sort -u | tr '\n' ' ')
+    legacy_names=${legacy_names% }
+    [ -z "$legacy_names" ] ||
+        fail "kfadapter was renamed to chinadapter and these environment variables are no longer read: $legacy_names; set the matching CHINADAPTER_* variables instead (for example CHINADAPTER_IMAGE_DIGEST) and unset the KFADAPTER_* ones"
+}
+
+# A host deployed before the rename keeps its state in kfadapter_db_data.
+# Starting chinadapter beside it would initialize empty state instead.
+reject_unmigrated_legacy_volume() {
+    available_volumes=$(docker volume ls --format '{{.Name}}') || fail "could not list Docker volumes"
+    if printf '%s\n' "$available_volumes" | grep -Fx -- "$LEGACY_STATE_VOLUME" >/dev/null; then
+        fail "found the pre-rename $LEGACY_STATE_VOLUME state volume but no $STATE_VOLUME volume; migrate the existing state first with: sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY,CHINADAPTER_IMAGE_DIGEST scripts/migrate-legacy-state.sh"
+    fi
+}
+
+reject_legacy_environment
+
+if [ -n "${CHINADAPTER_STATE_DIR:-}" ] && [ -n "${STATE_DIR:-}" ] && [ "$CHINADAPTER_STATE_DIR" != "$STATE_DIR" ]; then
+    fail "CHINADAPTER_STATE_DIR and STATE_DIR must match when both are set"
 fi
 
 usage() {
     cat >&2 <<'USAGE'
 usage: scripts/preflight.sh [--local-build] [--state-only] [--restore-existing] [--state-dir DIR] [--image-repository REPOSITORY] [--image-digest DIGEST]
 
-Production mode requires an immutable KFADAPTER_IMAGE_DIGEST=sha256:<64-hex>
+Production mode requires an immutable CHINADAPTER_IMAGE_DIGEST=sha256:<64-hex>
 and the Compose-managed protected Docker state volume. The repository defaults
-to ghcr.io/panelatta/kfadapter; set KFADAPTER_IMAGE_REPOSITORY to an untagged
+to ghcr.io/panelatta/chinadapter; set CHINADAPTER_IMAGE_REPOSITORY to an untagged
 repository only for migration or exact rollback. After preflight passes, run
 docker compose --env-file /dev/null -f compose.yaml up -d so project .env
 cannot change the validated image inputs. --local-build validates the
 isolated developer Compose file and its Docker-managed state volume. Use
---project-name kfadapter-local on every developer Compose command to override
+--project-name chinadapter-local on every developer Compose command to override
 an inherited COMPOSE_PROJECT_NAME. For
-rootless Docker or userns-remap production, set KFADAPTER_HOST_UID and
-KFADAPTER_HOST_GID to the mapped state owner. For manual or test state-only
-validation, set KFADAPTER_STATE_DIR (or STATE_DIR) to an explicit state directory.
+rootless Docker or userns-remap production, set CHINADAPTER_HOST_UID and
+CHINADAPTER_HOST_GID to the mapped state owner. For manual or test state-only
+validation, set CHINADAPTER_STATE_DIR (or STATE_DIR) to an explicit state directory.
 --restore-existing is only for offline recovery: it checks the safety of old
 regular state files without requiring a healthy payload size or layout.
+A host that still has only the pre-rename kfadapter_db_data volume must first
+run scripts/migrate-legacy-state.sh; KFADAPTER_* variables are rejected
+because the project now reads only CHINADAPTER_* variables.
 USAGE
     exit 2
 }
@@ -86,13 +112,13 @@ if [ "$RESTORE_EXISTING" -eq 1 ] && { [ "$STATE_ONLY" -eq 1 ] || [ "$LOCAL_BUILD
 fi
 
 if [ -n "$state_dir" ] && [ -n "$manual_state_dir" ] && [ "$state_dir" != "$manual_state_dir" ]; then
-    fail "--state-dir must match KFADAPTER_STATE_DIR or STATE_DIR when both are set"
+    fail "--state-dir must match CHINADAPTER_STATE_DIR or STATE_DIR when both are set"
 fi
 if [ -z "$state_dir" ] && [ -n "$manual_state_dir" ]; then
     state_dir=$manual_state_dir
 fi
 if [ "$STATE_ONLY" -ne 1 ] && [ -n "$manual_state_dir" ]; then
-    fail "KFADAPTER_STATE_DIR and STATE_DIR are supported only with --state-only"
+    fail "CHINADAPTER_STATE_DIR and STATE_DIR are supported only with --state-only"
 fi
 
 resolve_state_dir() {
@@ -112,6 +138,7 @@ resolve_production_state_dir() {
         state_resolution_status=$?
     fi
     [ "$state_resolution_status" -eq 3 ] || fail "could not resolve Docker state volume"
+    reject_unmigrated_legacy_volume
     [ -z "$state_dir" ] || fail "production state directory must be the Compose-managed Docker volume mountpoint"
     return 1
 }
@@ -140,11 +167,11 @@ validate_state() {
 
 validate_image() {
     if [ -n "$IMAGE_REPOSITORY" ] && ! printf '%s\n' "$IMAGE_REPOSITORY" | grep -Eq '^([a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+)$'; then
-        fail "KFADAPTER_IMAGE_REPOSITORY must be an untagged registry repository"
+        fail "CHINADAPTER_IMAGE_REPOSITORY must be an untagged registry repository"
     fi
-    [ -n "$IMAGE_DIGEST" ] || fail "KFADAPTER_IMAGE_DIGEST is required in production mode"
+    [ -n "$IMAGE_DIGEST" ] || fail "CHINADAPTER_IMAGE_DIGEST is required in production mode"
     if ! printf '%s\n' "$IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
-        fail "KFADAPTER_IMAGE_DIGEST must be sha256:<64-lowercase-hex>"
+        fail "CHINADAPTER_IMAGE_DIGEST must be sha256:<64-lowercase-hex>"
     fi
 }
 
@@ -172,7 +199,7 @@ fi
 validate_native_docker
 if [ "$LOCAL_BUILD" -eq 1 ]; then
     command -v python3 >/dev/null 2>&1 || fail "python3 is required for developer Compose isolation validation"
-    local_config=$(docker compose --env-file /dev/null --project-name kfadapter-local \
+    local_config=$(docker compose --env-file /dev/null --project-name chinadapter-local \
         -f "$PROJECT_ROOT/deploy/compose.local-build.yaml" config --format json) ||
         fail "could not render developer Compose configuration"
     printf '%s\n' "$local_config" | python3 "$SCRIPT_DIR/verify-local-compose.py" ||
@@ -182,8 +209,8 @@ else
         validate_state
     fi
     validate_image
-    export KFADAPTER_IMAGE_REPOSITORY=$IMAGE_REPOSITORY
-    export KFADAPTER_IMAGE_DIGEST=$IMAGE_DIGEST
+    export CHINADAPTER_IMAGE_REPOSITORY=$IMAGE_REPOSITORY
+    export CHINADAPTER_IMAGE_DIGEST=$IMAGE_DIGEST
     docker compose --env-file /dev/null -f "$PROJECT_ROOT/compose.yaml" config --quiet
 
 fi

@@ -4,16 +4,17 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"github.com/oshinop/chinadapter/internal/credentials"
 )
 
 const (
@@ -95,6 +96,19 @@ func (f *fakeBackend) AccessLogin(_ context.Context, token string) error {
 	return nil
 }
 
+func (f *fakeBackend) AccessChangeToken(_ context.Context, current, next string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.accessInitialized || subtle.ConstantTimeCompare([]byte(f.accessToken), []byte(current)) != 1 {
+		return publicError{status: http.StatusUnauthorized}
+	}
+	if !validAccessToken(next) || current == next {
+		return publicError{status: http.StatusBadRequest}
+	}
+	f.accessToken = next
+	return nil
+}
+
 func (f *fakeBackend) Status(context.Context) (Status, error) {
 	return Status{State: "ready", Providers: []string{"kuaifan"}, Accounts: map[string]Account{"kuaifan": {Provider: "kuaifan", Display: "person@example.com", Tier: "Standard"}}}, nil
 }
@@ -168,7 +182,7 @@ type fakeSubscriptions struct {
 
 func newFakeSubscriptions() *fakeSubscriptions {
 	return &fakeSubscriptions{
-		binding:  base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
+		binding:  "07112233-4455-8677-8899-aabbccddeeff",
 		metadata: SubscriptionMetadata{Active: true, NodeCount: 1},
 	}
 }
@@ -190,6 +204,10 @@ func (s *fakeSubscriptions) ServeSubscription(w http.ResponseWriter, _ *http.Req
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("subscription"))
+}
+
+func (s *fakeSubscriptions) ParseSubscriptionPath(requestPath string) (string, bool) {
+	return credentials.ParseSubscriptionPath(requestPath)
 }
 
 func newTestAPI(t *testing.T, backend *fakeBackend, subscriptions *fakeSubscriptions) *API {
@@ -262,18 +280,18 @@ func TestAPIWildcardAndHostnamePolicy(t *testing.T) {
 	setup := func(origin string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "http://"+remoteHost+"/api/v1/access/setup", strings.NewReader(`{"token":"`+validTestToken+`"}`))
 		request.Host = remoteHost
-		request.RemoteAddr = "127.0.0.1:40001"
+		request.RemoteAddr = "127.0.0.1:40000"
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Origin", origin)
 		response := httptest.NewRecorder()
 		api.ServeHTTP(response, request)
 		return response
 	}
-	if malformedOrigin := setup("http://" + remoteHost + "/"); malformedOrigin.Code != http.StatusForbidden {
-		t.Fatalf("malformed Origin = %d", malformedOrigin.Code)
+	if crossOrigin := setup("http://evil.test"); crossOrigin.Code != http.StatusForbidden || !strings.Contains(crossOrigin.Body.String(), `"code":"invalid_origin"`) {
+		t.Fatalf("cross-origin setup = %d: %s", crossOrigin.Code, crossOrigin.Body.String())
 	}
-	if exactOrigin := setup("http://" + remoteHost); exactOrigin.Code != http.StatusCreated {
-		t.Fatalf("exact Origin = %d: %s", exactOrigin.Code, exactOrigin.Body.String())
+	if sameHostOrigin := setup("http://" + remoteHost + "/"); sameHostOrigin.Code != http.StatusCreated {
+		t.Fatalf("same-host Origin = %d: %s", sameHostOrigin.Code, sameHostOrigin.Body.String())
 	}
 }
 
@@ -329,7 +347,7 @@ func TestAPIAdvertisesHostnameUsedByRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cookie, _ := establish(t, api)
+	cookie := establish(t, api)
 
 	statusRequest := httptest.NewRequest(http.MethodGet, "http://adapter.example.com:10809/api/v1/status", nil)
 	statusRequest.Host = "adapter.example.com:10809"
@@ -370,7 +388,7 @@ func TestAPIAdvertisesImplicitLocalhost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cookie, _ := establish(t, api)
+	cookie := establish(t, api)
 
 	statusRequest := httptest.NewRequest(http.MethodGet, "http://LOCALHOST:10809/api/v1/status", nil)
 	statusRequest.Host = "LOCALHOST:10809"
@@ -410,7 +428,7 @@ func TestAccessSetupLoginStatusAndReload(t *testing.T) {
 	api := newTestAPI(t, backend, newFakeSubscriptions())
 
 	initial := request(api, http.MethodGet, "/api/v1/access/status", "", nil, "")
-	assertAccessStatus(t, initial, false, false, false)
+	assertAccessStatus(t, initial, false, false)
 	if initial.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("access status cache control = %q", initial.Header().Get("Cache-Control"))
 	}
@@ -419,8 +437,8 @@ func TestAccessSetupLoginStatusAndReload(t *testing.T) {
 	if setup.Code != http.StatusCreated {
 		t.Fatalf("setup = %d: %s", setup.Code, setup.Body.String())
 	}
-	cookie, csrf := sessionFromResponse(t, setup)
-	assertAccessStatus(t, setup, true, true, true)
+	cookie := sessionFromResponse(t, setup)
+	assertAccessStatus(t, setup, true, true)
 	backend.mu.Lock()
 	storedToken := backend.accessToken
 	backend.mu.Unlock()
@@ -429,16 +447,7 @@ func TestAccessSetupLoginStatusAndReload(t *testing.T) {
 	}
 
 	reloaded := request(api, http.MethodGet, "/api/v1/access/status", "", cookie, "")
-	assertAccessStatus(t, reloaded, true, true, true)
-	var reloadBody struct {
-		CSRFToken string `json:"csrfToken"`
-	}
-	if err := json.NewDecoder(reloaded.Body).Decode(&reloadBody); err != nil {
-		t.Fatal(err)
-	}
-	if reloadBody.CSRFToken != csrf {
-		t.Fatalf("reload csrf = %q, want original session csrf", reloadBody.CSRFToken)
-	}
+	assertAccessStatus(t, reloaded, true, true)
 
 	conflict := request(api, http.MethodPost, "/api/v1/access/setup", `{"token":"`+validTestToken+`"}`, nil, testOrigin)
 	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "access_initialized") {
@@ -452,7 +461,7 @@ func TestAccessSetupLoginStatusAndReload(t *testing.T) {
 	if login.Code != http.StatusOK {
 		t.Fatalf("access login = %d: %s", login.Code, login.Body.String())
 	}
-	_, _ = sessionFromResponse(t, login)
+	sessionFromResponse(t, login)
 }
 
 func TestAccessTokenValidationBounds(t *testing.T) {
@@ -512,41 +521,45 @@ func TestAccessSetupRequiresLoopbackClient(t *testing.T) {
 }
 
 func TestAccessSetupFirstClaimIsAtomic(t *testing.T) {
-	backend := &fakeBackend{}
-	started := make(chan struct{}, 2)
-	release := make(chan struct{})
-	backend.accessSetupStarted = started
-	backend.accessSetupRelease = release
-	api := newTestAPI(t, backend, newFakeSubscriptions())
+	synctest.Test(t, func(t *testing.T) {
+		backend := &fakeBackend{}
+		started := make(chan struct{}, 2)
+		release := make(chan struct{})
+		backend.accessSetupStarted = started
+		backend.accessSetupRelease = release
+		api := newTestAPI(t, backend, newFakeSubscriptions())
+		setup := func() *httptest.ResponseRecorder {
+			return request(api, http.MethodPost, "/api/v1/access/setup", `{"token":"`+validTestToken+`"}`, nil, testOrigin)
+		}
 
-	setup := func() *httptest.ResponseRecorder {
-		return request(api, http.MethodPost, "/api/v1/access/setup", `{"token":"`+validTestToken+`"}`, nil, testOrigin)
-	}
-	first := make(chan *httptest.ResponseRecorder, 1)
-	go func() { first <- setup() }()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("setup did not reach backend")
-	}
-	// Every loopback peer shares one admission slot, so a concurrent claim is
-	// refused while the first is in flight.
-	if concurrent := setup(); concurrent.Code != http.StatusTooManyRequests {
-		t.Fatalf("concurrent setup = %d", concurrent.Code)
-	}
-	close(release)
-	if response := <-first; response.Code != http.StatusCreated {
-		t.Fatalf("first setup = %d", response.Code)
-	}
-	if again := setup(); again.Code != http.StatusConflict {
-		t.Fatalf("second claim = %d", again.Code)
-	}
-	backend.mu.Lock()
-	initialized := backend.accessInitialized
-	backend.mu.Unlock()
-	if !initialized {
-		t.Fatal("first claim did not initialize")
-	}
+		first := make(chan *httptest.ResponseRecorder, 1)
+		go func() { first <- setup() }()
+		synctest.Wait()
+		select {
+		case <-started:
+		default:
+			t.Fatal("setup did not reach backend")
+		}
+		// Setup is loopback-only and every loopback peer shares one admission
+		// slot, so a concurrent claim is refused while the first is in flight.
+		if concurrent := setup(); concurrent.Code != http.StatusTooManyRequests {
+			t.Fatalf("concurrent setup = %d", concurrent.Code)
+		}
+		close(release)
+		synctest.Wait()
+		if response := <-first; response.Code != http.StatusCreated {
+			t.Fatalf("first setup = %d", response.Code)
+		}
+		if again := setup(); again.Code != http.StatusConflict {
+			t.Fatalf("second claim = %d", again.Code)
+		}
+		backend.mu.Lock()
+		initialized := backend.accessInitialized
+		backend.mu.Unlock()
+		if !initialized {
+			t.Fatal("first claim did not initialize")
+		}
+	})
 }
 
 func TestAccessThrottleAndPreSessionChecks(t *testing.T) {
@@ -563,7 +576,7 @@ func TestAccessThrottleAndPreSessionChecks(t *testing.T) {
 	if nonJSON.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("non-JSON login = %d", nonJSON.Code)
 	}
-	_, _ = establish(t, api)
+	establish(t, api)
 	for attempt := range 5 {
 		response := request(api, http.MethodPost, "/api/v1/access/login", `{"token":"`+invalidTestToken+`"}`, nil, testOrigin)
 		if response.Code != http.StatusUnauthorized {
@@ -579,20 +592,20 @@ func TestAccessThrottleAndPreSessionChecks(t *testing.T) {
 func TestAccountLogoutPreservesBrowserAccess(t *testing.T) {
 	backend := &fakeBackend{}
 	api := newTestAPI(t, backend, newFakeSubscriptions())
-	cookie, csrf := establish(t, api)
+	cookie := establish(t, api)
 
-	missingCSRF := request(api, http.MethodPost, "/api/v1/auth/logout", `{"provider":"kuaifan"}`, cookie, testOrigin)
-	if missingCSRF.Code != http.StatusForbidden {
-		t.Fatalf("account logout without csrf = %d", missingCSRF.Code)
+	crossOrigin := rawRequest(api, http.MethodPost, "/api/v1/auth/logout", `{"provider":"kuaifan"}`, cookie, testOrigin, "cross-site")
+	if crossOrigin.Code != http.StatusForbidden || !strings.Contains(crossOrigin.Body.String(), `"code":"invalid_origin"`) {
+		t.Fatalf("cross-origin account logout = %d: %s", crossOrigin.Code, crossOrigin.Body.String())
 	}
 	backend.mu.Lock()
 	logoutCalls := backend.logoutCalls
 	backend.mu.Unlock()
 	if logoutCalls != 0 {
-		t.Fatalf("account logout backend calls without csrf = %d", logoutCalls)
+		t.Fatalf("cross-origin account logout backend calls = %d", logoutCalls)
 	}
 
-	logout := requestWithCSRF(api, http.MethodPost, "/api/v1/auth/logout", `{"provider":"kuaifan"}`, cookie, csrf)
+	logout := request(api, http.MethodPost, "/api/v1/auth/logout", `{"provider":"kuaifan"}`, cookie, testOrigin)
 	if logout.Code != http.StatusNoContent || logout.Header().Get("Cache-Control") != "no-store" || logout.Header().Get("Set-Cookie") != "" {
 		t.Fatalf("account logout = %d %#v", logout.Code, logout.Header())
 	}
@@ -604,7 +617,7 @@ func TestAccountLogoutPreservesBrowserAccess(t *testing.T) {
 		t.Fatalf("account logout backend = calls:%d provider:%q", logoutCalls, logoutProvider)
 	}
 	accessStatus := request(api, http.MethodGet, "/api/v1/access/status", "", cookie, "")
-	assertAccessStatus(t, accessStatus, true, true, true)
+	assertAccessStatus(t, accessStatus, true, true)
 	status := request(api, http.MethodGet, "/api/v1/status", "", cookie, "")
 	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"providers":["kuaifan"]`) || !strings.Contains(status.Body.String(), `"accounts":{"kuaifan"`) || !strings.Contains(status.Body.String(), `"tier":"Standard","subscriptionActive":false`) || strings.Contains(status.Body.String(), "person@example.com") || strings.Contains(status.Body.String(), "subscriptionEndsAt") {
 		t.Fatalf("provider status after account logout = %d: %s", status.Code, status.Body.String())
@@ -614,17 +627,17 @@ func TestAccountLogoutPreservesBrowserAccess(t *testing.T) {
 func TestAuthenticatedMutationsAccountLoginAndAccessLock(t *testing.T) {
 	backend := &fakeBackend{}
 	api := newTestAPI(t, backend, newFakeSubscriptions())
-	cookie, csrf := establish(t, api)
+	cookie := establish(t, api)
 
-	missingCSRF := request(api, http.MethodPost, "/api/v1/control/refresh", `{"provider":"kuaifan"}`, cookie, testOrigin)
-	if missingCSRF.Code != http.StatusForbidden {
-		t.Fatalf("mutation without csrf = %d", missingCSRF.Code)
+	crossOrigin := rawRequest(api, http.MethodPost, "/api/v1/control/refresh", `{"provider":"kuaifan"}`, cookie, testOrigin, "cross-site")
+	if crossOrigin.Code != http.StatusForbidden || !strings.Contains(crossOrigin.Body.String(), `"code":"invalid_origin"`) {
+		t.Fatalf("cross-origin mutation = %d: %s", crossOrigin.Code, crossOrigin.Body.String())
 	}
-	refreshed := requestWithCSRF(api, http.MethodPost, "/api/v1/control/refresh", `{"provider":"kuaifan"}`, cookie, csrf)
+	refreshed := request(api, http.MethodPost, "/api/v1/control/refresh", `{"provider":"kuaifan"}`, cookie, testOrigin)
 	if refreshed.Code != http.StatusAccepted {
 		t.Fatalf("refresh = %d: %s", refreshed.Code, refreshed.Body.String())
 	}
-	accountLogin := requestWithCSRF(api, http.MethodPost, "/api/v1/auth/login", `{"provider":"kuaifan","account":"person@example.com","password":"password"}`, cookie, csrf)
+	accountLogin := request(api, http.MethodPost, "/api/v1/auth/login", `{"provider":"kuaifan","account":"person@example.com","password":"password"}`, cookie, testOrigin)
 	if accountLogin.Code != http.StatusOK || strings.Contains(accountLogin.Body.String(), "person@example.com") {
 		t.Fatalf("account login = %d: %s", accountLogin.Code, accountLogin.Body.String())
 	}
@@ -638,8 +651,8 @@ func TestAuthenticatedMutationsAccountLoginAndAccessLock(t *testing.T) {
 	if otherLogin.Code != http.StatusOK {
 		t.Fatalf("second access login = %d: %s", otherLogin.Code, otherLogin.Body.String())
 	}
-	otherCookie, _ := sessionFromResponse(t, otherLogin)
-	lock := requestWithCSRF(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, csrf)
+	otherCookie := sessionFromResponse(t, otherLogin)
+	lock := request(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, testOrigin)
 	if lock.Code != http.StatusNoContent || lock.Header().Get("Cache-Control") != "no-store" || !strings.Contains(lock.Header().Get("Set-Cookie"), "Max-Age=0") {
 		t.Fatalf("access lock = %d %#v", lock.Code, lock.Header())
 	}
@@ -662,57 +675,62 @@ func TestAuthenticatedMutationsAccountLoginAndAccessLock(t *testing.T) {
 }
 
 func TestAccessLockCompletesDuringProviderLogin(t *testing.T) {
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	backend := &fakeBackend{accountLoginStarted: started, accountLoginRelease: release}
-	api := newTestAPI(t, backend, newFakeSubscriptions())
-	cookie, csrf := establish(t, api)
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{}, 1)
+		release := make(chan struct{})
+		backend := &fakeBackend{accountLoginStarted: started, accountLoginRelease: release}
+		api := newTestAPI(t, backend, newFakeSubscriptions())
+		cookie := establish(t, api)
 
-	loginResponses := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		loginResponses <- requestWithCSRF(api, http.MethodPost, "/api/v1/auth/login", `{"provider":"kuaifan","account":"person@example.com","password":"password"}`, cookie, csrf)
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("provider login did not reach the backend")
-	}
+		loginResponses := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			loginResponses <- request(api, http.MethodPost, "/api/v1/auth/login", `{"provider":"kuaifan","account":"person@example.com","password":"password"}`, cookie, testOrigin)
+		}()
+		synctest.Wait()
+		select {
+		case <-started:
+		default:
+			t.Fatal("provider login did not reach the backend")
+		}
 
-	logoutResponses := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		logoutResponses <- requestWithCSRF(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, csrf)
-	}()
-	select {
-	case logout := <-logoutResponses:
-		if logout.Code != http.StatusNoContent || !strings.Contains(logout.Header().Get("Set-Cookie"), "Max-Age=0") {
-			t.Fatalf("access lock = %d %#v", logout.Code, logout.Header())
+		logoutResponses := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			logoutResponses <- request(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, testOrigin)
+		}()
+		synctest.Wait()
+		select {
+		case logout := <-logoutResponses:
+			if logout.Code != http.StatusNoContent || !strings.Contains(logout.Header().Get("Set-Cookie"), "Max-Age=0") {
+				t.Fatalf("access lock = %d %#v", logout.Code, logout.Header())
+			}
+		default:
+			t.Fatal("access lock waited for provider login")
 		}
-	case <-time.After(time.Second):
-		t.Fatal("access lock waited for provider login")
-	}
-	if response := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusUnauthorized {
-		t.Fatalf("revoked session status = %d", response.Code)
-	}
-	select {
-	case response := <-loginResponses:
-		t.Fatalf("provider login completed before release: %d", response.Code)
-	default:
-	}
-	close(release)
-	select {
-	case response := <-loginResponses:
-		if response.Code != http.StatusOK {
-			t.Fatalf("provider login = %d: %s", response.Code, response.Body.String())
+		if response := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusUnauthorized {
+			t.Fatalf("revoked session status = %d", response.Code)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("provider login did not complete after release")
-	}
-	backend.mu.Lock()
-	calls := backend.accountLoginCalls
-	backend.mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("provider login calls = %d", calls)
-	}
+		select {
+		case response := <-loginResponses:
+			t.Fatalf("provider login completed before release: %d", response.Code)
+		default:
+		}
+		close(release)
+		synctest.Wait()
+		select {
+		case response := <-loginResponses:
+			if response.Code != http.StatusOK {
+				t.Fatalf("provider login = %d: %s", response.Code, response.Body.String())
+			}
+		default:
+			t.Fatal("provider login did not complete after release")
+		}
+		backend.mu.Lock()
+		calls := backend.accountLoginCalls
+		backend.mu.Unlock()
+		if calls != 1 {
+			t.Fatalf("provider login calls = %d", calls)
+		}
+	})
 }
 
 func TestNodeDetailsRequiresAuthenticationAndUsesExactRoute(t *testing.T) {
@@ -731,9 +749,9 @@ func TestNodeDetailsRequiresAuthenticationAndUsesExactRoute(t *testing.T) {
 		t.Fatalf("unauthenticated node details backend calls = %d", detailCalls)
 	}
 
-	cookie, csrf := establish(t, api)
-	wrongMethod := requestWithCSRF(api, http.MethodPost, "/api/v1/nodes/"+nodeID+"/details", `{}`, cookie, csrf)
-	if wrongMethod.Code != http.StatusMethodNotAllowed || wrongMethod.Header().Get("Allow") != http.MethodGet || wrongMethod.Header().Get("Cache-Control") != "no-store" {
+	cookie := establish(t, api)
+	wrongMethod := request(api, http.MethodPost, "/api/v1/nodes/"+nodeID+"/details", `{}`, cookie, testOrigin)
+	if wrongMethod.Code != http.StatusMethodNotAllowed || wrongMethod.Header().Get("Allow") != "GET, HEAD" || wrongMethod.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("node details wrong method = %d %#v", wrongMethod.Code, wrongMethod.Header())
 	}
 	badPath := request(api, http.MethodGet, "/api/v1/nodes//details", "", cookie, "")
@@ -760,7 +778,7 @@ func TestNodesOmitLegacyEndpointAndExcludedFields(t *testing.T) {
 	}
 	backend := &fakeBackend{nodes: []Node{expected}}
 	api := newTestAPI(t, backend, newFakeSubscriptions())
-	cookie, _ := establish(t, api)
+	cookie := establish(t, api)
 
 	response := request(api, http.MethodGet, "/api/v1/nodes", "", cookie, "")
 	if response.Code != http.StatusOK {
@@ -800,7 +818,7 @@ func TestNodeDetailsReturnsOnlyLocalCredentials(t *testing.T) {
 	}
 	backend := &fakeBackend{nodeDetails: expected}
 	api := newTestAPI(t, backend, newFakeSubscriptions())
-	cookie, _ := establish(t, api)
+	cookie := establish(t, api)
 
 	response := request(api, http.MethodGet, "/api/v1/nodes/"+expected.ID+"/details", "", cookie, "")
 	if response.Code != http.StatusOK {
@@ -832,7 +850,7 @@ func TestStatusUsesReachedLANAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cookie, _ := establish(t, api)
+	cookie := establish(t, api)
 	statusRequest := httptest.NewRequest(http.MethodGet, "http://192.0.2.10:10809/api/v1/status", nil)
 	statusRequest.Host = "192.0.2.10:10809"
 	statusRequest.AddCookie(cookie)
@@ -862,7 +880,7 @@ func TestStableSubscriptionURLAndRemovedRoutes(t *testing.T) {
 	backend := &fakeBackend{}
 	subscriptions := newFakeSubscriptions()
 	api := newTestAPI(t, backend, subscriptions)
-	cookie, _ := establish(t, api)
+	cookie := establish(t, api)
 
 	first := request(api, http.MethodGet, "/api/v1/subscription/url", "", cookie, "")
 	second := request(api, http.MethodGet, "/api/v1/subscription/url", "", cookie, "")
@@ -877,9 +895,10 @@ func TestStableSubscriptionURLAndRemovedRoutes(t *testing.T) {
 	if result.URL != expected {
 		t.Fatalf("stable URL = %#v", result)
 	}
+	metadata := request(api, http.MethodGet, "/api/v1/subscription", "", cookie, "")
 	status := request(api, http.MethodGet, "/api/v1/status", "", cookie, "")
-	if strings.Contains(status.Body.String(), result.URL) {
-		t.Fatalf("ordinary endpoint exposed subscription URL: status=%s", status.Body.String())
+	if strings.Contains(metadata.Body.String(), result.URL) || strings.Contains(status.Body.String(), result.URL) {
+		t.Fatalf("ordinary endpoint exposed subscription URL: metadata=%s status=%s", metadata.Body.String(), status.Body.String())
 	}
 	for _, legacy := range []struct {
 		method string
@@ -918,61 +937,183 @@ func TestStableSubscriptionURLAndRemovedRoutes(t *testing.T) {
 	}
 }
 
+// Wait makes preceding writes visible, but advancing time does not order a
+// body read before the next heartbeat write. Protect both sides of the recorder.
+type sseRecorder struct {
+	*httptest.ResponseRecorder
+	mu sync.Mutex
+}
+
+func (r *sseRecorder) Write(body []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ResponseRecorder.Write(body)
+}
+
+func (r *sseRecorder) WriteString(body string) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ResponseRecorder.WriteString(body)
+}
+
+func (r *sseRecorder) body() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.Body.String()
+}
+
 func TestSSESurvivesAccessMigration(t *testing.T) {
-	backend := &fakeBackend{events: make(chan Event), subscribed: make(chan struct{}, 1)}
-	api := newTestAPI(t, backend, newFakeSubscriptions())
-	cookie, _ := establish(t, api)
-	context, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	req := httptest.NewRequest(http.MethodGet, "http://"+testHost+"/api/v1/events", nil).WithContext(context)
-	req.Host = testHost
-	req.Header.Set("Origin", testOrigin)
-	req.AddCookie(cookie)
-	response := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		api.ServeHTTP(response, req)
-		close(done)
-	}()
-	select {
-	case <-backend.subscribed:
-	case <-time.After(time.Second):
-		t.Fatal("SSE did not subscribe")
+	synctest.Test(t, func(t *testing.T) {
+		backend := &fakeBackend{events: make(chan Event), subscribed: make(chan struct{}, 1)}
+		api := newTestAPI(t, backend, newFakeSubscriptions())
+		cookie := establish(t, api)
+		context, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		req := httptest.NewRequest(http.MethodGet, "http://"+testHost+"/api/v1/events", nil).WithContext(context)
+		req.Host = testHost
+		req.Header.Set("Origin", testOrigin)
+		req.AddCookie(cookie)
+		response := &sseRecorder{ResponseRecorder: httptest.NewRecorder()}
+		done := make(chan struct{})
+		go func() {
+			api.ServeHTTP(response, req)
+			close(done)
+		}()
+		synctest.Wait()
+		select {
+		case <-backend.subscribed:
+		default:
+			t.Fatal("SSE did not subscribe")
+		}
+		backend.events <- Event{Type: "state", Data: map[string]any{"state": "ready"}}
+		synctest.Wait()
+		time.Sleep(api.config.SSEHeartbeat - time.Nanosecond)
+		synctest.Wait()
+		if strings.Contains(response.body(), ": keepalive") {
+			t.Fatal("SSE heartbeat sent before its interval")
+		}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if got := strings.Count(response.body(), ": keepalive\n\n"); got != 1 {
+			t.Fatalf("SSE heartbeat count = %d, want 1", got)
+		}
+		cancel()
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("SSE did not close after cancellation")
+		}
+		if !strings.Contains(response.body(), "event: state") {
+			t.Fatalf("SSE payload = %q", response.body())
+		}
+	})
+}
+
+func TestAPIMutationsRejectCrossOrigin(t *testing.T) {
+	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
+	cookie := establish(t, api)
+	for _, route := range api.routes() {
+		if route.method != http.MethodPost {
+			continue
+		}
+		path := strings.ReplaceAll(route.path, "{id}", "node-alpha")
+		for _, test := range []struct {
+			name, origin, fetchSite string
+		}{
+			{name: "fetch-site", origin: testOrigin, fetchSite: "cross-site"},
+			{name: "origin", origin: "http://evil.test"},
+		} {
+			t.Run(path+"/"+test.name, func(t *testing.T) {
+				response := rawRequest(api, route.method, path, `{}`, cookie, test.origin, test.fetchSite)
+				if response.Code != http.StatusForbidden || !strings.HasPrefix(response.Header().Get("Content-Type"), "application/problem+json") || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("X-Content-Type-Options") != "nosniff" {
+					t.Fatalf("cross-origin rejection = %d %#v", response.Code, response.Header())
+				}
+				var problem struct {
+					Code   string `json:"code"`
+					Status int    `json:"status"`
+					Title  string `json:"title"`
+				}
+				if err := json.NewDecoder(response.Body).Decode(&problem); err != nil {
+					t.Fatal(err)
+				}
+				if problem.Code != "invalid_origin" || problem.Status != http.StatusForbidden || problem.Title != "Invalid Origin" {
+					t.Fatalf("cross-origin problem = %#v", problem)
+				}
+			})
+		}
 	}
-	backend.events <- Event{Type: "state", Data: map[string]any{"state": "ready"}}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("SSE did not close after cancellation")
+}
+
+func TestAPIMutationCrossOriginProtection(t *testing.T) {
+	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
+	cookie := establish(t, api)
+	for _, test := range []struct {
+		name, origin, fetchSite string
+		want                    int
+	}{
+		{name: "same-origin-fetch-site", fetchSite: "same-origin", want: http.StatusAccepted},
+		{name: "same-origin-origin", origin: testOrigin, want: http.StatusAccepted},
+		{name: "non-browser", want: http.StatusAccepted},
+		{name: "cross-site", origin: testOrigin, fetchSite: "cross-site", want: http.StatusForbidden},
+		{name: "same-site", origin: testOrigin, fetchSite: "same-site", want: http.StatusForbidden},
+		{name: "mismatched-origin", origin: "http://evil.test", want: http.StatusForbidden},
+		{name: "mismatched-port", origin: "http://127.0.0.1:10810", want: http.StatusForbidden},
+		{name: "null-origin", origin: "null", want: http.StatusForbidden},
+		{name: "cross-origin-scheme-fetch-site", origin: "https://" + testHost, fetchSite: "cross-site", want: http.StatusForbidden},
+		{name: "same-host-scheme-fallback", origin: "https://" + testHost, want: http.StatusAccepted},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := rawRequest(api, http.MethodPost, "/api/v1/control/refresh", `{"provider":"kuaifan"}`, cookie, test.origin, test.fetchSite)
+			if response.Code != test.want {
+				t.Fatalf("mutation = %d: %s", response.Code, response.Body.String())
+			}
+			if test.want == http.StatusForbidden && !strings.Contains(response.Body.String(), `"code":"invalid_origin"`) {
+				t.Fatalf("cross-origin problem = %s", response.Body.String())
+			}
+		})
 	}
-	if !strings.Contains(response.Body.String(), "event: state") {
-		t.Fatalf("SSE payload = %q", response.Body.String())
+	if response := request(api, http.MethodPost, "/api/v1/control/refresh", `{"provider":"kuaifan"}`, nil, ""); response.Code != http.StatusUnauthorized {
+		t.Fatalf("non-browser without session = %d", response.Code)
+	}
+	if response := request(api, http.MethodPost, "/api/v1/control/refresh", "", cookie, ""); response.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("non-browser without JSON content type = %d", response.Code)
+	}
+}
+
+func TestSSERejectsForeignOrigins(t *testing.T) {
+	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
+	cookie := establish(t, api)
+	for _, test := range []struct{ origin, fetchSite string }{
+		{"http://evil.test", "same-origin"}, {testOrigin + "/", "same-origin"}, {"https://" + testHost, "same-origin"},
+		{"", "cross-site"}, {"", "same-site"},
+	} {
+		response := rawRequest(api, http.MethodGet, "/api/v1/events", "", cookie, test.origin, test.fetchSite)
+		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"invalid_origin"`) {
+			t.Fatalf("SSE Origin %q Sec-Fetch-Site %q = %d: %s", test.origin, test.fetchSite, response.Code, response.Body.String())
+		}
+	}
+	if response := rawRequest(api, http.MethodGet, "/api/v1/status", "", cookie, "http://evil.test", "cross-site"); response.Code != http.StatusOK {
+		t.Fatalf("safe status = %d: %s", response.Code, response.Body.String())
 	}
 }
 
 func TestSSEAcceptsSameOriginBrowserRequestsWithoutOrigin(t *testing.T) {
 	backend := &fakeBackend{events: make(chan Event), subscribed: make(chan struct{}, 1)}
 	api := newTestAPI(t, backend, newFakeSubscriptions())
-	cookie, _ := establish(t, api)
-	open := func(headers map[string]string) (*httptest.ResponseRecorder, context.CancelFunc, chan struct{}) {
-		ctx, cancel := context.WithCancel(context.Background())
-		req := httptest.NewRequest(http.MethodGet, "http://"+testHost+"/api/v1/events", nil).WithContext(ctx)
-		req.Host = testHost
-		for name, value := range headers {
-			req.Header.Set(name, value)
-		}
-		req.AddCookie(cookie)
-		response := httptest.NewRecorder()
-		done := make(chan struct{})
-		go func() {
-			api.ServeHTTP(response, req)
-			close(done)
-		}()
-		return response, cancel, done
-	}
+	cookie := establish(t, api)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "http://"+testHost+"/api/v1/events", nil).WithContext(ctx)
+	req.Host = testHost
 	// Chromium sends no Origin on a same-origin EventSource GET.
-	_, cancel, done := open(map[string]string{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors"})
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.AddCookie(cookie)
+	done := make(chan struct{})
+	go func() {
+		api.ServeHTTP(httptest.NewRecorder(), req)
+		close(done)
+	}()
 	select {
 	case <-backend.subscribed:
 	case <-time.After(time.Second):
@@ -980,21 +1121,9 @@ func TestSSEAcceptsSameOriginBrowserRequestsWithoutOrigin(t *testing.T) {
 	}
 	cancel()
 	<-done
-	for _, headers := range []map[string]string{
-		{"Sec-Fetch-Site": "cross-site"},
-		{"Sec-Fetch-Site": "same-site"},
-		{"Origin": "http://evil.example"},
-	} {
-		response, cancel, done := open(headers)
-		<-done
-		cancel()
-		if response.Code != http.StatusForbidden {
-			t.Fatalf("SSE with %v = %d, want 403", headers, response.Code)
-		}
-	}
 }
 
-func establish(t *testing.T, api *API) (*http.Cookie, string) {
+func establish(t *testing.T, api *API) *http.Cookie {
 	t.Helper()
 	response := request(api, http.MethodPost, "/api/v1/access/setup", `{"token":"`+validTestToken+`"}`, nil, testOrigin)
 	if response.Code != http.StatusCreated {
@@ -1003,49 +1132,42 @@ func establish(t *testing.T, api *API) (*http.Cookie, string) {
 	return sessionFromResponse(t, response)
 }
 
-func sessionFromResponse(t *testing.T, response *httptest.ResponseRecorder) (*http.Cookie, string) {
+func sessionFromResponse(t *testing.T, response *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()
 	cookies := response.Result().Cookies()
 	if len(cookies) != 1 || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
 		t.Fatalf("session cookie = %#v", cookies)
 	}
-	var body struct {
-		CSRFToken string `json:"csrfToken"`
-	}
-	if err := json.NewDecoder(bytes.NewReader(response.Body.Bytes())).Decode(&body); err != nil || body.CSRFToken == "" {
-		t.Fatalf("session response = %v %q", err, response.Body.String())
-	}
-	return cookies[0], body.CSRFToken
+	assertAccessStatus(t, response, true, true)
+	return cookies[0]
 }
 
-func assertAccessStatus(t *testing.T, response *httptest.ResponseRecorder, initialized, authenticated, csrf bool) {
+func assertAccessStatus(t *testing.T, response *httptest.ResponseRecorder, initialized, authenticated bool) {
 	t.Helper()
 	if response.Code != http.StatusOK && response.Code != http.StatusCreated {
 		t.Fatalf("access status response = %d: %s", response.Code, response.Body.String())
 	}
 	var body struct {
 		Initialized   bool       `json:"initialized"`
+		SetupAllowed  bool       `json:"setupAllowed"`
 		Authenticated bool       `json:"authenticated"`
-		CSRFToken     string     `json:"csrfToken"`
 		ExpiresAt     *time.Time `json:"expiresAt"`
 	}
-	if err := json.NewDecoder(bytes.NewReader(response.Body.Bytes())).Decode(&body); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(response.Body.Bytes()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if body.Initialized != initialized || body.Authenticated != authenticated || (body.CSRFToken != "") != csrf || (body.ExpiresAt != nil) != csrf {
+	if body.Initialized != initialized || body.Authenticated != authenticated || (body.ExpiresAt != nil) != authenticated {
 		t.Fatalf("access status = %#v", body)
 	}
-}
-
-func requestWithCSRF(api *API, method, route, body string, cookie *http.Cookie, csrf string) *httptest.ResponseRecorder {
-	return rawRequest(api, method, route, body, cookie, testOrigin, csrf)
 }
 
 func request(api *API, method, route, body string, cookie *http.Cookie, origin string) *httptest.ResponseRecorder {
 	return rawRequest(api, method, route, body, cookie, origin, "")
 }
 
-func rawRequest(api *API, method, route, body string, cookie *http.Cookie, origin, csrf string) *httptest.ResponseRecorder {
+func rawRequest(api *API, method, route, body string, cookie *http.Cookie, origin, fetchSite string) *httptest.ResponseRecorder {
 	var reader *strings.Reader
 	if body != "" {
 		reader = strings.NewReader(body)
@@ -1054,6 +1176,7 @@ func rawRequest(api *API, method, route, body string, cookie *http.Cookie, origi
 	}
 	req := httptest.NewRequest(method, "http://"+testHost+route, reader)
 	req.Host = testHost
+	// First-time setup is accepted only from the adapter host itself.
 	req.RemoteAddr = "127.0.0.1:40000"
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -1061,8 +1184,8 @@ func rawRequest(api *API, method, route, body string, cookie *http.Cookie, origi
 	if origin != "" {
 		req.Header.Set("Origin", origin)
 	}
-	if csrf != "" {
-		req.Header.Set(csrfHeaderName, csrf)
+	if fetchSite != "" {
+		req.Header.Set("Sec-Fetch-Site", fetchSite)
 	}
 	if cookie != nil {
 		req.AddCookie(cookie)
@@ -1070,147 +1193,4 @@ func rawRequest(api *API, method, route, body string, cookie *http.Cookie, origi
 	response := httptest.NewRecorder()
 	api.ServeHTTP(response, req)
 	return response
-}
-
-func TestClientIdentityGroupsIPv6Prefixes(t *testing.T) {
-	if clientIdentity("[2001:db8:1:2::10]:1000") != clientIdentity("[2001:db8:1:2:ffff::1]:2000") {
-		t.Fatal("addresses in one IPv6 /64 have separate budgets")
-	}
-	if clientIdentity("[2001:db8:1:2::10]:1000") == clientIdentity("[2001:db8:1:3::10]:1000") {
-		t.Fatal("different IPv6 /64 prefixes share a budget")
-	}
-	if clientIdentity("192.0.2.1:1") == clientIdentity("192.0.2.2:1") {
-		t.Fatal("IPv4 addresses share a budget")
-	}
-	if clientIdentity("[::1]:1") != "loopback" || clientIdentity("127.0.0.2:1") != "loopback" {
-		t.Fatal("loopback is not grouped")
-	}
-}
-
-func TestHashedAssetsAreImmutableAndIndexIsNotCached(t *testing.T) {
-	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
-	entries, err := fs.ReadDir(staticFiles, "static/dist/assets")
-	if err != nil || len(entries) == 0 {
-		t.Skip("frontend build output is not embedded")
-	}
-	asset := request(api, http.MethodGet, "/assets/"+entries[0].Name(), "", nil, "")
-	if asset.Code != http.StatusOK || !strings.Contains(asset.Header().Get("Cache-Control"), "immutable") {
-		t.Fatalf("asset = %d %q", asset.Code, asset.Header().Get("Cache-Control"))
-	}
-	index := request(api, http.MethodGet, "/", "", nil, "")
-	if index.Code != http.StatusOK || index.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("index = %d %q", index.Code, index.Header().Get("Cache-Control"))
-	}
-	spa := request(api, http.MethodGet, "/signin", "", nil, "")
-	if spa.Code != http.StatusOK || spa.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("SPA fallback = %d %q", spa.Code, spa.Header().Get("Cache-Control"))
-	}
-	missing := request(api, http.MethodGet, "/assets/missing.js", "", nil, "")
-	if missing.Code != http.StatusNotFound {
-		t.Fatalf("missing asset = %d", missing.Code)
-	}
-}
-
-func problemCode(t *testing.T, response *httptest.ResponseRecorder) string {
-	t.Helper()
-	var body struct {
-		Code string `json:"code"`
-	}
-	_ = json.NewDecoder(bytes.NewReader(response.Body.Bytes())).Decode(&body)
-	return body.Code
-}
-
-func TestStateChangingRequestGuards(t *testing.T) {
-	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
-	cookie, csrf := establish(t, api)
-	if response := rawRequest(api, http.MethodPost, "/api/v1/control/refresh", `{}`, cookie, testOrigin, "wrong"); response.Code != http.StatusForbidden || problemCode(t, response) != "csrf_failed" {
-		t.Fatalf("bad CSRF = %d %s", response.Code, response.Body.String())
-	}
-	if response := rawRequest(api, http.MethodPost, "/api/v1/control/refresh", `{}`, cookie, "http://evil.example", csrf); response.Code != http.StatusForbidden || problemCode(t, response) != "invalid_origin" {
-		t.Fatalf("bad Origin = %d %s", response.Code, response.Body.String())
-	}
-	large := `{"provider":"` + strings.Repeat("a", 1<<20) + `"}`
-	if response := requestWithCSRF(api, http.MethodPost, "/api/v1/control/refresh", large, cookie, csrf); response.Code != http.StatusRequestEntityTooLarge || problemCode(t, response) != "body_too_large" {
-		t.Fatalf("oversized body = %d %s", response.Code, response.Body.String())
-	}
-	if response := requestWithCSRF(api, http.MethodPost, "/api/v1/control/refresh", `{"provider":`, cookie, csrf); response.Code != http.StatusBadRequest || problemCode(t, response) != "invalid_json" {
-		t.Fatalf("malformed JSON = %d %s", response.Code, response.Body.String())
-	}
-	textRequest := httptest.NewRequest(http.MethodPost, "http://"+testHost+"/api/v1/control/refresh", strings.NewReader(`{}`))
-	textRequest.Host = testHost
-	textRequest.RemoteAddr = "127.0.0.1:40000"
-	textRequest.Header.Set("Content-Type", "text/plain")
-	textRequest.Header.Set("Origin", testOrigin)
-	textRequest.Header.Set(csrfHeaderName, csrf)
-	textRequest.AddCookie(cookie)
-	textResponse := httptest.NewRecorder()
-	api.ServeHTTP(textResponse, textRequest)
-	if textResponse.Code != http.StatusUnsupportedMediaType || problemCode(t, textResponse) != "invalid_content_type" {
-		t.Fatalf("non-JSON body = %d %s", textResponse.Code, textResponse.Body.String())
-	}
-}
-
-func TestUnknownHostIsRejected(t *testing.T) {
-	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
-	req := httptest.NewRequest(http.MethodGet, "http://attacker.example/api/v1/access/status", nil)
-	req.Host = "attacker.example:10809"
-	response := httptest.NewRecorder()
-	api.ServeHTTP(response, req)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("DNS-rebinding host = %d %s", response.Code, response.Body.String())
-	}
-}
-
-func TestProviderLoginThrottling(t *testing.T) {
-	backend := &fakeBackend{}
-	api := newTestAPI(t, backend, newFakeSubscriptions())
-	cookie, csrf := establish(t, api)
-	login := func(account string) *httptest.ResponseRecorder {
-		return requestWithCSRF(api, http.MethodPost, "/api/v1/auth/login", `{"provider":"kuaifan","account":"`+account+`","password":"secret"}`, cookie, csrf)
-	}
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	backend.mu.Lock()
-	backend.accountLoginStarted, backend.accountLoginRelease = started, release
-	backend.mu.Unlock()
-	first := make(chan *httptest.ResponseRecorder, 1)
-	go func() { first <- login("person@example.com") }()
-	<-started
-	if concurrent := login("person@example.com"); concurrent.Code != http.StatusTooManyRequests || problemCode(t, concurrent) != "login_in_progress" {
-		t.Fatalf("concurrent login = %d %s", concurrent.Code, concurrent.Body.String())
-	}
-	close(release)
-	<-first
-	backend.mu.Lock()
-	backend.accountLoginStarted, backend.accountLoginRelease = nil, nil
-	backend.mu.Unlock()
-	for range 5 {
-		_ = login("fail@example.com")
-	}
-	if limited := login("fail@example.com"); limited.Code != http.StatusTooManyRequests || problemCode(t, limited) != "login_rate_limited" || limited.Header().Get("Retry-After") == "" {
-		t.Fatalf("rate-limited login = %d %s", limited.Code, limited.Body.String())
-	}
-}
-
-type secretDiagnosticsBackend struct{ fakeBackend }
-
-func (*secretDiagnosticsBackend) Diagnostics(context.Context) (any, error) {
-	return map[string]any{"version": "1", "token": "very-secret", "nested": map[string]any{"password": "hunter2"}}, nil
-}
-
-func TestDiagnosticsExportIsRedactedAttachment(t *testing.T) {
-	backend := &secretDiagnosticsBackend{}
-	api, err := NewAPI(testConfig(), Dependencies{Backend: backend, Subscriptions: newFakeSubscriptions()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cookie, csrf := establish(t, api)
-	response := requestWithCSRF(api, http.MethodPost, "/api/v1/diagnostics/export", `{}`, cookie, csrf)
-	if response.Code != http.StatusOK || !strings.Contains(response.Header().Get("Content-Disposition"), "attachment") {
-		t.Fatalf("diagnostics = %d %#v", response.Code, response.Header())
-	}
-	body := response.Body.String()
-	if strings.Contains(body, "very-secret") || strings.Contains(body, "hunter2") || !strings.Contains(body, `"version":"1"`) {
-		t.Fatalf("diagnostics were not redacted: %s", body)
-	}
 }

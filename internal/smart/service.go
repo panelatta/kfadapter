@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kfadapter/kfadapter/internal/provider"
-	"github.com/kfadapter/kfadapter/internal/selector"
-	"github.com/kfadapter/kfadapter/internal/state"
+	"github.com/oshinop/chinadapter/internal/credentials"
+	"github.com/oshinop/chinadapter/internal/provider"
+	"github.com/oshinop/chinadapter/internal/state"
 )
 
 type Target struct {
@@ -40,7 +40,7 @@ type Result struct {
 	LatencyMS    int64         `json:"latencyMs,omitempty"`
 	Measurements []Measurement `json:"measurements"`
 	node         state.Node
-	epoch        selector.Credentials
+	epoch        credentials.Credentials
 }
 type Status struct {
 	Enabled         bool      `json:"enabled"`
@@ -55,10 +55,18 @@ type Status struct {
 	Targets         []Target  `json:"targets"`
 	Results         []Result  `json:"results"`
 }
+
+// PreferenceStore persists the policy together with the other preferences.
+type PreferenceStore interface {
+	Update(context.Context, func(*state.PersistentState) error) (state.PersistentState, error)
+}
+
 type Config struct {
-	Manager    *state.Manager
-	Store      *state.SQLiteStore
-	Registry   func() *selector.Registry
+	Manager *state.Manager
+	Store   PreferenceStore
+	// Policy is the persisted policy the daemon loaded at startup.
+	Policy     state.SmartProxyPreferences
+	Identity   func() *credentials.Identity
 	Providers  *provider.Registry
 	Dial       provider.DialContextFunc
 	MutationMu *sync.Mutex
@@ -67,8 +75,8 @@ type Config struct {
 }
 type Service struct {
 	manager        *state.Manager
-	store          *state.SQLiteStore
-	registry       func() *selector.Registry
+	store          PreferenceStore
+	identity       func() *credentials.Identity
 	mutations      *sync.Mutex
 	probe          func(context.Context, state.TunnelPin, Target) Measurement
 	mu             sync.Mutex
@@ -86,12 +94,11 @@ type Service struct {
 }
 
 func New(c Config) (*Service, error) {
-	if c.Manager == nil || c.Store == nil || c.Registry == nil || c.MutationMu == nil {
+	if c.Manager == nil || c.Store == nil || c.Identity == nil || c.MutationMu == nil {
 		return nil, errors.New("smart: missing dependencies")
 	}
-	persistent, err := c.Store.Load()
-	if err != nil {
-		return nil, err
+	if !c.Policy.Valid() {
+		return nil, errors.New("smart: invalid persisted policy")
 	}
 	if c.Probe == nil {
 		if c.Providers == nil {
@@ -99,20 +106,20 @@ func New(c Config) (*Service, error) {
 		}
 		c.Probe = tunnelProbe(c.Manager, c.Providers, c.Dial)
 	}
-	policy := persistent.Preferences.SmartProxy
+	policy := c.Policy
 	if policy.IntervalMinutes == 0 {
 		policy.IntervalMinutes = 30
 	}
-	return &Service{manager: c.Manager, store: c.Store, registry: c.Registry, mutations: c.MutationMu, probe: c.Probe, policy: policy, roundTimeout: 10 * time.Minute, wake: make(chan struct{}, 1)}, nil
+	return &Service{manager: c.Manager, store: c.Store, identity: c.Identity, mutations: c.MutationMu, probe: c.Probe, policy: policy, roundTimeout: 10 * time.Minute, wake: make(chan struct{}, 1)}, nil
 }
 
-func (s *Service) Configure(policy state.SmartProxyPreferences) error {
+func (s *Service) Configure(ctx context.Context, policy state.SmartProxyPreferences) error {
 	if policy.IntervalMinutes != 30 && policy.IntervalMinutes != 60 {
 		return errors.New("smart: interval must be 30 or 60 minutes")
 	}
 	s.mutations.Lock()
 	defer s.mutations.Unlock()
-	if _, err := s.store.Update(func(p *state.PersistentState) error { p.Preferences.SmartProxy = policy; return nil }); err != nil {
+	if _, err := s.store.Update(ctx, func(p *state.PersistentState) error { p.Preferences.SmartProxy = policy; return nil }); err != nil {
 		return err
 	}
 	s.mu.Lock()
@@ -152,10 +159,11 @@ func (s *Service) RequestProbe() bool {
 }
 
 // Completed observations describe route performance. CompactPin checks the
-// current authority, so normal same-account credential refreshes retain rankings.
+// current authority, so provider refreshes retain rankings; an access-token
+// change, which replaces the identity, discards them.
 func (s *Service) current(result Result) bool {
-	registry := s.registry()
-	if registry == nil || registry.SmartCredentials() != result.epoch {
+	smart, ok := s.identity().SmartCredentials()
+	if !ok || smart != result.epoch {
 		return false
 	}
 	pin, err := s.manager.CompactPin(result.node.Selector, time.Now())
@@ -238,13 +246,12 @@ func (s *Service) roundIfDue(parent context.Context) {
 	defer cancel()
 
 	snapshot := s.manager.Current()
-	registry := s.registry()
+	epoch, identified := s.identity().SmartCredentials()
 	var nodes []state.Node
-	now := time.Now()
-	if registry != nil && state.SessionUsable(snapshot, now) {
+	// Provider expiry is only a staleness hint; it never gates a route.
+	if identified && state.SessionUsable(snapshot, time.Now()) {
 		for _, node := range snapshot.Nodes {
-			account, available := snapshot.Providers[node.Provider]
-			if node.TunnelEligible() && available && account.ExpiresAt.After(now) {
+			if _, available := snapshot.Providers[node.Provider]; node.TunnelEligible() && available {
 				nodes = append(nodes, node)
 			}
 		}
@@ -273,7 +280,7 @@ func (s *Service) roundIfDue(parent context.Context) {
 					continue
 				}
 				node = pin.Node
-				result := Result{NodeID: node.ID, Name: node.Name, Provider: string(node.Provider), node: node, epoch: registry.SmartCredentials()}
+				result := Result{NodeID: node.ID, Name: node.Name, Provider: string(node.Provider), node: node, epoch: epoch}
 				var total int64
 				for _, target := range defaultTargets {
 					if ctx.Err() != nil {
@@ -355,13 +362,13 @@ dispatch:
 }
 
 // Credentials returns only locally derived proxy credentials on explicit demand.
-func (s *Service) Credentials() (selector.Credentials, error) {
+func (s *Service) Credentials() (credentials.Credentials, error) {
 	if !s.Enabled() {
-		return selector.Credentials{}, state.ErrSelectorUnknown
+		return credentials.Credentials{}, state.ErrSelectorUnknown
 	}
-	registry := s.registry()
-	if registry == nil || !state.SessionUsable(s.manager.Current(), time.Now()) {
-		return selector.Credentials{}, state.ErrSelectorUnknown
+	smart, ok := s.identity().SmartCredentials()
+	if !ok || !state.SessionUsable(s.manager.Current(), time.Now()) {
+		return credentials.Credentials{}, state.ErrSelectorUnknown
 	}
-	return registry.SmartCredentials(), nil
+	return smart, nil
 }

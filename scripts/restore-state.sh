@@ -4,11 +4,11 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
-STATE_VOLUME=kfadapter_db_data
-STATE_UID=${KFADAPTER_HOST_UID:-65532}
-STATE_GID=${KFADAPTER_HOST_GID:-65532}
-MAX_ARCHIVE_BYTES=${KFADAPTER_RESTORE_MAX_ARCHIVE_BYTES:-67108864}
-MAX_UNCOMPRESSED_BYTES=${KFADAPTER_RESTORE_MAX_UNCOMPRESSED_BYTES:-268435456}
+STATE_VOLUME=chinadapter_db_data
+STATE_UID=${CHINADAPTER_HOST_UID:-65532}
+STATE_GID=${CHINADAPTER_HOST_GID:-65532}
+MAX_ARCHIVE_BYTES=${CHINADAPTER_RESTORE_MAX_ARCHIVE_BYTES:-67108864}
+MAX_UNCOMPRESSED_BYTES=${CHINADAPTER_RESTORE_MAX_UNCOMPRESSED_BYTES:-268435456}
 
 fail() {
     printf '%s\n' "restore-state: $*" >&2
@@ -20,24 +20,27 @@ compose() {
 }
 
 validate_restored_state() {
-    image=$(compose config --images kfadapter) || fail "could not resolve the production validation image"
+    image=$(compose config --images chinadapter) || fail "could not resolve the production validation image"
     image_count=$(printf '%s\n' "$image" | wc -l | tr -d ' ')
     [ "$image_count" = 1 ] && [ -n "$image" ] || fail "production validation image is ambiguous or unavailable"
     docker image inspect "$image" >/dev/null 2>&1 || fail "cached immutable production validation image is unavailable"
+    # validate-state migrates older schemas on a temporary copy under $TMPDIR,
+    # so the otherwise read-only validator needs a small private /tmp.
     docker run --rm --pull never --network none --read-only \
+        --tmpfs /tmp:rw,noexec,nosuid,nodev,size=40m \
         --user "65532:65532" \
         --cap-drop ALL \
         --security-opt no-new-privileges \
         --pids-limit 64 \
         --memory 128m \
-        --entrypoint /kfadapter/kfadapter \
+        --entrypoint /chinadapter/chinadapter \
         -v "$stage:/restore:ro" \
         "$image" validate-state --file /restore/state.db >/dev/null 2>&1 || \
         fail "restored SQLite state validation failed"
 }
 
 if [ "$#" -ne 1 ]; then
-    printf '%s\n' "usage: KFADAPTER_RESTORE_MAX_ARCHIVE_BYTES=67108864 KFADAPTER_RESTORE_MAX_UNCOMPRESSED_BYTES=268435456 scripts/restore-state.sh archive.tar.gz" >&2
+    printf '%s\n' "usage: CHINADAPTER_RESTORE_MAX_ARCHIVE_BYTES=67108864 CHINADAPTER_RESTORE_MAX_UNCOMPRESSED_BYTES=268435456 scripts/restore-state.sh archive.tar.gz" >&2
     exit 2
 fi
 [ "$(id -u)" -eq 0 ] || fail "run as root to preserve numeric state ownership"
@@ -68,7 +71,7 @@ running_services=$(docker ps --filter "volume=$STATE_VOLUME" -q) ||
 parent=$(dirname -- "$state_dir")
 [ -d "$parent" ] && [ ! -L "$parent" ] || fail "state parent must be a regular directory"
 state_name=${state_dir##*/}
-stage=$(mktemp -d "$parent/.kfadapter-restore.XXXXXXXX")
+stage=$(mktemp -d "$parent/.chinadapter-restore.XXXXXXXX")
 stage_name=${stage##*/}
 cleanup() {
     [ -z "${stage:-}" ] || rm -rf -- "$stage"

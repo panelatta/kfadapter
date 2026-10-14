@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kfadapter/kfadapter/internal/state"
+	"github.com/oshinop/chinadapter/internal/state"
 )
 
 func enableSmart(t *testing.T, service *Service) {
 	t.Helper()
-	if err := service.Configure(state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
+	if err := service.Configure(context.Background(), state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -163,11 +163,7 @@ func TestCappedRoundsEventuallyProbeTheEntireInventory(t *testing.T) {
 		next.Nodes = append(next.Nodes, copyNode)
 	}
 	next.Providers["test"] = snapshot
-	built, err := service.registry().Build(next.Nodes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	next.Nodes, next.Selectors = built.Nodes, built.Selectors
+	rebuildSelectors(t, service, next)
 	next.Generation++
 	if err := service.manager.Commit(next); err != nil {
 		t.Fatal(err)

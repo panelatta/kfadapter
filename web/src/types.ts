@@ -32,7 +32,7 @@ export interface StatusResponse {
   };
   dataPlane: {
     socksAddress: string;
-    udpMode: "disabled_unverified" | string;
+    udpMode: "provider_transport";
   };
   nodes: {
     total: number;
@@ -66,6 +66,7 @@ export interface NodeDetails {
   upstreamPort: number;
   socksAddress: string;
   socksUsername: string;
+  /** Installation-wide lowercase UUIDv8; shared by every node. */
   socksPassword: string;
   health: NodeHealth;
   tcpLatencyMs?: number;
@@ -75,7 +76,13 @@ export interface NodesResponse {
   nodes: NodeRecord[];
 }
 
+export interface SubscriptionMetadata {
+  active: boolean;
+  nodeCount: number;
+}
+
 export interface SubscriptionURLResponse {
+  /** Absolute URL ending in /sub/<lowercase canonical UUIDv8>. */
   url: string;
 }
 
@@ -85,13 +92,16 @@ export interface AccessStatusResponse {
   /** Only a browser on the adapter host itself may create the first token. */
   setupAllowed?: boolean;
   authenticated: boolean;
-  csrfToken?: string;
   expiresAt?: string;
 }
 
 export interface AccessSessionResponse {
-  csrfToken?: string;
   expiresAt?: string;
+}
+
+export interface AccessTokenChangeInput {
+  current: string;
+  next: string;
 }
 
 /** POST /auth/login returns the connected account (web.Account in Go). */
@@ -109,22 +119,41 @@ export type EventMessage =
   | { type: "refresh"; state: ServiceState; complete: boolean }
   | { type: "probe"; nodeId: string; health: NodeHealth; tcpLatencyMs?: number; probedAt: string };
 
+export interface SmartProxyTarget {
+  name: string;
+  url: string;
+}
+
+export interface SmartProxyMeasurement {
+  target: string;
+  ok: boolean;
+  latencyMs?: number;
+  error?: string;
+}
+
+export interface SmartProxyResult {
+  nodeId: string;
+  name: string;
+  provider: string;
+  successes: number;
+  latencyMs?: number;
+  measurements: SmartProxyMeasurement[];
+}
+
 export interface SmartProxyStatus {
-  candidateCount?: number;
-  incomplete?: boolean;
   enabled: boolean;
   intervalMinutes: number;
   running: boolean;
+  candidateCount?: number;
+  incomplete?: boolean;
   lastRunAt?: string;
   nextRunAt?: string;
   selectedNodeId?: string;
   selectedName?: string;
-  targets: { name: string; url: string }[];
-  results: {
-    nodeId: string; name: string; provider: string; successes: number; latencyMs?: number;
-    measurements: { target: string; ok: boolean; latencyMs?: number; error?: string }[];
-  }[];
+  targets: SmartProxyTarget[];
+  results: SmartProxyResult[];
 }
+
 export interface SmartProxyDetails {
   socksAddress: string;
   socksUsername: string;

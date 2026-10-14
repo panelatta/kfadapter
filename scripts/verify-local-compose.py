@@ -6,18 +6,18 @@ import sys
 
 
 def verify(config: dict) -> None:
-    if config.get("name") != "kfadapter-local":
-        raise ValueError("developer Compose project must be kfadapter-local")
-    if config.get("volumes") != {"db_data": {"name": "kfadapter-local_db_data"}}:
-        raise ValueError("developer db_data must be the managed kfadapter-local_db_data volume")
+    if config.get("name") != "chinadapter-local":
+        raise ValueError("developer Compose project must be chinadapter-local")
+    if config.get("volumes") != {"db_data": {"name": "chinadapter-local_db_data"}}:
+        raise ValueError("developer db_data must be the managed chinadapter-local_db_data volume")
     services = config.get("services", {})
-    if set(services) != {"kfadapter"}:
-        raise ValueError("developer Compose must contain only the kfadapter service")
-    service = services["kfadapter"]
+    if set(services) != {"chinadapter"}:
+        raise ValueError("developer Compose must contain only the chinadapter service")
+    service = services["chinadapter"]
     if service.get("container_name"):
         raise ValueError("developer container names must remain project-scoped")
     mounts = service.get("volumes", [])
-    state_mounts = [mount for mount in mounts if mount.get("target") == "/kfadapter/data"]
+    state_mounts = [mount for mount in mounts if mount.get("target") == "/chinadapter/data"]
     if len(state_mounts) != 1:
         raise ValueError("developer Compose must mount exactly one state volume")
     state = state_mounts[0]

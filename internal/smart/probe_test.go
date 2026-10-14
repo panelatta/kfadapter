@@ -14,15 +14,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kfadapter/kfadapter/internal/provider"
+	"github.com/oshinop/chinadapter/internal/provider"
 )
 
 type bridgeTransport struct{ active atomic.Int32 }
 
 func (*bridgeTransport) Protocol() provider.Protocol { return "test-native" }
-func (b *bridgeTransport) RelayDatagrams(context.Context, provider.DatagramRequest) error {
-	return provider.ErrCommandUnsupported
-}
 func (b *bridgeTransport) RelayStream(ctx context.Context, r provider.RelayRequest) error {
 	b.active.Add(1)
 	defer b.active.Add(-1)

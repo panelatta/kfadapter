@@ -4,12 +4,22 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
-STATE_VOLUME=kfadapter_db_data
+STATE_VOLUME=chinadapter_db_data
+LEGACY_STATE_VOLUME=kfadapter_db_data
 BACKUP_DIR=${BACKUP_DIR:-"$PROJECT_ROOT/backups"}
 
 fail() {
     printf '%s\n' "upgrade: $*" >&2
     exit 1
+}
+
+# A host deployed before the rename keeps its state in kfadapter_db_data and
+# must be migrated rather than upgraded.
+reject_unmigrated_legacy_volume() {
+    available_volumes=$(docker volume ls --format '{{.Name}}') || fail "could not list Docker volumes"
+    if printf '%s\n' "$available_volumes" | grep -Fx -- "$LEGACY_STATE_VOLUME" >/dev/null; then
+        fail "found the pre-rename $LEGACY_STATE_VOLUME state volume but no $STATE_VOLUME volume; migrate the existing state first with: sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY,CHINADAPTER_IMAGE_DIGEST scripts/migrate-legacy-state.sh"
+    fi
 }
 
 compose() {
@@ -20,7 +30,7 @@ wait_for_healthy() {
     health_failure="replacement did not become healthy within 60 seconds"
     attempt=0
     while [ "$attempt" -lt 12 ]; do
-        container=$(compose ps -q kfadapter 2>/dev/null || true)
+        container=$(compose ps -q chinadapter 2>/dev/null || true)
         if [ -z "$container" ]; then
             health_failure="replacement container was not created"
             return 1
@@ -47,18 +57,22 @@ wait_for_healthy() {
 verify_state_mount() {
     inspected_container=$1
     state_mount_failure="could not inspect the running state mount"
-    inspected_state_type=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/kfadapter/data"}}{{.Type}}{{end}}{{end}}' "$inspected_container") || return 1
-    inspected_state_name=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/kfadapter/data"}}{{.Name}}{{end}}{{end}}' "$inspected_container") || return 1
-    inspected_state_source=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/kfadapter/data"}}{{.Source}}{{end}}{{end}}' "$inspected_container") || return 1
+    inspected_state_type=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/chinadapter/data"}}{{.Type}}{{end}}{{end}}' "$inspected_container") || return 1
+    inspected_state_name=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/chinadapter/data"}}{{.Name}}{{end}}{{end}}' "$inspected_container") || return 1
+    inspected_state_source=$(docker inspect --format '{{range .Mounts}}{{if eq .Destination "/chinadapter/data"}}{{.Source}}{{end}}{{end}}' "$inspected_container") || return 1
     if [ "$inspected_state_type" != volume ] || [ "$inspected_state_name" != "$STATE_VOLUME" ]; then
         state_mount_failure="running service does not use the Compose-managed Docker state volume"
         return 1
     fi
+    # The service is running: a schema migration or write in progress may hold
+    # a transient state.db-journal, so check ownership, mode and identity but
+    # not the at-rest file layout.
     inspected_state_identity=$(python3 "$SCRIPT_DIR/verify-state-path.py" \
         --state-dir "$inspected_state_source" \
         --base "$PROJECT_ROOT" \
-        --uid "${KFADAPTER_HOST_UID:-65532}" \
-        --gid "${KFADAPTER_HOST_GID:-65532}" 2>/dev/null) || {
+        --uid "${CHINADAPTER_HOST_UID:-65532}" \
+        --gid "${CHINADAPTER_HOST_GID:-65532}" \
+        --allow-damaged-payload 2>/dev/null) || {
         state_mount_failure="running service state path failed identity validation"
         return 1
     }
@@ -75,9 +89,9 @@ rollback_failure=
 upgrade_in_progress=0
 rollback_in_progress=0
 rollback() {
-    export KFADAPTER_IMAGE_REPOSITORY=$old_repository
-    export KFADAPTER_IMAGE_DIGEST=$old_digest
-    if ! compose stop kfadapter; then
+    export CHINADAPTER_IMAGE_REPOSITORY=$old_repository
+    export CHINADAPTER_IMAGE_DIGEST=$old_digest
+    if ! compose stop chinadapter; then
         rollback_failure="could not stop the replacement service before rollback"
         return 1
     fi
@@ -93,14 +107,14 @@ rollback() {
         state_identity=$(python3 "$SCRIPT_DIR/verify-state-path.py" \
             --state-dir "$state_dir" \
             --base "$PROJECT_ROOT" \
-            --uid "${KFADAPTER_HOST_UID:-65532}" \
-            --gid "${KFADAPTER_HOST_GID:-65532}") || {
+            --uid "${CHINADAPTER_HOST_UID:-65532}" \
+            --gid "${CHINADAPTER_HOST_GID:-65532}") || {
             rollback_failure="restored state path failed identity validation"
             return 1
         }
     fi
-    if ! compose up -d --pull never --no-deps --force-recreate kfadapter; then
-        if ! compose stop kfadapter; then
+    if ! compose up -d --pull never --no-deps --force-recreate chinadapter; then
+        if ! compose stop chinadapter; then
             rollback_failure="could not recreate the prior immutable service and could not stop its partial container"
         else
             rollback_failure="could not recreate the prior immutable service from the local cache"
@@ -108,14 +122,14 @@ rollback() {
         return 1
     fi
     rollback_mount_failure=
-    rollback_container=$(compose ps -q kfadapter 2>/dev/null || true)
+    rollback_container=$(compose ps -q chinadapter 2>/dev/null || true)
     if [ -z "$rollback_container" ]; then
         rollback_mount_failure="prior immutable service container was not created"
     elif ! verify_state_mount "$rollback_container"; then
         rollback_mount_failure=$state_mount_failure
     fi
     if [ -n "$rollback_mount_failure" ]; then
-        if ! compose stop kfadapter; then
+        if ! compose stop chinadapter; then
             rollback_failure="$rollback_mount_failure and the partial prior service could not be stopped"
         else
             rollback_failure=$rollback_mount_failure
@@ -124,7 +138,7 @@ rollback() {
     fi
     if ! wait_for_healthy; then
         prior_health_failure=$health_failure
-        if ! compose stop kfadapter; then
+        if ! compose stop chinadapter; then
             rollback_failure="prior immutable service was not healthy after rollback and could not be stopped: $prior_health_failure"
         else
             rollback_failure="prior immutable service was not healthy after rollback: $prior_health_failure"
@@ -171,24 +185,31 @@ trap 'handle_upgrade_exit 143' TERM
 trap 'handle_upgrade_exit $?' EXIT
 
 [ "$#" -eq 0 ] || {
-    printf '%s\n' "usage: set KFADAPTER_IMAGE_DIGEST=sha256:<digest>; optionally set KFADAPTER_IMAGE_REPOSITORY=repository (default: ghcr.io/panelatta/kfadapter); scripts/upgrade.sh" >&2
+    printf '%s\n' "usage: set CHINADAPTER_IMAGE_DIGEST=sha256:<digest>; optionally set CHINADAPTER_IMAGE_REPOSITORY=repository (default: ghcr.io/panelatta/chinadapter); scripts/upgrade.sh" >&2
     exit 2
 }
-[ -n "${KFADAPTER_IMAGE_DIGEST:-}" ] || fail "KFADAPTER_IMAGE_DIGEST is required"
+[ -n "${CHINADAPTER_IMAGE_DIGEST:-}" ] || fail "CHINADAPTER_IMAGE_DIGEST is required"
 
 [ "$(id -u)" -eq 0 ] || fail "run as root to preserve numeric state ownership during upgrade and rollback"
-state_dir=$(sh "$SCRIPT_DIR/state-volume-path.sh") || fail "could not resolve Docker state volume"
+if state_dir=$(sh "$SCRIPT_DIR/state-volume-path.sh" --if-present); then
+    :
+else
+    state_resolution_status=$?
+    [ "$state_resolution_status" -eq 3 ] || fail "could not resolve Docker state volume"
+    reject_unmigrated_legacy_volume
+    fail "Docker state volume $STATE_VOLUME does not exist; deploy chinadapter before upgrading it"
+fi
 "$SCRIPT_DIR/preflight.sh" --state-dir "$state_dir"
 state_identity=$(python3 "$SCRIPT_DIR/verify-state-path.py" \
     --state-dir "$state_dir" \
     --base "$PROJECT_ROOT" \
-    --uid "${KFADAPTER_HOST_UID:-65532}" \
-    --gid "${KFADAPTER_HOST_GID:-65532}")
+    --uid "${CHINADAPTER_HOST_UID:-65532}" \
+    --gid "${CHINADAPTER_HOST_GID:-65532}")
 state_dir=$(python3 "$SCRIPT_DIR/verify-state-path.py" \
     --state-dir "$state_dir" \
     --base "$PROJECT_ROOT" \
-    --uid "${KFADAPTER_HOST_UID:-65532}" \
-    --gid "${KFADAPTER_HOST_GID:-65532}" \
+    --uid "${CHINADAPTER_HOST_UID:-65532}" \
+    --gid "${CHINADAPTER_HOST_GID:-65532}" \
     --expect-identity "$state_identity" \
     --print-canonical-path)
 [ -n "$BACKUP_DIR" ] || fail "BACKUP_DIR must not be empty"
@@ -198,8 +219,8 @@ case "$BACKUP_DIR" in
 esac
 backup_nonce=$(python3 -c 'import secrets; print(secrets.token_hex(16))') || fail "could not generate a unique pre-upgrade archive name"
 pre_upgrade_archive="$backup_archive_dir/pre-upgrade-$backup_nonce.tar.gz"
-old_container=$(compose ps -q kfadapter) || fail "could not identify the running service"
-[ -n "$old_container" ] || fail "kfadapter is not running"
+old_container=$(compose ps -q chinadapter) || fail "could not identify the running service"
+[ -n "$old_container" ] || fail "chinadapter is not running"
 old_image=$(docker inspect --format '{{.Config.Image}}' "$old_container") || fail "could not inspect the current service image"
 if ! printf '%s\n' "$old_image" | grep -Eq '^([a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*(:[0-9]+)?(/[a-z0-9][a-z0-9._-]*)+)@sha256:[0-9a-f]{64}$'; then
     fail "current service image must use an untagged repository@sha256:<64-lowercase-hex> reference"
@@ -213,7 +234,7 @@ if ! verify_state_mount "$old_container"; then
 fi
 
 upgrade_in_progress=1
-if ! compose stop kfadapter; then
+if ! compose stop chinadapter; then
     fail "could not stop the current service"
 fi
 # The service is stopped, so the rollback point is an offline copy; a service
@@ -222,13 +243,13 @@ if ! BACKUP_DIR="$BACKUP_DIR" "$SCRIPT_DIR/backup-state.sh" --offline "$pre_upgr
     rollback_or_fail "could not create a protected pre-upgrade state backup"
 fi
 state_backup_ready=1
-if ! compose pull kfadapter; then
+if ! compose pull chinadapter; then
     rollback_or_fail "could not pull the requested immutable image"
 fi
-if ! compose up -d --no-deps --force-recreate kfadapter; then
+if ! compose up -d --no-deps --force-recreate chinadapter; then
     rollback_or_fail "could not recreate the requested service"
 fi
-replacement_container=$(compose ps -q kfadapter 2>/dev/null || true)
+replacement_container=$(compose ps -q chinadapter 2>/dev/null || true)
 [ -n "$replacement_container" ] || rollback_or_fail "replacement container was not created"
 if ! verify_state_mount "$replacement_container"; then
     rollback_or_fail "$state_mount_failure"

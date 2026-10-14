@@ -1,81 +1,122 @@
 package web
 
 import (
+	"context"
 	"net/http"
-	"os"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
-	"context"
-	"github.com/kfadapter/kfadapter/internal/selector"
-	"github.com/kfadapter/kfadapter/internal/smart"
-	"github.com/kfadapter/kfadapter/internal/state"
+	"github.com/oshinop/chinadapter/internal/state"
 )
 
-func TestSmartProxyAPIRequiresSessionAndCSRF(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0700); err != nil {
-		t.Fatal(err)
+type fakeSmartProxy struct {
+	mu        sync.Mutex
+	enabled   bool
+	interval  int
+	running   bool
+	probes    int
+	configErr error
+}
+
+func (f *fakeSmartProxy) Status() any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return map[string]any{"enabled": f.enabled, "intervalMinutes": f.interval}
+}
+
+func (f *fakeSmartProxy) Configure(_ context.Context, enabled bool, interval int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.configErr != nil {
+		return f.configErr
 	}
-	store, err := state.NewSQLiteStore(dir)
+	f.enabled, f.interval = enabled, interval
+	return nil
+}
+
+func (f *fakeSmartProxy) RequestProbe() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.enabled || f.running {
+		return false
+	}
+	f.probes++
+	return true
+}
+
+func (f *fakeSmartProxy) Credentials() (string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.enabled {
+		return "", "", state.ErrSelectorUnknown
+	}
+	return "a_smart-user", "smart-password", nil
+}
+
+func TestSmartProxyAPIRequiresSessionAndOriginProtection(t *testing.T) {
+	smart := &fakeSmartProxy{interval: 30}
+	api, err := NewAPI(testConfig(), Dependencies{Backend: &fakeBackend{}, Subscriptions: newFakeSubscriptions(), Smart: smart})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-	persistent, err := store.LoadOrCreate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry, err := selector.NewRegistry(persistent.Subscription)
-	if err != nil {
-		t.Fatal(err)
-	}
-	manager, err := state.NewManager(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service, err := smart.New(smart.Config{Manager: manager, Store: store, Registry: func() *selector.Registry { return registry }, MutationMu: &sync.Mutex{}, Probe: func(context.Context, state.TunnelPin, smart.Target) smart.Measurement { return smart.Measurement{} }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	api, err := NewAPI(testConfig(), Dependencies{Backend: &fakeBackend{}, Smart: service})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct{ method, path string }{{"GET", "/api/v1/smart-proxy"}, {"GET", "/api/v1/smart-proxy/details"}, {"PUT", "/api/v1/smart-proxy/config"}, {"POST", "/api/v1/smart-proxy/probe"}} {
+	for _, test := range []struct{ method, path string }{{http.MethodGet, "/api/v1/smart-proxy"}, {http.MethodGet, "/api/v1/smart-proxy/details"}, {http.MethodPut, "/api/v1/smart-proxy/config"}, {http.MethodPost, "/api/v1/smart-proxy/probe"}} {
 		if response := request(api, test.method, test.path, "{}", nil, testOrigin); response.Code != http.StatusUnauthorized {
-			t.Fatal(test, response.Code)
+			t.Fatalf("%s %s without session = %d", test.method, test.path, response.Code)
 		}
 	}
-	cookie, csrf := establish(t, api)
+	cookie := establish(t, api)
 	policy := `{"enabled":true,"intervalMinutes":60}`
-	if response := request(api, "PUT", "/api/v1/smart-proxy/config", policy, cookie, testOrigin); response.Code != http.StatusForbidden {
-		t.Fatal("missing CSRF accepted")
+	if response := rawRequest(api, http.MethodPut, "/api/v1/smart-proxy/config", policy, cookie, testOrigin, "cross-site"); response.Code != http.StatusForbidden {
+		t.Fatalf("cross-site PUT = %d", response.Code)
 	}
-	if response := requestWithCSRF(api, "PUT", "/api/v1/smart-proxy/config", policy, cookie, csrf); response.Code != http.StatusOK {
-		t.Fatal(response.Code, response.Body.String())
+	plainRequest := httptest.NewRequest(http.MethodPut, "http://"+testHost+"/api/v1/smart-proxy/config", strings.NewReader(policy))
+	plainRequest.Host = testHost
+	plainRequest.Header.Set("Content-Type", "text/plain")
+	plainRequest.Header.Set("Origin", testOrigin)
+	plainRequest.AddCookie(cookie)
+	plain := httptest.NewRecorder()
+	api.ServeHTTP(plain, plainRequest)
+	if plain.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("non-JSON PUT = %d", plain.Code)
+	}
+	if response := request(api, http.MethodPut, "/api/v1/smart-proxy/config", policy, cookie, testOrigin); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"intervalMinutes":60`) {
+		t.Fatalf("configure = %d: %s", response.Code, response.Body.String())
 	}
 	for _, body := range []string{`{"enabled":true,"intervalMinutes":1}`, `{"intervalMinutes":30}`, `{"enabled":true,"intervalMinutes":30,"url":"http://private/"}`} {
-		if response := requestWithCSRF(api, "PUT", "/api/v1/smart-proxy/config", body, cookie, csrf); response.Code != http.StatusBadRequest {
-			t.Fatal("invalid policy accepted", body, response.Code)
+		if response := request(api, http.MethodPut, "/api/v1/smart-proxy/config", body, cookie, testOrigin); response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid policy %s = %d", body, response.Code)
 		}
 	}
-	response := request(api, "GET", "/api/v1/smart-proxy", "", cookie, "")
-	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || strings.Contains(response.Body.String(), registry.SmartCredentials().Password) {
-		t.Fatal("status boundary", response.Code, response.Body.String())
+	if response := request(api, http.MethodGet, "/api/v1/smart-proxy", "", cookie, ""); response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" || strings.Contains(response.Body.String(), "smart-password") {
+		t.Fatalf("status = %d %q", response.Code, response.Body.String())
 	}
-	if response := requestWithCSRF(api, "POST", "/api/v1/smart-proxy/probe", "{}", cookie, csrf); response.Code != http.StatusAccepted {
-		t.Fatal(response.Code)
+	if response := request(api, http.MethodPost, "/api/v1/smart-proxy/probe", "{}", cookie, testOrigin); response.Code != http.StatusAccepted {
+		t.Fatalf("probe = %d", response.Code)
 	}
-	policy = `{"enabled":false,"intervalMinutes":30}`
-	if response := requestWithCSRF(api, "PUT", "/api/v1/smart-proxy/config", policy, cookie, csrf); response.Code != http.StatusOK {
-		t.Fatal(response.Code)
+	details := request(api, http.MethodGet, "/api/v1/smart-proxy/details", "", cookie, "")
+	if details.Code != http.StatusOK || !strings.Contains(details.Body.String(), `"url":"socks5://a_smart-user:smart-password@127.0.0.1:10808#Smart%20domestic%20route"`) {
+		t.Fatalf("details = %d %s", details.Code, details.Body.String())
 	}
-	if response := requestWithCSRF(api, "POST", "/api/v1/smart-proxy/probe", "{}", cookie, csrf); response.Code != http.StatusConflict {
-		t.Fatal("disabled probe accepted")
+	if response := request(api, http.MethodPut, "/api/v1/smart-proxy/config", `{"enabled":false,"intervalMinutes":30}`, cookie, testOrigin); response.Code != http.StatusOK {
+		t.Fatalf("disable = %d", response.Code)
 	}
-	if response := request(api, "GET", "/api/v1/smart-proxy/details", "", cookie, ""); response.Code != http.StatusServiceUnavailable {
-		t.Fatal("disabled credentials exposed")
+	if response := request(api, http.MethodPost, "/api/v1/smart-proxy/probe", "{}", cookie, testOrigin); response.Code != http.StatusConflict {
+		t.Fatalf("disabled probe = %d", response.Code)
+	}
+	if response := request(api, http.MethodGet, "/api/v1/smart-proxy/details", "", cookie, ""); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disabled details = %d", response.Code)
+	}
+	if response := request(api, http.MethodDelete, "/api/v1/smart-proxy/config", "", cookie, testOrigin); response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != http.MethodPut {
+		t.Fatalf("wrong method = %d %q", response.Code, response.Header().Get("Allow"))
+	}
+}
+
+func TestSmartProxyAPIWithoutServiceIsUnavailable(t *testing.T) {
+	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
+	cookie := establish(t, api)
+	if response := request(api, http.MethodGet, "/api/v1/smart-proxy", "", cookie, ""); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status without service = %d", response.Code)
 	}
 }

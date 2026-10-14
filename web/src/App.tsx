@@ -1,361 +1,63 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiClient, ApiError } from "@/api";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { providerLoginStates, groupNameCollator, applyProbeResult } from "@/lib/console";
-import { routeFromLocation, replaceRoute, type Route } from "@/lib/routes";
-import { isSessionProblem, describeError } from "@/lib/errors";
-import { ServiceErrorCard, LoadingCard, AccessTokenCard, ProviderLoginCard } from "@/components/AuthCards";
-import { StatusConsole } from "@/components/StatusConsole";
-import type { EventMessage, NodeRecord, StatusResponse } from "@/types";
-
-type SessionState = "checking" | "setup" | "access_login" | "available" | "locking";
+import { useMemo } from "react";
+import type { Dispatch, SetStateAction } from "react";
+import { Download, LockKeyhole } from "lucide-react";
+import type { ApiClient } from "./api";
+import type { NodeRecord, StatusResponse } from "./types";
+import { FormError } from "@/components/forms";
+import { Metric } from "@/components/Metric";
+import { Button } from "@/components/ui/button";
+import {
+    Card,
+    CardContent,
+    CardFooter,
+    CardHeader,
+    CardTitle,
+} from "@/components/ui/card";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { AccessTokenCard } from "@/features/access/AccessTokenCard";
+import { LoadingCard } from "@/features/access/LoadingCard";
+import { ServiceErrorCard } from "@/features/access/ServiceErrorCard";
+import { useConsoleSession } from "@/features/access/useConsoleSession";
+import { AccountPanel } from "@/features/accounts/AccountPanel";
+import { ProviderLoginCard } from "@/features/accounts/ProviderLoginCard";
+import { providerLabel, providerLoginStates } from "@/features/accounts/providers";
+import { StatusBadge, stateDetails } from "@/features/accounts/StatusBadge";
+import { useAccountViews } from "@/features/accounts/useAccountViews";
+import { useDiagnosticsExport } from "@/features/diagnostics/useDiagnosticsExport";
+import { NodeList } from "@/features/nodes/NodeList";
+import { SmartProxyCard } from "@/features/smart/SmartProxyCard";
+import { SubscriptionLinkCard } from "@/features/subscription/SubscriptionLinkCard";
+import { useSubscriptionLink } from "@/features/subscription/useSubscriptionLink";
+import { formatTime } from "@/lib/time";
 
 interface AppProps {
     api?: ApiClient;
 }
 
 export function App({ api: providedApi }: AppProps) {
-    const [api] = useState<ApiClient>(() => providedApi ?? new ApiClient());
-    const [route, setRoute] = useState<Route>(routeFromLocation);
-    const [session, setSession] = useState<SessionState>("checking");
-    const [setupAllowed, setSetupAllowed] = useState(true);
-    const [status, setStatus] = useState<StatusResponse | null>(null);
-    const [nodes, setNodes] = useState<NodeRecord[]>([]);
-    const [subscriptionURL, setSubscriptionURL] = useState("");
-    const [loadError, setLoadError] = useState("");
-    const [refreshing, setRefreshing] = useState(false);
-    const sessionRevision = useRef(0);
-    const lockPending = useRef(false);
-    const loadRevision = useRef(0);
-    const reloadWork = useRef({
-        scheduled: false,
-        running: false,
-        queued: false,
-        revision: 0,
-    });
-    const nextSSEFailureReloadAt = useRef(0);
-
-    const clearProviderData = useCallback(() => {
-        setStatus(null);
-        setNodes([]);
-        setSubscriptionURL("");
-        setRefreshing(false);
-    }, []);
-
-    const clearConsoleData = useCallback(() => {
-        clearProviderData();
-        setLoadError("");
-    }, [clearProviderData]);
-
-    const loseAccessSession = useCallback(() => {
-        sessionRevision.current += 1;
-        reloadWork.current.queued = false;
-        api.clearSession();
-        clearConsoleData();
-        setSession("access_login");
-        replaceRoute("/");
-    }, [api, clearConsoleData]);
-
-    const loadAuthenticatedData =
-        useCallback(async (): Promise<StatusResponse | null> => {
-            const revision = sessionRevision.current;
-            const request = ++loadRevision.current;
-            // Explicit actions can overlap an SSE reload. Only the newest load
-            // may publish data or errors, including failures from an old session.
-            const isCurrent = () =>
-                revision === sessionRevision.current &&
-                request === loadRevision.current;
-            try {
-                const nextStatus = await api.status();
-                if (!isCurrent()) return null;
-
-                if (providerLoginStates[nextStatus.state]) {
-                    setStatus(nextStatus);
-                    setNodes([]);
-                    setSubscriptionURL("");
-                    setLoadError("");
-                    return nextStatus;
-                }
-
-                setStatus(nextStatus);
-                setLoadError("");
-
-                // Nodes and the subscription URL load independently: one failing
-                // must not hide the other.
-                const [nextNodes, nextSubscription] = await Promise.allSettled([
-                    api.nodes(),
-                    api.subscriptionURL(),
-                ]);
-                if (!isCurrent()) return null;
-
-                for (const result of [nextNodes, nextSubscription]) {
-                    if (
-                        result.status === "rejected" &&
-                        isSessionProblem(result.reason)
-                    )
-                        throw result.reason;
-                }
-                if (nextNodes.status === "fulfilled")
-                    setNodes(nextNodes.value.nodes);
-                if (nextSubscription.status === "fulfilled")
-                    setSubscriptionURL(nextSubscription.value.url);
-                const failure = [nextNodes, nextSubscription].find(
-                    (result) => result.status === "rejected",
-                );
-                if (failure?.status === "rejected")
-                    setLoadError(describeError(failure.reason));
-                return nextStatus;
-            } catch (error) {
-                if (!isCurrent()) return null;
-                if (isSessionProblem(error)) {
-                    loseAccessSession();
-                    return null;
-                }
-                setLoadError(describeError(error));
-                return null;
-            }
-        }, [api, loseAccessSession]);
-
-    const queueAuthenticatedReload = useCallback(() => {
-        const work = reloadWork.current;
-        work.queued = true;
-        work.revision = sessionRevision.current;
-        if (work.scheduled || work.running) return;
-
-        work.scheduled = true;
-        queueMicrotask(async () => {
-            work.scheduled = false;
-            // A reload queued while another is running (including one queued for
-            // a newer session) is picked up by this loop rather than dropped.
-            while (work.queued && work.revision === sessionRevision.current) {
-                work.queued = false;
-                work.running = true;
-                try {
-                    await loadAuthenticatedData();
-                } finally {
-                    work.running = false;
-                }
-            }
-        });
-    }, [loadAuthenticatedData]);
-
-    useEffect(() => {
-        const updateRoute = () => setRoute(routeFromLocation());
-        window.addEventListener("popstate", updateRoute);
-        return () => window.removeEventListener("popstate", updateRoute);
-    }, []);
-
-    useEffect(() => {
-        if (window.location.pathname !== route) replaceRoute(route);
-    }, [route]);
-
-    useEffect(() => {
-        if (session !== "available" && route !== "/") replaceRoute("/");
-    }, [route, session]);
-
-    useEffect(() => {
-        // Route only on a loaded status: an unknown status is still loading or
-        // failed, and must not send a signed-in user to the account form.
-        if (session !== "available" || !status) return;
-        const needsProviderLogin = Boolean(providerLoginStates[status.state]);
-        if (needsProviderLogin && route !== "/signin") replaceRoute("/signin");
-        if (!needsProviderLogin && route === "/signin") replaceRoute("/");
-    }, [route, session, status]);
-
-    useEffect(() => {
-        let active = true;
-        api.accessStatus()
-            .then((access) => {
-                if (!active) return;
-                if (!access.initialized) {
-                    setSetupAllowed(access.setupAllowed !== false);
-                    setSession("setup");
-                    return;
-                }
-                if (!access.authenticated) {
-                    setSession("access_login");
-                    return;
-                }
-                sessionRevision.current += 1;
-                setSession("available");
-                queueAuthenticatedReload();
-            })
-            .catch((error: unknown) => {
-                if (!active) return;
-                setLoadError(describeError(error));
-                setSession("access_login");
-            });
-        return () => {
-            active = false;
-        };
-    }, [api, queueAuthenticatedReload]);
-
-    useEffect(() => {
-        if (session !== "available") return;
-        let active = true;
-        const revision = sessionRevision.current;
-        const isCurrentSession = () => active && revision === sessionRevision.current;
-        const closeEvents = api.events(
-            (event: EventMessage) => {
-                if (!isCurrentSession()) return;
-                if (event.type === "probe") {
-                    setNodes((previous) => applyProbeResult(previous, event));
-                    return;
-                }
-                queueAuthenticatedReload();
-            },
-            () => {
-                if (!isCurrentSession()) return;
-                const now = Date.now();
-                if (now < nextSSEFailureReloadAt.current) return;
-                nextSSEFailureReloadAt.current = now + 1000;
-                queueAuthenticatedReload();
-            },
-            () => {
-                if (isCurrentSession()) queueAuthenticatedReload();
-            },
-        );
-        return () => {
-            active = false;
-            closeEvents();
-        };
-    }, [api, queueAuthenticatedReload, session]);
-
-    const completeAccess = useCallback(() => {
-        sessionRevision.current += 1;
-        setLoadError("");
-        setSession("available");
-        replaceRoute("/");
-        queueAuthenticatedReload();
-    }, [queueAuthenticatedReload]);
-
-    const setupAccess = async (token: string): Promise<void> => {
-        await api.setupAccess(token);
-        completeAccess();
-    };
-
-    const loginAccess = async (token: string): Promise<void> => {
-        await api.loginAccess(token);
-        completeAccess();
-    };
-
-    const loginAccount = async (
-        provider: string,
-        account: string,
-        password: string,
-    ): Promise<void> => {
-        const revision = sessionRevision.current;
-        await api.login(provider, account, password);
-        if (revision !== sessionRevision.current) return;
-        await loadAuthenticatedData();
-        if (revision === sessionRevision.current) replaceRoute("/");
-    };
-
-    const mutateProvider = async (
-        provider: string,
-        operation: (provider: string) => Promise<void>,
-    ): Promise<void> => {
-        const revision = sessionRevision.current;
-        setRefreshing(true);
-        try {
-            await operation(provider);
-            if (revision === sessionRevision.current)
-                await loadAuthenticatedData();
-        } catch (error) {
-            if (revision === sessionRevision.current && isSessionProblem(error))
-                loseAccessSession();
-            throw error;
-        } finally {
-            if (revision === sessionRevision.current) setRefreshing(false);
-        }
-    };
-
-    const refreshProvider = (provider: string) =>
-        mutateProvider(provider, (id) => api.refresh(id));
-
-    const signOutAll = async (): Promise<void> => {
-        const revision = sessionRevision.current;
-        const linkedProviders = Object.keys(status?.accounts ?? {}).sort(
-            groupNameCollator.compare,
-        );
-        if (linkedProviders.length === 0) return;
-
-        setRefreshing(true);
-        setLoadError("");
-        try {
-            for (const provider of linkedProviders)
-                await api.logoutAccount(provider);
-            if (revision === sessionRevision.current)
-                await loadAuthenticatedData();
-        } catch (error) {
-            if (revision !== sessionRevision.current) return;
-            if (isSessionProblem(error)) {
-                loseAccessSession();
-                return;
-            }
-            setLoadError(describeError(error));
-        } finally {
-            if (revision === sessionRevision.current) setRefreshing(false);
-        }
-    };
-    const removeProvider = (provider: string) =>
-        mutateProvider(provider, (id) => api.logoutAccount(id));
-
-    const lockConsole = async (): Promise<void> => {
-        if (lockPending.current) return;
-        lockPending.current = true;
-        const revision = ++sessionRevision.current;
-        reloadWork.current.queued = false;
-        clearConsoleData();
-        // Wait for the logout response before allowing a new login. In addition
-        // to clearing CSRF, that response can clear the browser's session cookie.
-        setSession("locking");
-        replaceRoute("/");
-        try {
-            await api.lockConsole();
-        } catch (error) {
-            // A storage failure locks this process but must remain visible:
-            // its revoked session could be restored after a service restart.
-            if (
-                revision === sessionRevision.current &&
-                !isSessionProblem(error)
-            )
-                setLoadError(
-                    error instanceof ApiError &&
-                        error.problem.code === "session_revocation_pending"
-                        ? describeError(error)
-                        : "The console could not confirm the lock with the service. If this browser is shared, reload and lock again.",
-                );
-        } finally {
-            lockPending.current = false;
-            if (revision === sessionRevision.current) {
-                api.clearSession();
-                setSession("access_login");
-            }
-        }
-    };
-
-    const refreshAll = async (): Promise<void> => {
-        const revision = sessionRevision.current;
-        setRefreshing(true);
-        setLoadError("");
-        try {
-            await api.refresh("");
-            if (revision === sessionRevision.current)
-                await loadAuthenticatedData();
-        } catch (error) {
-            if (revision !== sessionRevision.current) return;
-            if (isSessionProblem(error)) {
-                loseAccessSession();
-                return;
-            }
-            setLoadError(describeError(error));
-        } finally {
-            if (revision === sessionRevision.current) setRefreshing(false);
-        }
-    };
-
-    const getSessionRevision = useCallback(() => sessionRevision.current, []);
+    const {
+        api,
+        route,
+        session,
+        setupAllowed,
+        status,
+        nodes,
+        subscriptionURL,
+        loadError,
+        refreshing,
+        setupAccess,
+        loginAccess,
+        loginAccount,
+        loseAccessSession,
+        lockConsole,
+        retryLoad,
+        getSessionRevision,
+        setNodes,
+        refreshAll,
+        refreshProvider,
+        removeProvider,
+        signOutAll,
+    } = useConsoleSession(providedApi);
 
     let content;
     if (session === "checking") {
@@ -385,18 +87,17 @@ export function App({ api: providedApi }: AppProps) {
             />
         );
     } else if (!status) {
+        // The status is still loading or failed to load. Neither case means the
+        // provider account is signed out.
         content = loadError ? (
-            <ServiceErrorCard
-                message={loadError}
-                onRetry={queueAuthenticatedReload}
-            />
+            <ServiceErrorCard message={loadError} onRetry={retryLoad} />
         ) : (
-            <LoadingCard />
+            <LoadingCard description="Loading the service status." />
         );
     } else if (route === "/signin" || providerLoginStates[status.state]) {
         content = (
             <ProviderLoginCard
-                providers={status?.providers ?? []}
+                providers={status.providers}
                 onSubmit={loginAccount}
                 error={loadError}
             />
@@ -424,4 +125,239 @@ export function App({ api: providedApi }: AppProps) {
     }
 
     return <TooltipProvider delayDuration={150}>{content}</TooltipProvider>;
+}
+
+function StatusConsole({
+    api,
+    getSessionRevision,
+    loadError,
+    nodes,
+    onAccessLost,
+    onLockConsole,
+    onLoginAccount,
+    onNodesChange,
+    onRefreshAll,
+    onRefreshProvider,
+    onRemoveProvider,
+    onSignOutAll,
+    refreshing,
+    status,
+    subscriptionURL,
+}: {
+    api: ApiClient;
+    getSessionRevision: () => number;
+    loadError: string;
+    nodes: NodeRecord[];
+    onAccessLost: () => void;
+    onLockConsole: () => Promise<void>;
+    onLoginAccount: (
+        provider: string,
+        account: string,
+        password: string,
+    ) => Promise<void>;
+    onNodesChange: Dispatch<SetStateAction<NodeRecord[]>>;
+    onRefreshAll: () => Promise<void>;
+    onRefreshProvider: (provider: string) => Promise<void>;
+    onRemoveProvider: (provider: string) => Promise<void>;
+    onSignOutAll: () => Promise<void>;
+    refreshing: boolean;
+    status: StatusResponse;
+    subscriptionURL: string;
+}) {
+    const detail = stateDetails[status.state];
+    const accounts = status.accounts ?? {};
+    const eligibleNodes = useMemo(
+        () => nodes.filter((node) => node.eligible),
+        [nodes],
+    );
+    const subscriptionLink = useSubscriptionLink(eligibleNodes, subscriptionURL);
+    const accountView = useAccountViews(status, subscriptionLink.resetFilters);
+    const { activeProvider, selectProvider } = accountView;
+    const diagnostics = useDiagnosticsExport({
+        api,
+        getSessionRevision,
+        onAccessLost,
+    });
+    const visibleNodes =
+        activeProvider === "all"
+            ? eligibleNodes
+            : eligibleNodes.filter((node) => node.provider === activeProvider);
+    const activeAccount =
+        activeProvider === "all" ? undefined : accounts[activeProvider];
+
+    return (
+        <main className="min-h-screen bg-background px-4 py-6 text-foreground sm:px-6 lg:px-10">
+            <div className="boot mx-auto grid w-full max-w-6xl gap-6">
+                <header className="border-b border-dashed border-border pb-5">
+                    <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                        <p className="glow font-sans text-sm font-bold uppercase tracking-[0.34em] text-primary">
+                            Chinadapter
+                        </p>
+                        <p className="hidden text-[0.625rem] uppercase tracking-[0.24em] text-muted-foreground sm:block">
+                            Local control plane · v{status.version}
+                        </p>
+                    </div>
+                    <div className="mt-4 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+                        <div>
+                            <div className="flex flex-nowrap items-center gap-2 sm:gap-3">
+                                <h1 className="whitespace-nowrap font-sans text-xl font-semibold uppercase tracking-[0.04em] sm:text-2xl">
+                                    Service status
+                                </h1>
+                                <StatusBadge detail={detail} />
+                            </div>
+                            {status.state === "ready" ? null : (
+                                <p className="mt-2 text-sm text-muted-foreground">
+                                    {detail.message}
+                                </p>
+                            )}
+                        </div>
+                        <div className="flex flex-nowrap items-center gap-1 sm:gap-2">
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Button
+                                        aria-label="Export diagnostics"
+                                        disabled={diagnostics.exporting}
+                                        onClick={() =>
+                                            void diagnostics.exportDiagnostics()
+                                        }
+                                        size="sm"
+                                        variant="ghost"
+                                    >
+                                        <Download className="size-4" />
+                                    </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                    Download a redacted diagnostics report
+                                </TooltipContent>
+                            </Tooltip>
+                            <Button
+                                aria-label="Lock console"
+                                onClick={() => void onLockConsole()}
+                                size="sm"
+                                variant="outline"
+                            >
+                                <LockKeyhole className="size-4" />
+                                <span aria-hidden="true" className="sm:hidden">
+                                    Lock
+                                </span>
+                                <span
+                                    aria-hidden="true"
+                                    className="hidden sm:inline"
+                                >
+                                    Lock console
+                                </span>
+                            </Button>
+                        </div>
+                    </div>
+                </header>
+
+                <nav
+                    aria-label="Console views"
+                    className="flex gap-2 overflow-x-auto border-b border-border pb-3"
+                >
+                    <Button
+                        aria-pressed={activeProvider === "all"}
+                        onClick={() => selectProvider("all")}
+                        size="sm"
+                        variant={
+                            activeProvider === "all" ? "default" : "outline"
+                        }
+                    >
+                        Status
+                    </Button>
+                    {status.providers.map((provider) => (
+                        <Button
+                            aria-pressed={activeProvider === provider}
+                            className="shrink-0"
+                            key={provider}
+                            onClick={() => selectProvider(provider)}
+                            size="sm"
+                            variant={
+                                activeProvider === provider
+                                    ? "default"
+                                    : "outline"
+                            }
+                        >
+                            <span
+                                aria-hidden="true"
+                                className={`led ${accounts[provider] ? "led--ok" : ""}`}
+                            />
+                            {providerLabel(provider)}
+                        </Button>
+                    ))}
+                </nav>
+
+                {loadError ? <FormError message={loadError} /> : null}
+                {diagnostics.error ? (
+                    <FormError message={diagnostics.error} />
+                ) : null}
+
+                <AccountPanel
+                    accountView={accountView}
+                    eligibleNodes={eligibleNodes}
+                    onLoginAccount={onLoginAccount}
+                    onRefreshAll={onRefreshAll}
+                    onRefreshProvider={onRefreshProvider}
+                    onRemoveProvider={onRemoveProvider}
+                    onSignOutAll={onSignOutAll}
+                    refreshing={refreshing}
+                    status={status}
+                    visibleNodes={visibleNodes}
+                />
+
+                {activeProvider === "all" ? (
+                    <section className="grid gap-4 md:grid-cols-[0.9fr_1.5fr]">
+                        <Card className="panel">
+                            <CardHeader>
+                                <CardTitle>Service</CardTitle>
+                            </CardHeader>
+                            <CardContent className="grid gap-5 sm:grid-cols-2 md:grid-cols-1 lg:grid-cols-2">
+                                <Metric
+                                    label="Accounts"
+                                    value={`${Object.keys(accounts).length} / ${status.providers.length}`}
+                                />
+                                <Metric
+                                    label="Available nodes"
+                                    value={`${status.nodes.eligible} / ${status.nodes.total}`}
+                                />
+                            </CardContent>
+                            <CardFooter className="gap-2 text-xs text-muted-foreground">
+                                <span
+                                    aria-hidden="true"
+                                    className={`led ${refreshing ? "led--warn led--pulse" : "led--ok"}`}
+                                />
+                                <span
+                                    className="min-w-0 truncate"
+                                    title={`Updated ${formatTime(status.controlPlane.lastRefreshAt)}`}
+                                >
+                                    Updated{" "}
+                                    {formatTime(
+                                        status.controlPlane.lastRefreshAt,
+                                    )}
+                                </span>
+                            </CardFooter>
+                        </Card>
+
+                        <SubscriptionLinkCard link={subscriptionLink} />
+                    </section>
+                ) : null}
+
+                <SmartProxyCard
+                    api={api}
+                    getSessionRevision={getSessionRevision}
+                    onAccessLost={onAccessLost}
+                />
+
+                {activeAccount ? (
+                    <NodeList
+                        api={api}
+                        getSessionRevision={getSessionRevision}
+                        nodes={visibleNodes}
+                        onAccessLost={onAccessLost}
+                        onNodesChange={onNodesChange}
+                    />
+                ) : null}
+            </div>
+        </main>
+    );
 }

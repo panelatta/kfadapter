@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 # Resolve the host mountpoint for the Compose-managed production state volume.
+# --volume selects the pre-rename kfadapter_db_data volume for migration only.
 set -eu
 LC_ALL=C
 export LC_ALL
@@ -11,24 +12,35 @@ fail() {
 }
 
 usage() {
-    printf '%s\n' "usage: scripts/state-volume-path.sh [--if-present]" >&2
+    printf '%s\n' "usage: scripts/state-volume-path.sh [--if-present] [--volume chinadapter_db_data|kfadapter_db_data]" >&2
     exit 2
 }
 
 allow_absent=0
-case "$#" in
-    0)
-        ;;
-    1)
-        [ "$1" = "--if-present" ] || usage
-        allow_absent=1
-        ;;
-    *)
-        usage
-        ;;
-esac
-
-volume=kfadapter_db_data
+volume=chinadapter_db_data
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --if-present)
+            allow_absent=1
+            ;;
+        --volume)
+            [ "$#" -ge 2 ] || usage
+            case "$2" in
+                chinadapter_db_data|kfadapter_db_data)
+                    volume=$2
+                    ;;
+                *)
+                    fail "--volume must be chinadapter_db_data or the legacy kfadapter_db_data"
+                    ;;
+            esac
+            shift
+            ;;
+        *)
+            usage
+            ;;
+    esac
+    shift
+done
 
 sh "$SCRIPT_DIR/docker-local-context.sh" || exit 1
 if [ "$allow_absent" -eq 1 ]; then

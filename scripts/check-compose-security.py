@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-DEFAULT_IMAGE_REPOSITORY = "ghcr.io/panelatta/kfadapter"
+DEFAULT_IMAGE_REPOSITORY = "ghcr.io/panelatta/chinadapter"
 REPOSITORY_RE = re.compile(
     r"^(?:[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*(?::[0-9]+)?(?:/[a-z0-9][a-z0-9._-]*)+)$"
 )
@@ -54,54 +54,54 @@ def assert_host_network(service: dict[str, Any]) -> None:
     # Host networking lets the adapter bind the router interface addresses that
     # config.yaml names; it therefore publishes no Docker port mappings.
     if service.get("network_mode") != "host":
-        fail("kfadapter must use host networking")
+        fail("chinadapter must use host networking")
     if service.get("ports"):
-        fail("host-networked kfadapter must not publish Docker ports")
+        fail("host-networked chinadapter must not publish Docker ports")
 
 
-def assert_kfadapter(service: dict[str, Any]) -> None:
+def assert_chinadapter(service: dict[str, Any]) -> None:
     assert_host_network(service)
     if service.get("user") != "65532:65532":
-        fail("kfadapter must use numeric user 65532:65532")
-    if service.get("working_dir") != "/kfadapter":
-        fail("kfadapter working directory must be /kfadapter")
+        fail("chinadapter must use numeric user 65532:65532")
+    if service.get("working_dir") != "/chinadapter":
+        fail("chinadapter working directory must be /chinadapter")
     if service.get("privileged"):
-        fail("kfadapter must never be privileged")
+        fail("chinadapter must never be privileged")
     if service.get("pid") == "host":
-        fail("kfadapter must not use the host PID namespace")
+        fail("chinadapter must not use the host PID namespace")
     if service.get("read_only") is not True:
-        fail("kfadapter root filesystem must be read-only")
+        fail("chinadapter root filesystem must be read-only")
     if service.get("restart") != "unless-stopped":
-        fail("kfadapter restart policy must be unless-stopped")
+        fail("chinadapter restart policy must be unless-stopped")
     if service.get("stop_grace_period") != "30s":
-        fail("kfadapter stop grace period must be 30s")
+        fail("chinadapter stop grace period must be 30s")
     if set(service.get("cap_drop", [])) != {"ALL"}:
-        fail("kfadapter must drop all capabilities")
+        fail("chinadapter must drop all capabilities")
     if "no-new-privileges:true" not in service.get("security_opt", []):
-        fail("kfadapter must enable no-new-privileges")
+        fail("chinadapter must enable no-new-privileges")
     if as_int(get(service, "pids_limit")) != 128:
-        fail("kfadapter PID limit must be 128")
+        fail("chinadapter PID limit must be 128")
     if str(get(service, "mem_limit")).lower() not in {"256m", "268435456"}:
-        fail("kfadapter memory limit must be 256m")
+        fail("chinadapter memory limit must be 256m")
     if float(get(service, "cpus")) != 1.0:
-        fail("kfadapter CPU limit must be 1.0")
+        fail("chinadapter CPU limit must be 1.0")
 
     nofile = get(get(service, "ulimits"), "nofile")
     if as_int(get(nofile, "soft")) != 65536 or as_int(get(nofile, "hard")) != 65536:
-        fail("kfadapter nofile limits must be 65536")
+        fail("chinadapter nofile limits must be 65536")
 
     environment = get(service, "environment")
     if set(environment) != {"TZ"}:
-        fail("kfadapter environment must contain only TZ")
+        fail("chinadapter environment must contain only TZ")
     for name, value in environment.items():
         if SENSITIVE_ENV_RE.search(name) or SENSITIVE_ENV_RE.search(str(value)):
             fail(f"secret-like Compose environment entry: {name}")
 
     mounts = mount_by_target(service)
-    if set(mounts) != {"/kfadapter/data", "/kfadapter/config.yaml"}:
-        fail("kfadapter may mount only state and its configuration")
-    state = mounts["/kfadapter/data"]
-    config = mounts["/kfadapter/config.yaml"]
+    if set(mounts) != {"/chinadapter/data", "/chinadapter/config.yaml"}:
+        fail("chinadapter may mount only state and its configuration")
+    state = mounts["/chinadapter/data"]
+    config = mounts["/chinadapter/config.yaml"]
     if state.get("type") != "volume" or state.get("read_only") is True:
         fail("state must be the sole writable named-volume mount")
     if str(get(state, "source")) != "db_data":
@@ -113,10 +113,10 @@ def assert_kfadapter(service: dict[str, Any]) -> None:
 
     tmpfs = service.get("tmpfs", [])
     if tmpfs != ["/tmp:rw,noexec,nosuid,nodev,size=16m"]:
-        fail("kfadapter must have the exact bounded hardened /tmp tmpfs")
+        fail("chinadapter must have the exact bounded hardened /tmp tmpfs")
 
     healthcheck = get(service, "healthcheck")
-    expected_healthcheck = ["CMD", "./kfadapter", "healthcheck"]
+    expected_healthcheck = ["CMD", "./chinadapter", "healthcheck"]
     if healthcheck.get("test") != expected_healthcheck:
         fail("healthcheck must use the adapter's default configuration")
     for key, expected in {"interval": "30s", "timeout": "5s", "retries": 3, "start_period": "10s"}.items():
@@ -125,9 +125,9 @@ def assert_kfadapter(service: dict[str, Any]) -> None:
 
     logging = get(service, "logging")
     if logging.get("driver") != "local":
-        fail("kfadapter logging driver must be local")
+        fail("chinadapter logging driver must be local")
     if logging.get("options") != {"max-size": "10m", "max-file": "3"}:
-        fail("kfadapter log bounds must be 10m x 3")
+        fail("chinadapter log bounds must be 10m x 3")
 
 
 
@@ -154,15 +154,15 @@ def render_compose(root: Path, env: dict[str, str], project_name: str | None = N
 
 def assert_combined_image_rejected(root: Path, digest: str) -> dict[str, Any]:
     env = os.environ.copy()
-    env.pop("KFADAPTER_IMAGE_REPOSITORY", None)
-    env["KFADAPTER_IMAGE_DIGEST"] = digest
-    env["KFADAPTER_IMAGE"] = "attacker.invalid/kfadapter:latest"
+    env.pop("CHINADAPTER_IMAGE_REPOSITORY", None)
+    env["CHINADAPTER_IMAGE_DIGEST"] = digest
+    env["CHINADAPTER_IMAGE"] = "attacker.invalid/chinadapter:latest"
     config = render_compose(root, env)
-    service = get(get(config, "services"), "kfadapter")
+    service = get(get(config, "services"), "chinadapter")
     image = str(get(service, "image"))
     expected_image = f"{DEFAULT_IMAGE_REPOSITORY}@{digest}"
     if image != expected_image:
-        fail("Compose accepted a combined or tag-only KFADAPTER_IMAGE value")
+        fail("Compose accepted a combined or tag-only CHINADAPTER_IMAGE value")
     return config
 
 def main() -> int:
@@ -178,23 +178,23 @@ def main() -> int:
     root = Path(__file__).resolve().parents[1]
     default_config = assert_combined_image_rejected(root, args.image_digest)
     default_services = get(default_config, "services")
-    assert_kfadapter(get(default_services, "kfadapter"))
-    assert_managed_state_volume(default_config, "kfadapter_db_data")
+    assert_chinadapter(get(default_services, "chinadapter"))
+    assert_managed_state_volume(default_config, "chinadapter_db_data")
 
     env = os.environ.copy()
-    env["KFADAPTER_IMAGE_REPOSITORY"] = args.image_repository
-    env["KFADAPTER_IMAGE_DIGEST"] = args.image_digest
+    env["CHINADAPTER_IMAGE_REPOSITORY"] = args.image_repository
+    env["CHINADAPTER_IMAGE_DIGEST"] = args.image_digest
     config = render_compose(root, env)
     services = get(config, "services")
-    assert_kfadapter(get(services, "kfadapter"))
-    assert_managed_state_volume(config, "kfadapter_db_data")
-    project_override = "kfadapter-volume-contract"
+    assert_chinadapter(get(services, "chinadapter"))
+    assert_managed_state_volume(config, "chinadapter_db_data")
+    project_override = "chinadapter-volume-contract"
     override_config = render_compose(root, env, project_override)
     assert_managed_state_volume(override_config, f"{project_override}_db_data")
-    image = str(get(services["kfadapter"], "image"))
+    image = str(get(services["chinadapter"], "image"))
     expected_image = f"{args.image_repository}@{args.image_digest}"
     if image != expected_image or not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", image):
-        fail("kfadapter image must be the supplied immutable repository and digest")
+        fail("chinadapter image must be the supplied immutable repository and digest")
     print("compose-security: passed")
     return 0
 

@@ -2,7 +2,9 @@ import { vi } from "vitest";
 import { type ApiClient } from "../api";
 import type { NodeDetails, NodeRecord, SmartProxyStatus, StatusResponse } from "../types";
 
-export const currentConsumerURL = "http://127.0.0.1:10809/sub/0123456789012345678901234567890123456789012";
+export const currentConsumerURL = "http://127.0.0.1:10809/sub/00112233-4455-8677-8899-aabbccddeeff";
+/** A second capability URL, for tests where the subscription link changes. */
+export const updatedConsumerURL = "http://127.0.0.1:10809/sub/ffeeddcc-bbaa-8988-8766-554433221100";
 
 export const disabledSmartProxy = (): SmartProxyStatus => ({
   enabled: false, intervalMinutes: 30, running: false, candidateCount: 0,
@@ -42,8 +44,8 @@ export const chengduDetails: NodeDetails = {
   upstreamHost: "127.0.0.1",
   upstreamPort: 10808,
   socksAddress: "127.0.0.1:10808",
-  socksUsername: "local-socks-user",
-  socksPassword: "local-socks-password",
+  socksUsername: "n_AAECAwQFBgcICQoL",
+  socksPassword: "10213243-5465-8768-899a-abbccddeeff0",
   health: "degraded",
   tcpLatencyMs: 114,
 };
@@ -52,16 +54,15 @@ export function makeApi(initialStatus = readyStatus(), initialNodes = nodes): Ap
   const state = {
     statusValue: initialStatus,
     nodeList: initialNodes,
-    access: { initialized: true, authenticated: true, csrfToken: "csrf-test" },
+    access: { initialized: true, authenticated: true },
   };
   return {
     get statusValue() { return state.statusValue; },
     set statusValue(next: StatusResponse) { state.statusValue = next; },
-    setCsrfToken: vi.fn(),
-    clearSession: vi.fn(),
     accessStatus: vi.fn().mockImplementation(async () => state.access),
-    setupAccess: vi.fn().mockImplementation(async () => { state.access = { ...state.access, initialized: true, authenticated: true }; return { csrfToken: "csrf-test" }; }),
-    loginAccess: vi.fn().mockImplementation(async () => { state.access = { ...state.access, authenticated: true }; return { csrfToken: "csrf-test" }; }),
+    setupAccess: vi.fn().mockImplementation(async () => { state.access = { ...state.access, initialized: true, authenticated: true }; return {}; }),
+    loginAccess: vi.fn().mockImplementation(async () => { state.access = { ...state.access, authenticated: true }; return {}; }),
+    changeAccessToken: vi.fn().mockResolvedValue({}),
     status: vi.fn().mockImplementation(async () => state.statusValue),
     nodes: vi.fn().mockImplementation(async () => ({ nodes: state.nodeList })),
     nodeDetails: vi.fn().mockResolvedValue(chengduDetails),
@@ -69,8 +70,9 @@ export function makeApi(initialStatus = readyStatus(), initialNodes = nodes): Ap
     configureSmartProxy: vi.fn().mockImplementation(async (enabled: boolean, intervalMinutes: number) => ({ enabled, intervalMinutes, running: false, targets: [], results: [] })),
     probeSmartProxy: vi.fn().mockResolvedValue(undefined),
     smartProxyDetails: vi.fn().mockResolvedValue({ url: "socks5://automatic:secret@127.0.0.1:10808" }),
+    diagnostics: vi.fn().mockResolvedValue(new Blob(["{}"], { type: "application/json" })),
     subscriptionURL: vi.fn().mockResolvedValue({ url: currentConsumerURL }),
-    login: vi.fn().mockImplementation(async () => { state.statusValue = readyStatus(); return {}; }),
+    login: vi.fn().mockImplementation(async (provider: string) => { state.statusValue = readyStatus(); return state.statusValue.accounts?.[provider] ?? { provider, tier: "Standard", subscriptionActive: false }; }),
     logoutAccount: vi.fn().mockResolvedValue(undefined),
     lockConsole: vi.fn().mockResolvedValue(undefined),
     refresh: vi.fn().mockResolvedValue(undefined),

@@ -1,25 +1,25 @@
-name: kfadapter
+name: chinadapter
 
 services:
-  kfadapter:
+  chinadapter:
     # Production runs one immutable image. scripts/preflight.sh validates these
     # inputs and scripts/upgrade.sh swaps them with automatic rollback. The
     # digest of each published image is shown in the CI job summary.
-    image: "${KFADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/kfadapter}@${KFADAPTER_IMAGE_DIGEST:?set KFADAPTER_IMAGE_DIGEST=sha256:<digest> (see scripts/preflight.sh)}"
+    image: "${CHINADAPTER_IMAGE_REPOSITORY:-ghcr.io/panelatta/chinadapter}@${CHINADAPTER_IMAGE_DIGEST:?set CHINADAPTER_IMAGE_DIGEST=sha256:<digest> (see scripts/preflight.sh)}"
     network_mode: host
     user: "65532:65532"
-    working_dir: /kfadapter
+    working_dir: /chinadapter
     init: true
     read_only: true
     restart: unless-stopped
     stop_grace_period: 30s
     environment:
-      TZ: "${KFADAPTER_TZ:-Asia/Shanghai}"
+      TZ: "${CHINADAPTER_TZ:-Asia/Shanghai}"
     volumes:
-      - db_data:/kfadapter/data
+      - db_data:/chinadapter/data
       - type: bind
         source: ./config.yaml
-        target: /kfadapter/config.yaml
+        target: /chinadapter/config.yaml
         read_only: true
         bind:
           create_host_path: false
@@ -37,7 +37,7 @@ services:
         soft: 65536
         hard: 65536
     healthcheck:
-      test: ["CMD", "./kfadapter", "healthcheck"]
+      test: ["CMD", "./chinadapter", "healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3

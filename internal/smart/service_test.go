@@ -10,27 +10,34 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kfadapter/kfadapter/internal/provider"
-	"github.com/kfadapter/kfadapter/internal/selector"
-	"github.com/kfadapter/kfadapter/internal/state"
+	"github.com/oshinop/chinadapter/internal/credentials"
+	"github.com/oshinop/chinadapter/internal/provider"
+	"github.com/oshinop/chinadapter/internal/state"
+	"github.com/oshinop/chinadapter/internal/store"
 )
 
-func harness(t *testing.T, probe func(context.Context, state.TunnelPin, Target) Measurement) (*Service, *state.SQLiteStore) {
+func harness(t *testing.T, probe func(context.Context, state.TunnelPin, Target) Measurement) (*Service, *store.SQLiteStore) {
 	t.Helper()
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	store, err := state.NewSQLiteStore(dir)
+	persistence, err := store.NewSQLiteStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
-	persistent, err := store.LoadOrCreate()
+	t.Cleanup(func() { _ = persistence.Close(context.Background()) })
+	if _, err := persistence.LoadOrCreate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	persistent, err := persistence.Update(context.Background(), func(p *state.PersistentState) error {
+		return p.SetAccessToken("smart-proxy-test-token")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := persistent.SetAccessToken("smart-proxy-test-token"); err != nil {
+	identity, err := persistent.Identity()
+	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().Add(-time.Second).UTC()
@@ -42,31 +49,54 @@ func harness(t *testing.T, probe func(context.Context, state.TunnelPin, Target) 
 		snapshot.Nodes = append(snapshot.Nodes, state.Node{ID: id, Provider: "test", Protocol: pn.Protocol, AuthorityID: pn.AuthorityID, Host: pn.Host, Port: pn.Port, Name: id, Eligible: true})
 	}
 	snapshot.Providers["test"] = ps
-	if _, err := state.EnsureSubscriptionAccountBinding(&persistent, snapshot.AccountBindingID(), now); err != nil {
+	if err := assignSelectors(snapshot, identity); err != nil {
 		t.Fatal(err)
 	}
-	registry, err := selector.NewRegistry(persistent.Subscription)
-	if err != nil {
-		t.Fatal(err)
-	}
-	built, err := registry.Build(snapshot.Nodes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot.Nodes, snapshot.Selectors = built.Nodes, built.Selectors
 	if err := state.ValidateRuntimeSnapshot(snapshot); err != nil {
 		t.Fatal(err)
 	}
-	manager, err := state.NewManagerWithSubscription(snapshot, persistent.Subscription, persistent.AccessTokenVerifier.BindingKey())
+	manager, err := state.NewManager(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := New(Config{Manager: manager, Store: store, Registry: func() *selector.Registry { return registry }, MutationMu: &sync.Mutex{}, Probe: probe})
+	service, err := New(Config{Manager: manager, Store: persistence, Policy: persistent.Preferences.SmartProxy, Identity: func() *credentials.Identity { return identity }, MutationMu: &sync.Mutex{}, Probe: probe})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return service, store
+	return service, persistence
 }
+
+// assignSelectors mirrors the credential coordinator: node usernames derive
+// from the installation identity and each node's route.
+func assignSelectors(snapshot *state.RuntimeSnapshot, identity *credentials.Identity) error {
+	selectors, err := state.BuildSelectors(snapshot.Nodes, identity)
+	if err != nil {
+		return err
+	}
+	snapshot.Selectors = selectors
+	for index := range snapshot.Nodes {
+		credentials, _ := identity.Credentials(snapshot.Nodes[index].Route())
+		snapshot.Nodes[index].Selector = credentials.Username
+	}
+	return nil
+}
+
+func rebuildSelectors(t *testing.T, service *Service, snapshot *state.RuntimeSnapshot) {
+	t.Helper()
+	if err := assignSelectors(snapshot, service.identity()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func smartCredentials(t *testing.T, service *Service) credentials.Credentials {
+	t.Helper()
+	smart, ok := service.identity().SmartCredentials()
+	if !ok {
+		t.Fatal("identity has no smart credentials")
+	}
+	return smart
+}
+
 func rankedProbe(_ context.Context, pin state.TunnelPin, target Target) Measurement {
 	if pin.Node.ID == "failed" || (pin.Node.ID == "partial" && target.Name == "QQ") {
 		return Measurement{Error: "http_rejected"}
@@ -85,7 +115,7 @@ func TestRankingPersistenceAndRevocation(t *testing.T) {
 	if _, err := service.Resolve(); err == nil {
 		t.Fatal("disabled route accepted")
 	}
-	if err := service.Configure(state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 60}); err != nil {
+	if err := service.Configure(context.Background(), state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 60}); err != nil {
 		t.Fatal(err)
 	}
 	service.roundIfDue(context.Background())
@@ -101,16 +131,20 @@ func TestRankingPersistenceAndRevocation(t *testing.T) {
 		t.Fatal("selected route mismatch", err)
 	}
 	encoded, _ := json.Marshal(status)
-	for _, secret := range []string{"secret-authority", service.registry().SmartCredentials().Password, ".example", "selector"} {
+	for _, secret := range []string{"secret-authority", smartCredentials(t, service).Password, ".example", "selector"} {
 		if strings.Contains(string(encoded), secret) {
 			t.Fatal("status contains secret or endpoint", secret)
 		}
 	}
-	reloaded, err := New(Config{Manager: service.manager, Store: store, Registry: service.registry, MutationMu: service.mutations, Probe: rankedProbe})
+	saved, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := New(Config{Manager: service.manager, Store: store, Policy: saved.Preferences.SmartProxy, Identity: service.identity, MutationMu: service.mutations, Probe: rankedProbe})
 	if err != nil || !reloaded.Enabled() || reloaded.Status().IntervalMinutes != 60 {
 		t.Fatal("policy did not survive reload", err)
 	}
-	if err := service.Configure(state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
+	if err := service.Configure(context.Background(), state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.Resolve(); err != nil {
@@ -123,16 +157,16 @@ func TestRankingPersistenceAndRevocation(t *testing.T) {
 	if service.Status().SelectedNodeID != "" {
 		t.Fatal("stale winner displayed")
 	}
-	if err := service.Configure(state.SmartProxyPreferences{Enabled: false, IntervalMinutes: 30}); err != nil {
+	if err := service.Configure(context.Background(), state.SmartProxyPreferences{Enabled: false, IntervalMinutes: 30}); err != nil {
 		t.Fatal(err)
 	}
 	if service.RequestProbe() {
 		t.Fatal("disabled probe accepted")
 	}
-	if err := service.Configure(state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 1}); err == nil {
+	if err := service.Configure(context.Background(), state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 1}); err == nil {
 		t.Fatal("invalid cadence accepted")
 	}
-	saved, err := store.Load()
+	saved, err = store.Load(context.Background())
 	if err != nil || saved.Preferences.SmartProxy.Enabled {
 		t.Fatal("disabled preference not persisted", err)
 	}
@@ -149,7 +183,7 @@ func TestSchedulerStartsImmediatelyCancelsAndBoundsConcurrency(t *testing.T) {
 		<-ctx.Done()
 		return Measurement{Error: "timeout"}
 	})
-	if err := service.Configure(state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
+	if err := service.Configure(context.Background(), state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -166,7 +200,7 @@ func TestSchedulerStartsImmediatelyCancelsAndBoundsConcurrency(t *testing.T) {
 	if service.RequestProbe() {
 		t.Fatal("overlapping manual round accepted")
 	}
-	if err := service.Configure(state.SmartProxyPreferences{Enabled: false, IntervalMinutes: 30}); err != nil {
+	if err := service.Configure(context.Background(), state.SmartProxyPreferences{Enabled: false, IntervalMinutes: 30}); err != nil {
 		t.Fatal(err)
 	}
 	cancel()
@@ -181,7 +215,7 @@ func TestSchedulerStartsImmediatelyCancelsAndBoundsConcurrency(t *testing.T) {
 }
 func TestNoSuccessfulRouteFailsClosedAndRetries(t *testing.T) {
 	service, _ := harness(t, func(context.Context, state.TunnelPin, Target) Measurement { return Measurement{Error: "timeout"} })
-	if err := service.Configure(state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
+	if err := service.Configure(context.Background(), state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
 		t.Fatal(err)
 	}
 	service.roundIfDue(context.Background())
@@ -202,7 +236,7 @@ func TestScheduledCadenceAndRemovedWinnerFallback(t *testing.T) {
 		calls.Add(1)
 		return rankedProbe(ctx, pin, target)
 	})
-	if err := service.Configure(state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
+	if err := service.Configure(context.Background(), state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
 		t.Fatal(err)
 	}
 	service.roundIfDue(context.Background())
@@ -247,7 +281,7 @@ func TestTimedOutRoundDisclosesPartialCoverageAndRotates(t *testing.T) {
 		return Measurement{Error: "timeout"}
 	})
 	service.roundTimeout = 20 * time.Millisecond
-	if err := service.Configure(state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
+	if err := service.Configure(context.Background(), state.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}); err != nil {
 		t.Fatal(err)
 	}
 	service.roundIfDue(context.Background())

@@ -11,8 +11,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/kfadapter/kfadapter/internal/endpoint"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 const (
@@ -109,7 +108,7 @@ func LoadOrCreate(path string) (Config, error) {
 }
 
 func load(file *os.File) (Config, error) {
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	decoder := yaml.NewDecoder(io.LimitReader(file, maxConfigBytes+1))
 	decoder.KnownFields(true)
@@ -118,7 +117,7 @@ func load(file *os.File) (Config, error) {
 		return Config{}, fmt.Errorf("decode configuration: %w", err)
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return Config{}, errors.New("configuration contains multiple YAML documents")
 		}
@@ -193,7 +192,7 @@ func (c Config) Validate() error {
 		return err
 	}
 	if c.Management.PublicOrigin != "" {
-		if _, err := endpoint.ParseHTTPSOrigin(c.Management.PublicOrigin); err != nil {
+		if _, err := ParseHTTPSOrigin(c.Management.PublicOrigin); err != nil {
 			return fmt.Errorf("management.publicOrigin %w", err)
 		}
 	}
@@ -276,7 +275,7 @@ func validateHostname(name, hostname string) error {
 	if hostname == "" {
 		return nil
 	}
-	if err := endpoint.ValidateHostname(hostname); err != nil {
+	if err := ValidateHostname(hostname); err != nil {
 		return fmt.Errorf("%s %w", name, err)
 	}
 	return nil

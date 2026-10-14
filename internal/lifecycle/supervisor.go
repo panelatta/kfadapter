@@ -70,44 +70,34 @@ func (s *Supervisor) Run(parent context.Context) error {
 	case <-parent.Done():
 		cause = parent.Err()
 	case result := <-results:
-		if result.err == nil {
-			cause = fmt.Errorf("critical worker %s stopped unexpectedly", result.name)
-		} else if parent.Err() == nil {
-			cause = fmt.Errorf("critical worker %s failed: %w", result.name, result.err)
-		} else {
+		switch {
+		case parent.Err() != nil:
 			cause = parent.Err()
+		case result.err == nil:
+			cause = fmt.Errorf("critical worker %s stopped unexpectedly", result.name)
+		default:
+			cause = fmt.Errorf("critical worker %s failed: %w", result.name, result.err)
 		}
 	}
 	cancel()
 
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), s.drainTimeout)
+	drainCtx, drainCancel := context.WithTimeout(context.WithoutCancel(parent), s.drainTimeout)
 	defer drainCancel()
-	// Shutdown hooks run concurrently under one shared drain deadline, so a
-	// slow worker cannot consume the budget of the others.
-	var shutdown sync.WaitGroup
-	for _, worker := range s.workers {
+	for index := len(s.workers) - 1; index >= 0; index-- {
+		worker := s.workers[index]
 		if worker.Shutdown == nil {
 			continue
 		}
-		shutdown.Add(1)
-		go func() {
-			defer shutdown.Done()
-			_ = worker.Shutdown(drainCtx)
-		}()
-	}
-	shutdownDone := make(chan struct{})
-	go func() {
-		shutdown.Wait()
-		close(shutdownDone)
-	}()
-	select {
-	case <-shutdownDone:
-	case <-drainCtx.Done():
-		if cause == nil || errors.Is(cause, context.Canceled) {
-			cause = fmt.Errorf("shutdown exceeded %s", s.drainTimeout)
+		if err := worker.Shutdown(drainCtx); err != nil && cause == nil {
+			cause = fmt.Errorf("shutdown worker %s: %w", worker.Name, err)
+		}
+		if drainCtx.Err() != nil {
+			if cause == nil || errors.Is(cause, context.Canceled) {
+				cause = fmt.Errorf("shutdown exceeded %s", s.drainTimeout)
+			}
+			break
 		}
 	}
-
 	workersDone := make(chan struct{})
 	go func() {
 		running.Wait()
@@ -155,9 +145,9 @@ func Watchdog(interval time.Duration, threshold int, probe func(context.Context)
 	}
 }
 
-// RequireContainer rejects unsupported bare-process starts. Native-Linux host
-// validation is performed by scripts/preflight.sh because Docker Desktop cannot
-// be reliably distinguished from inside its Linux VM without a Docker socket.
+// RequireContainer rejects unsupported bare-process starts. It cannot tell
+// Docker Desktop from native Linux from inside the container, so the supported
+// host (native Linux with host networking) is documented rather than checked.
 func RequireContainer() error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("production requires a Linux container, got %s", runtime.GOOS)

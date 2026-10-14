@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/kfadapter/kfadapter/internal/web"
+	"github.com/oshinop/chinadapter/internal/web"
 )
 
 const (
@@ -99,8 +99,15 @@ func (h *eventHub) publish(event web.Event) {
 		select {
 		case subscriber.events <- event:
 		default:
-			// Drop this event only for the stalled browser. No internal state or
-			// secret material is retained in a retry queue.
+			// Keep the newest state: discard the oldest queued event before enqueueing.
+			select {
+			case <-subscriber.events:
+			default:
+			}
+			select {
+			case subscriber.events <- event:
+			default:
+			}
 		}
 	}
 }

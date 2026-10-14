@@ -1,6 +1,7 @@
 import type {
   AccessSessionResponse,
   AccessStatusResponse,
+  AccessTokenChangeInput,
   EventMessage,
   LoginResponse,
   NodeDetails,
@@ -8,9 +9,9 @@ import type {
   NodesResponse,
   ProbeResult,
   ServiceState,
-  StatusResponse,
-  SmartProxyStatus,
   SmartProxyDetails,
+  SmartProxyStatus,
+  StatusResponse,
   SubscriptionURLResponse,
 } from "./types";
 
@@ -36,7 +37,6 @@ const API_ROOT = "/api/v1";
 const EVENT_SOURCE_CLOSED = 2;
 const EVENT_RETRY_INITIAL_MS = 1_000;
 const EVENT_RETRY_MAX_MS = 30_000;
-
 
 async function asProblem(response: Response): Promise<ApiError> {
   let problem: Partial<ProblemDetails> = {};
@@ -97,34 +97,23 @@ function parseNamedEvent(type: "state" | "refresh" | "probe", data: string): Eve
 }
 
 export class ApiClient {
-  private csrfToken = "";
-
-  setCsrfToken(token: string): void {
-    this.csrfToken = token;
-  }
-
-  clearSession(): void {
-    this.csrfToken = "";
-  }
-
   async accessStatus(): Promise<AccessStatusResponse> {
-    const status = await this.request<AccessStatusResponse>("/access/status");
-    if (status.authenticated) this.setCsrfToken(status.csrfToken || "");
-    else this.clearSession();
-    return status;
+    return this.request<AccessStatusResponse>("/access/status");
   }
 
   async setupAccess(token: string): Promise<AccessSessionResponse> {
-    const session = await this.request<AccessSessionResponse>("/access/setup", { method: "POST", body: { token }, useCSRF: false });
-    this.setCsrfToken(session.csrfToken || "");
-    return session;
+    return this.request<AccessSessionResponse>("/access/setup", { method: "POST", body: { token } });
   }
 
   async loginAccess(token: string): Promise<AccessSessionResponse> {
-    const session = await this.request<AccessSessionResponse>("/access/login", { method: "POST", body: { token }, useCSRF: false });
-    this.setCsrfToken(session.csrfToken || "");
-    return session;
+    return this.request<AccessSessionResponse>("/access/login", { method: "POST", body: { token } });
   }
+
+  async changeAccessToken(current: string, next: string): Promise<AccessSessionResponse> {
+    const body: AccessTokenChangeInput = { current, next };
+    return this.request<AccessSessionResponse>("/access/token", { method: "POST", body });
+  }
+
   async status(): Promise<StatusResponse> {
     return this.request<StatusResponse>("/status");
   }
@@ -149,8 +138,6 @@ export class ApiClient {
     return this.request<NodeDetails>(`/nodes/${encodeURIComponent(id)}/details`);
   }
 
-
-
   async login(provider: string, account: string, password: string): Promise<LoginResponse> {
     return this.request<LoginResponse>("/auth/login", {
       method: "POST",
@@ -166,13 +153,9 @@ export class ApiClient {
     try {
       await this.request<void>("/access/logout", { method: "POST", body: {}, expectEmptyResponse: true });
     } catch (error) {
-      if (error instanceof ApiError) {
-        this.clearSession();
-        if (error.problem.status === 401) return;
-      }
+      if (error instanceof ApiError && error.problem.status === 401) return;
       throw error;
     }
-    this.clearSession();
   }
 
   async refresh(provider: string): Promise<void> {
@@ -186,34 +169,29 @@ export class ApiClient {
     });
   }
 
+  async subscriptionURL(): Promise<SubscriptionURLResponse> {
+    return this.request<SubscriptionURLResponse>("/subscription/url");
+  }
 
-  async smartProxy(): Promise<SmartProxyStatus> { return this.request<SmartProxyStatus>("/smart-proxy"); }
+  async smartProxy(): Promise<SmartProxyStatus> {
+    return this.request<SmartProxyStatus>("/smart-proxy");
+  }
 
   async configureSmartProxy(enabled: boolean, intervalMinutes: number): Promise<SmartProxyStatus> {
     return this.request<SmartProxyStatus>("/smart-proxy/config", { method: "PUT", body: { enabled, intervalMinutes } });
   }
 
   async probeSmartProxy(): Promise<void> {
-    return this.request<void>("/smart-proxy/probe", { method: "POST", body: {}, expectEmptyResponse: true });
+    await this.request<void>("/smart-proxy/probe", { method: "POST", body: {}, expectEmptyResponse: true });
   }
 
-  async smartProxyDetails(): Promise<SmartProxyDetails> { return this.request<SmartProxyDetails>("/smart-proxy/details"); }
-
-  async subscriptionURL(): Promise<SubscriptionURLResponse> {
-    return this.request<SubscriptionURLResponse>("/subscription/url");
+  async smartProxyDetails(): Promise<SmartProxyDetails> {
+    return this.request<SmartProxyDetails>("/smart-proxy/details");
   }
-
 
   /** Downloads the redacted diagnostics report as a JSON blob. */
   async diagnostics(): Promise<Blob> {
-    const response = await fetch(`${API_ROOT}/diagnostics/export`, {
-      method: "POST",
-      credentials: "same-origin",
-      cache: "no-store",
-      headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRF-Token": this.csrfToken },
-      body: "{}",
-    });
-    if (!response.ok) throw await asProblem(response);
+    const response = await this.send("/diagnostics/export", { method: "POST", body: {} });
     return response.blob();
   }
 
@@ -277,10 +255,13 @@ export class ApiClient {
     };
   }
 
-  private async request<T>(
-    path: string,
-    init: { method?: "POST" | "PUT" | "DELETE"; body?: unknown; useCSRF?: boolean; expectEmptyResponse?: boolean } = {},
-  ): Promise<T> {
+  private async request<T>(path: string, init: RequestOptions = {}): Promise<T> {
+    const response = await this.send(path, init);
+    if (init.expectEmptyResponse || response.status === 204) return undefined as T;
+    return (await response.json()) as T;
+  }
+
+  private async send(path: string, init: RequestOptions): Promise<Response> {
     const isWrite = Boolean(init.method);
     const response = await fetch(`${API_ROOT}${path}`, {
       method: init.method || "GET",
@@ -291,14 +272,18 @@ export class ApiClient {
         ...(isWrite
           ? {
               "Content-Type": "application/json",
-              ...(init.useCSRF === false ? {} : { "X-CSRF-Token": this.csrfToken }),
             }
           : {}),
       },
       ...(isWrite ? { body: JSON.stringify(init.body ?? {}) } : {}),
     });
     if (!response.ok) throw await asProblem(response);
-    if (init.expectEmptyResponse || response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    return response;
   }
+}
+
+interface RequestOptions {
+  method?: "POST" | "PUT" | "DELETE";
+  body?: unknown;
+  expectEmptyResponse?: boolean;
 }

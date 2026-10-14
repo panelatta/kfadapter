@@ -40,7 +40,7 @@ describe("access token and browser session", () => {
     Object.assign(api, { accessStatus: vi.fn().mockResolvedValue({ initialized: false, setupAllowed: false, authenticated: false }) });
     render(<App api={api} />);
     await screen.findByRole("heading", { name: "Create console access" });
-    expect(screen.getByRole("alert").textContent).toContain("device running kfadapter");
+    expect(screen.getByRole("alert").textContent).toContain("device running chinadapter");
     expect(screen.queryByLabelText("Access token")).toBeNull();
     expect(api.setupAccess).not.toHaveBeenCalled();
   });
@@ -372,7 +372,6 @@ describe("access token and browser session", () => {
     expect(api.logoutAccount).toHaveBeenNthCalledWith(2, "quickfox");
     expect(vi.mocked(api.logoutAccount).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(api.logoutAccount).mock.invocationCallOrder[1]);
     expect(api.lockConsole).not.toHaveBeenCalled();
-    expect(api.clearSession).not.toHaveBeenCalled();
     await waitFor(() => expect(api.status).toHaveBeenCalledTimes(2));
     expect(api.nodes).toHaveBeenCalledTimes(2);
     expect(api.subscriptionURL).toHaveBeenCalledTimes(2);
@@ -456,6 +455,22 @@ describe("access token and browser session", () => {
   });
 });
 
+describe("sign out all confirmation", () => {
+  it("asks before signing out every provider and can be cancelled", async () => {
+    const api = makeApi(readyStatus());
+    render(<App api={api} />);
+    await screen.findByRole("heading", { name: "Service status" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Sign out all" }));
+    expect(screen.queryByRole("button", { name: "Sign out all" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(screen.getByRole("button", { name: "Sign out all" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Confirm sign out" })).toBeNull();
+    expect(api.logoutAccount).not.toHaveBeenCalled();
+  });
+});
+
 describe("console loading and recovery", () => {
   it("shows a retryable error instead of the account form when status fails", async () => {
     const api = makeApi(readyStatus());
@@ -465,6 +480,7 @@ describe("console loading and recovery", () => {
     render(<App api={api} />);
     expect(await screen.findByRole("heading", { name: "Service unavailable" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Connect account" })).toBeNull();
+    expect(window.location.pathname).toBe("/");
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByRole("heading", { name: "Service status" })).toBeTruthy();
   });
@@ -519,12 +535,17 @@ describe("diagnostics export", () => {
     const createObjectURL = vi.fn().mockReturnValue("blob:report");
     const revokeObjectURL = vi.fn();
     Object.assign(URL, { createObjectURL, revokeObjectURL });
-    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    let downloadName = "";
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloadName = this.download;
+    });
     render(<App api={api} />);
     await screen.findByRole("heading", { name: "Service status" });
-    await userEvent.click(screen.getByRole("button", { name: "Export diagnostics" }));
+    await userEvent.click(within(screen.getByRole("banner")).getByRole("button", { name: "Export diagnostics" }));
     await waitFor(() => expect(click).toHaveBeenCalledOnce());
+    expect(api.diagnostics).toHaveBeenCalledOnce();
     expect(createObjectURL).toHaveBeenCalledWith(report);
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:report");
+    expect(downloadName).toBe("chinadapter-diagnostics.json");
   });
 });

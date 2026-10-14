@@ -12,11 +12,24 @@ function jsonResponse(payload: unknown) {
 }
 
 describe("browser boundary", () => {
+  it("changes the token using same-origin cookie credentials", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ expiresAt: "2026-07-15T18:00:00Z" }))
+      .mockResolvedValueOnce(jsonResponse({}));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = new ApiClient();
+    await expect(api.changeAccessToken("original-token-12345", "replacement-token-12345")).resolves.toEqual({ expiresAt: "2026-07-15T18:00:00Z" });
+    await api.refresh("kuaifan");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/access/token");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": "application/json" } });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ current: "original-token-12345", next: "replacement-token-12345" });
+    expect(fetchMock.mock.calls[1][1].headers).toEqual({ Accept: "application/json", "Content-Type": "application/json" });
+  });
   it("uses same-origin API paths with credentials and never writes browser storage", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(jsonResponse({ initialized: true, authenticated: true, csrfToken: "csrf-test" }))
-      .mockResolvedValueOnce(jsonResponse({ csrfToken: "csrf-test" }))
-      .mockResolvedValueOnce(jsonResponse({ csrfToken: "csrf-test" }))
+      .mockResolvedValueOnce(jsonResponse({ initialized: true, authenticated: true }))
+      .mockResolvedValueOnce(jsonResponse({ expiresAt: "2026-07-15T18:00:00Z" }))
+      .mockResolvedValueOnce(jsonResponse({ expiresAt: "2026-07-15T18:00:00Z" }))
       .mockResolvedValueOnce(jsonResponse({ state: "ready" }))
       .mockResolvedValueOnce(jsonResponse({}));
     vi.stubGlobal("fetch", fetchMock);
@@ -41,24 +54,23 @@ describe("browser boundary", () => {
       "/api/v1/status",
       "/api/v1/auth/login",
     ]);
-    expect(fetchMock.mock.calls[1][1].headers["X-CSRF-Token"]).toBeUndefined();
-    expect(fetchMock.mock.calls[2][1].headers["X-CSRF-Token"]).toBeUndefined();
-    expect(fetchMock.mock.calls[4][1].headers["X-CSRF-Token"]).toBe("csrf-test");
+    for (const index of [1, 2, 4]) {
+      expect(fetchMock.mock.calls[index][1].headers).toEqual({ Accept: "application/json", "Content-Type": "application/json" });
+    }
     expect(storageWrite).not.toHaveBeenCalled();
   });
 
-  it("clears CSRF after an HTTP console-lock response", async () => {
+  it("propagates an HTTP console-lock failure", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ title: "Unavailable", status: 503, code: "temporary" }), { status: 503, headers: { "Content-Type": "application/problem+json" } }))
       .mockResolvedValueOnce(jsonResponse({ state: "signed_out" }));
     vi.stubGlobal("fetch", fetchMock);
     const api = new ApiClient();
-    api.setCsrfToken("csrf-before-logout");
 
-    await expect(api.lockConsole()).rejects.toBeInstanceOf(Error);
+    await expect(api.lockConsole()).rejects.toMatchObject({ problem: { status: 503, code: "temporary" } });
 		await api.refresh("kuaifan");
 
-    expect(fetchMock.mock.calls[1][1].headers["X-CSRF-Token"]).toBe("");
+    expect(fetchMock.mock.calls[1][1].headers).toEqual({ Accept: "application/json", "Content-Type": "application/json" });
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/access/logout");
   });
 
@@ -68,30 +80,29 @@ describe("browser boundary", () => {
       .mockResolvedValueOnce(new Response(null, { status: 202 }));
     vi.stubGlobal("fetch", fetchMock);
     const api = new ApiClient();
-    api.setCsrfToken("csrf-before-lock");
 
     await expect(api.lockConsole()).resolves.toBeUndefined();
 		await api.refresh("kuaifan");
 
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/access/logout");
-    expect(fetchMock.mock.calls[1][1].headers["X-CSRF-Token"]).toBe("");
+    expect(fetchMock.mock.calls[1][1].headers).toEqual({ Accept: "application/json", "Content-Type": "application/json" });
   });
 
-  it("retains CSRF for retry after a transport-level console-lock failure", async () => {
+  it("allows retry after a transport-level console-lock failure", async () => {
     const fetchMock = vi.fn()
       .mockRejectedValueOnce(new TypeError("Network unavailable"))
       .mockResolvedValueOnce(jsonResponse({}))
       .mockResolvedValueOnce(jsonResponse({ state: "signed_out" }));
     vi.stubGlobal("fetch", fetchMock);
     const api = new ApiClient();
-    api.setCsrfToken("csrf-retry-token");
 
     await expect(api.lockConsole()).rejects.toBeInstanceOf(TypeError);
     await api.lockConsole();
 		await api.refresh("kuaifan");
 
-    expect(fetchMock.mock.calls[1][1].headers["X-CSRF-Token"]).toBe("csrf-retry-token");
-    expect(fetchMock.mock.calls[2][1].headers["X-CSRF-Token"]).toBe("");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/v1/access/logout");
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: "POST", credentials: "same-origin" });
+    expect(fetchMock.mock.calls[2][1].headers).toEqual({ Accept: "application/json", "Content-Type": "application/json" });
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/access/logout");
   });
 
@@ -99,7 +110,6 @@ describe("browser boundary", () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ url: currentConsumerURL }));
     vi.stubGlobal("fetch", fetchMock);
     const api = new ApiClient();
-    api.setCsrfToken("csrf-test");
 
     await expect(api.subscriptionURL()).resolves.toEqual({ url: currentConsumerURL });
     expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/subscription/url");
@@ -107,7 +117,7 @@ describe("browser boundary", () => {
   });
 
   it("ships a CSP-compatible self-hosted production shell with no remote asset URL", () => {
-    const staticDirectory = resolve(process.cwd(), "../internal/web/static/dist");
+    const staticDirectory = resolve(process.cwd(), "../internal/web/static");
     const index = readFileSync(`${staticDirectory}/index.html`, "utf8");
     const assetNames = readdirSync(`${staticDirectory}/assets`);
     const mainBundles = assetNames.filter((file) => /^index-[A-Za-z0-9_-]+\.js$/.test(file));

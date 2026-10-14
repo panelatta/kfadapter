@@ -21,13 +21,13 @@ function sessionRequests() {
   const fetchMock = vi.fn<(resource: RequestInfo | URL, init?: RequestInit) => Promise<Response>>((resource) => {
     const path = String(resource);
     if (path === "/api/v1/access/status")
-      return Promise.resolve(response({ initialized: true, authenticated: true, csrfToken: "old-csrf" }));
+      return Promise.resolve(response({ initialized: true, authenticated: true }));
     if (path === "/api/v1/access/logout") {
       lockRequests += 1;
       return lockRequests === 1 ? pendingLock.promise : Promise.resolve(response(null, 204));
     }
     if (path === "/api/v1/access/login")
-      return Promise.resolve(response({ csrfToken: "new-csrf" }));
+      return Promise.resolve(response({ expiresAt: "2026-07-15T18:00:00Z" }));
     if (path === "/api/v1/status") return Promise.resolve(response(readyStatus()));
     if (path === "/api/v1/nodes") return Promise.resolve(response({ nodes }));
     if (path === "/api/v1/smart-proxy") return Promise.resolve(response(disabledSmartProxy()));
@@ -66,12 +66,11 @@ describe("console lock and unlock ordering", () => {
 
     await act(async () => pendingLock.resolve(new Response(null, {
       status: 204,
-      headers: { "Set-Cookie": "kfadapter_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict" },
+      headers: { "Set-Cookie": "chinadapter_session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict" },
     })));
     await unlock();
     await userEvent.click(screen.getByRole("button", { name: "Refresh all" }));
     await waitFor(() => expect(calls("control/refresh")).toHaveLength(1));
-    expect(calls("control/refresh")[0][1]?.headers).toMatchObject({ "X-CSRF-Token": "new-csrf" });
     expect(calls("access/login")).toHaveLength(1);
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -95,11 +94,9 @@ describe("console lock and unlock ordering", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Refresh all" }));
     await waitFor(() => expect(calls("control/refresh")).toHaveLength(1));
-    expect(calls("control/refresh")[0][1]?.headers).toMatchObject({ "X-CSRF-Token": "new-csrf" });
     await userEvent.click(screen.getByRole("button", { name: "Lock console" }));
     await screen.findByRole("heading", { name: "Unlock console" });
     expect(calls("access/logout")).toHaveLength(2);
-    expect(calls("access/logout")[1][1]?.headers).toMatchObject({ "X-CSRF-Token": "new-csrf" });
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
@@ -125,7 +122,6 @@ describe("console lock and unlock ordering", () => {
     await userEvent.click(screen.getByRole("button", { name: "Lock console" }));
     await screen.findByRole("heading", { name: "Unlock console" });
     expect(calls("access/logout")).toHaveLength(2);
-    expect(calls("access/logout")[1][1]?.headers).toMatchObject({ "X-CSRF-Token": "new-csrf" });
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
@@ -138,7 +134,6 @@ describe("console lock and unlock ordering", () => {
     await unlock();
     await userEvent.click(screen.getByRole("button", { name: "Refresh all" }));
     await waitFor(() => expect(calls("control/refresh")).toHaveLength(1));
-    expect(calls("control/refresh")[0][1]?.headers).toMatchObject({ "X-CSRF-Token": "new-csrf" });
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });

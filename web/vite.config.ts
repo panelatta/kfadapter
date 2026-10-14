@@ -11,8 +11,8 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: "../internal/web/static/dist",
-    emptyOutDir: true,
+    outDir: "../internal/web/static",
+    emptyOutDir: false,
     assetsDir: "assets",
     sourcemap: false,
     manifest: false,

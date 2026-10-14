@@ -15,7 +15,7 @@ fail() {
 
 tmp_root=${TMPDIR:-/tmp}
 tmp_root=${tmp_root%/}
-work=$(mktemp -d "$tmp_root/kfadapter-restore-state.XXXXXXXX")
+work=$(mktemp -d "$tmp_root/chinadapter-restore-state.XXXXXXXX")
 work=$(CDPATH= cd -- "$work" && pwd -P)
 cleanup() {
     rm -rf -- "$work"
@@ -55,12 +55,12 @@ case "${1:-}" in
         ;;
     volume)
         if [ "${2:-}" = ls ]; then
-            printf '%s\n' kfadapter_db_data
+            printf '%s\n' chinadapter_db_data
             exit 0
         fi
-        [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${5:-}" = kfadapter_db_data ] || exit 2
+        [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${5:-}" = chinadapter_db_data ] || exit 2
         case "${4:-}" in
-            '{{.Name}}') printf '%s\n' kfadapter_db_data ;;
+            '{{.Name}}') printf '%s\n' chinadapter_db_data ;;
             '{{.Driver}}') printf '%s\n' local ;;
             '{{.Mountpoint}}') printf '%s\n' "${FAKE_STATE_MOUNTPOINT%/}" ;;
             '{{json .Options}}') printf '%s\n' null ;;
@@ -70,14 +70,14 @@ case "${1:-}" in
         ;;
     ps)
         printf '%s\n' ps >>"$log"
-        [ "${2:-}" = --filter ] && [ "${3:-}" = volume=kfadapter_db_data ] && [ "${4:-}" = -q ] || exit 2
+        [ "${2:-}" = --filter ] && [ "${3:-}" = volume=chinadapter_db_data ] && [ "${4:-}" = -q ] || exit 2
         [ "${FAKE_DOCKER_PS_FAIL:-}" != 1 ] || exit 1
         [ "${FAKE_DOCKER_RUNNING:-}" != 1 ] || printf '%s\n' running-container
         exit 0
         ;;
     image)
         [ "${2:-}" = inspect ] || exit 2
-        [ "${3:-}" = "ghcr.io/panelatta/kfadapter@sha256:$(printf '%064d' 0)" ] || exit 2
+        [ "${3:-}" = "ghcr.io/panelatta/chinadapter@sha256:$(printf '%064d' 0)" ] || exit 2
         printf '%s\n' image-inspect >>"$log"
         exit 0
         ;;
@@ -87,16 +87,17 @@ case "${1:-}" in
         [ "${1:-}" = --pull ] && [ "${2:-}" = never ] || exit 2; shift 2
         [ "${1:-}" = --network ] && [ "${2:-}" = none ] || exit 2; shift 2
         [ "${1:-}" = --read-only ] || exit 2; shift
+        [ "${1:-}" = --tmpfs ] && [ "${2:-}" = /tmp:rw,noexec,nosuid,nodev,size=40m ] || exit 2; shift 2
         [ "${1:-}" = --user ] && [ "${2:-}" = "65532:65532" ] || exit 2; shift 2
         [ "${1:-}" = --cap-drop ] && [ "${2:-}" = ALL ] || exit 2; shift 2
         [ "${1:-}" = --security-opt ] && [ "${2:-}" = no-new-privileges ] || exit 2; shift 2
         [ "${1:-}" = --pids-limit ] && [ "${2:-}" = 64 ] || exit 2; shift 2
         [ "${1:-}" = --memory ] && [ "${2:-}" = 128m ] || exit 2; shift 2
-        [ "${1:-}" = --entrypoint ] && [ "${2:-}" = /kfadapter/kfadapter ] || exit 2; shift 2
+        [ "${1:-}" = --entrypoint ] && [ "${2:-}" = /chinadapter/chinadapter ] || exit 2; shift 2
         [ "${1:-}" = -v ] || exit 2
         mount=${2:-}; shift 2
         case "$mount" in /*:/restore:ro) ;; *) exit 2 ;; esac
-        [ "${1:-}" = "ghcr.io/panelatta/kfadapter@sha256:$(printf '%064d' 0)" ] || exit 2; shift
+        [ "${1:-}" = "ghcr.io/panelatta/chinadapter@sha256:$(printf '%064d' 0)" ] || exit 2; shift
         [ "$#" -eq 3 ] && [ "${1:-}" = validate-state ] && [ "${2:-}" = --file ] && [ "${3:-}" = /restore/state.db ] || exit 2
         stage=${mount%:/restore:ro}
         printf '%s\n' docker-run-offline-validator >>"$log"
@@ -133,9 +134,9 @@ PY
             version) exit 0 ;;
             config)
                 [ "${2:-}" != --quiet ] || exit 0
-                [ "${2:-}" = --images ] && [ "${3:-}" = kfadapter ] || exit 2
+                [ "${2:-}" = --images ] && [ "${3:-}" = chinadapter ] || exit 2
                 printf '%s\n' compose-config-images >>"$log"
-                printf '%s\n' "ghcr.io/panelatta/kfadapter@sha256:$(printf '%064d' 0)"
+                printf '%s\n' "ghcr.io/panelatta/chinadapter@sha256:$(printf '%064d' 0)"
                 exit 0
                 ;;
             run)
@@ -152,9 +153,9 @@ PY
                     esac
                 done
                 [ "$no_deps" = true ] && [ "$network" = none ] && \
-                    [ "$entrypoint" = /kfadapter/kfadapter ] && \
+                    [ "$entrypoint" = /chinadapter/chinadapter ] && \
                     case "$mount" in /*:/restore:ro) true;; *) false;; esac && \
-                    [ "$#" -eq 4 ] && [ "${1:-}" = kfadapter ] && \
+                    [ "$#" -eq 4 ] && [ "${1:-}" = chinadapter ] && \
                     [ "${2:-}" = validate-state ] && [ "${3:-}" = --file ] && \
                     [ "${4:-}" = /restore/state.db ] || exit 2
                 stage=${mount%:/restore:ro}
@@ -196,9 +197,9 @@ run_restore() {
         FAKE_EXPECTED_STATE_DB="$work/input/state.db" \
         FAKE_VALIDATION="${FAKE_VALIDATION:-valid}" \
         PATH="$work/bin:$PATH" \
-        KFADAPTER_HOST_UID="$actual_uid" \
-        KFADAPTER_HOST_GID="$actual_gid" \
-        KFADAPTER_IMAGE_DIGEST="sha256:$(printf '%064d' 0)" \
+        CHINADAPTER_HOST_UID="$actual_uid" \
+        CHINADAPTER_HOST_GID="$actual_gid" \
+        CHINADAPTER_IMAGE_DIGEST="sha256:$(printf '%064d' 0)" \
         "$work/scripts/restore-state.sh" "$1"
 }
 
@@ -210,9 +211,9 @@ run_restore_at_volume_path() {
         FAKE_EXPECTED_STATE_DB="$work/input/state.db" \
         FAKE_VALIDATION="${FAKE_VALIDATION:-valid}" \
         PATH="$work/bin:$PATH" \
-        KFADAPTER_HOST_UID="$actual_uid" \
-        KFADAPTER_HOST_GID="$actual_gid" \
-        KFADAPTER_IMAGE_DIGEST="sha256:$(printf '%064d' 0)" \
+        CHINADAPTER_HOST_UID="$actual_uid" \
+        CHINADAPTER_HOST_GID="$actual_gid" \
+        CHINADAPTER_IMAGE_DIGEST="sha256:$(printf '%064d' 0)" \
         "$work/scripts/restore-state.sh" "$2"
 }
 
@@ -460,11 +461,11 @@ if python3 "$work/scripts/restore-state-commit.py" --parent "$work/symlink-paren
     fail "symlink state ancestor passed commit validation"
 fi
 
-if KFADAPTER_RESTORE_MAX_ARCHIVE_BYTES=1 run_restore "$current_archive" >/dev/null 2>&1; then
+if CHINADAPTER_RESTORE_MAX_ARCHIVE_BYTES=1 run_restore "$current_archive" >/dev/null 2>&1; then
     fail "compressed archive beyond its limit was restored"
 fi
 assert_live_payload state.db "$work/input/state.db" || fail "compressed-limit rejection changed live current SQLite bytes"
-unset KFADAPTER_RESTORE_MAX_ARCHIVE_BYTES
+unset CHINADAPTER_RESTORE_MAX_ARCHIVE_BYTES
 
 python3 - "$work/bomb-current.tar.gz" <<'PY'
 from io import BytesIO
@@ -478,11 +479,11 @@ with taropen(Path(sys.argv[1]), "w:gz") as archive:
     entry.size = len(body)
     archive.addfile(entry, BytesIO(body))
 PY
-if KFADAPTER_RESTORE_MAX_UNCOMPRESSED_BYTES=1024 run_restore "$work/bomb-current.tar.gz" >/dev/null 2>&1; then
+if CHINADAPTER_RESTORE_MAX_UNCOMPRESSED_BYTES=1024 run_restore "$work/bomb-current.tar.gz" >/dev/null 2>&1; then
     fail "uncompressed archive beyond its limit was restored"
 fi
 assert_live_payload state.db "$work/input/state.db" || fail "uncompressed-limit rejection changed live current SQLite bytes"
-unset KFADAPTER_RESTORE_MAX_UNCOMPRESSED_BYTES
+unset CHINADAPTER_RESTORE_MAX_UNCOMPRESSED_BYTES
 
 printf '%s\n' malformed >"$work/malformed-state.tar.gz"
 python3 - "$work" "$work/input/state.db" <<'PY'

@@ -1,4 +1,4 @@
-# Paths are fixed relative to /kfadapter: configuration is ./config.yaml and
+# Paths are fixed relative to /chinadapter: configuration is ./config.yaml and
 # persistent SQLite data is ./data. Provider control requests go to each
 # provider's fixed HTTPS API (KuaiFan and QuickFox); see README.md.
 

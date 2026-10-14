@@ -131,7 +131,7 @@ def snapshot_archive(archive_path: Path, destination: Path, max_archive: int) ->
         fail(f"cannot open archive safely: {error}")
 
     try:
-        snapshot_descriptor, snapshot_name = tempfile.mkstemp(prefix=".kfadapter-archive.", dir=destination.parent)
+        snapshot_descriptor, snapshot_name = tempfile.mkstemp(prefix=".chinadapter-archive.", dir=destination.parent)
     except OSError as error:
         os.close(descriptor)
         fail(f"could not reserve a protected archive snapshot: {error}")

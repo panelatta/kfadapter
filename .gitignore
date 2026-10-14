@@ -15,14 +15,16 @@
 coverage.out
 *.coverprofile
 *.log
+__pycache__/
 
 # JavaScript dependencies and generated frontend assets.
 /node_modules/
 /web/node_modules/
-/internal/web/static/dist/
-__pycache__/
+/internal/web/static/*
+!/internal/web/static/.gitkeep
 
-# Editor and operating-system files.
+# Editor, agent, and operating-system files.
 .DS_Store
 .idea/
 .vscode/
+.claude/

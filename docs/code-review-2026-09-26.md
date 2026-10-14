@@ -1,5 +1,7 @@
 # kfadapter 代码审阅报告
 
+> 历史文档：本报告审阅的是项目改名为 chinadapter 之前的 kfadapter（提交 `ab351a8`），文中的路径、命令和名称均保持当时的原样。合并上游 chinadapter 时，其中的修复已逐项移植到当前代码，或由上游的等价实现取代。
+
 - **审阅日期**：2026-09-26
 - **审阅对象**：`main` 分支，提交 `ab351a8`（feat: add multi provider support …）
 - **审阅范围**：全部 Go 代码（`cmd/`、`internal/`）、前端（`web/`）、部署脚本（`scripts/`）、`Dockerfile`、`compose.yaml`、`config.yaml`、GitHub Actions 工作流、`docs/`

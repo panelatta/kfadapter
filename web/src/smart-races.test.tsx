@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "./api";
-import { SmartProxyCard } from "./components/SmartProxyCard";
+import { SmartProxyCard } from "./features/smart/SmartProxyCard";
 import { makeApi } from "./test/fixtures";
 import type { SmartProxyStatus } from "./types";
 

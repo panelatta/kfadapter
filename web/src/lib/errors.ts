@@ -7,47 +7,46 @@ export function isSessionProblem(error: unknown): boolean {
     );
 }
 
+const tooManyAttempts = "Too many attempts. Wait a moment and try again.";
+
+// Keyed by the backend's problem codes. Anything else falls back to the
+// problem's detail or title.
 const problemMessages: Record<string, string> = {
-    session_revocation_pending: "The console is locked now, but an old session could become valid again after the service restarts. Repair persistent storage, then unlock and lock the console again to retry.",
-    access_rate_limited: "Too many attempts. Wait a moment and try again.",
-    login_rate_limited: "Too many attempts. Wait a moment and try again.",
-    access_in_progress: "Another attempt is still being checked. Try again in a moment.",
-    login_in_progress: "Another sign-in is still in progress. Try again in a moment.",
-    operation_in_progress: "Another account operation is still running. Try again in a moment.",
+    session_revocation_pending:
+        "The console is locked now, but an old session could become valid again after the service restarts. Repair persistent storage, then unlock and lock the console again to retry.",
+    setup_requires_loopback:
+        "For safety, the first access token can only be created from the device running chinadapter. Open this console at http://127.0.0.1 on that device, for example through an SSH port forward.",
+    access_rate_limited: tooManyAttempts,
+    login_rate_limited: tooManyAttempts,
+    access_in_progress:
+        "Another attempt is still being checked. Try again in a moment.",
+    login_in_progress:
+        "Another sign-in is still in progress. Try again in a moment.",
+    operation_in_progress:
+        "Another account operation is still running. Try again in a moment.",
     invalid_access_token: "That access token was not accepted.",
-    access_initialized: "Console access has already been created. Unlock it with your access token.",
+    invalid_next_access_token:
+        "Use a different access token of 16–128 bytes.",
+    access_initialized:
+        "Console access has already been created. Unlock it with your access token.",
     login_rejected: "The provider rejected that email or password.",
     login_unavailable: "The provider could not be reached. Try again later.",
-    account_exists: "That provider already has a connected account. Remove it first to switch accounts.",
+    account_exists:
+        "That provider already has a connected account. Remove it first to switch accounts.",
+    invalid_smart_policy: "Choose a probe interval of 30 or 60 minutes.",
+    smart_config_failed:
+        "The smart proxy settings could not be saved. Try again.",
+    smart_probe_unavailable:
+        "Enable the smart proxy and wait for the current probe to finish.",
+    smart_proxy_unavailable:
+        "The smart proxy address is not available yet. Try again in a moment.",
 };
 
 export function describeError(error: unknown): string {
     if (error instanceof ApiError) {
-        const message = problemMessages[error.problem.code ?? ""];
-        if (message) return message;
+        const { code } = error.problem;
+        if (Object.hasOwn(problemMessages, code)) return problemMessages[code];
         return error.problem.detail || error.problem.title;
     }
     return "The local service did not complete that request.";
-}
-
-export function probeFailureLabel(error: unknown): string {
-    if (!(error instanceof ApiError)) return "Failed";
-    switch (error.problem.code) {
-        case "node_ineligible":
-            return "Ineligible";
-        case "node_not_found":
-        case "node_snapshot_unavailable":
-            return "Unavailable";
-        case "probe_busy":
-            return "Busy";
-        case "stale_probe":
-            return "Changed";
-        case "tcp_probe_timeout":
-            return "Timeout";
-        case "tcp_probe_failed":
-        case "probe_failed":
-            return "Unreachable";
-        default:
-            return "Failed";
-    }
 }

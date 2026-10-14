@@ -5,7 +5,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 IMAGE_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000000
-unset KFADAPTER_IMAGE_REPOSITORY KFADAPTER_IMAGE
+unset CHINADAPTER_IMAGE_REPOSITORY CHINADAPTER_IMAGE
 
 fail() {
     printf '%s\n' "configured-healthcheck: $*" >&2
@@ -14,7 +14,7 @@ fail() {
 
 tmp_root=${TMPDIR:-/tmp}
 tmp_root=${tmp_root%/}
-work=$(mktemp -d "$tmp_root/kfadapter-healthcheck.XXXXXXXX")
+work=$(mktemp -d "$tmp_root/chinadapter-healthcheck.XXXXXXXX")
 work=$(CDPATH= cd -- "$work" && pwd -P)
 cleanup() {
     rm -rf -- "$work"
@@ -38,17 +38,17 @@ provider:
 YAML
 cat >"$override" <<COMPOSE
 services:
-  kfadapter:
+  chinadapter:
     volumes:
       - type: bind
         source: $config
-        target: /kfadapter/config.yaml
+        target: /chinadapter/config.yaml
         read_only: true
         bind:
           create_host_path: false
 COMPOSE
 
-KFADAPTER_IMAGE_DIGEST="$IMAGE_DIGEST" \
+CHINADAPTER_IMAGE_DIGEST="$IMAGE_DIGEST" \
 docker compose --env-file /dev/null -f "$PROJECT_ROOT/compose.yaml" -f "$override" config --format json >"$work/rendered.json" ||
     fail "docker compose config failed"
 python3 - "$config" "$work/rendered.json" <<'PY'
@@ -58,23 +58,23 @@ import sys
 
 config = Path(sys.argv[1]).resolve()
 rendered = json.loads(Path(sys.argv[2]).read_text())
-service = rendered["services"]["kfadapter"]
-assert service["working_dir"] == "/kfadapter"
-assert service["image"] == "ghcr.io/panelatta/kfadapter@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+service = rendered["services"]["chinadapter"]
+assert service["working_dir"] == "/chinadapter"
+assert service["image"] == "ghcr.io/panelatta/chinadapter@sha256:0000000000000000000000000000000000000000000000000000000000000000"
 # The probe takes no arguments: it reads ./config.yaml from the working
 # directory, so a custom mount changes the probed ports without a new command.
-assert service["healthcheck"]["test"] == ["CMD", "./kfadapter", "healthcheck"]
+assert service["healthcheck"]["test"] == ["CMD", "./chinadapter", "healthcheck"]
 assert service["network_mode"] == "host"
 assert not service.get("ports")
 mounts = {mount["target"]: mount for mount in service["volumes"]}
-state = mounts["/kfadapter/data"]
-config_mount = mounts["/kfadapter/config.yaml"]
+state = mounts["/chinadapter/data"]
+config_mount = mounts["/chinadapter/config.yaml"]
 assert state["type"] == "volume"
 assert state["source"] == "db_data"
 assert state.get("read_only") is not True
 assert config_mount["type"] == "bind"
 assert config_mount["read_only"] is True
 assert Path(config_mount["source"]).resolve() == config
-assert rendered["volumes"] == {"db_data": {"name": "kfadapter_db_data"}}
+assert rendered["volumes"] == {"db_data": {"name": "chinadapter_db_data"}}
 PY
 printf '%s\n' "configured-healthcheck: passed"

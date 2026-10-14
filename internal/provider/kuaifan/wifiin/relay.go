@@ -1,0 +1,72 @@
+package wifiin
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"sync"
+)
+
+type closeWriter interface {
+	CloseWrite() error
+}
+
+// Relay copies both directions using the connections' io.Copy fast paths,
+// without allocating buffers those fast paths would ignore. An EOF causes only
+// a half-close of the peer's write side, allowing the reverse direction to
+// drain. Cancellation or any copy error, including a local close, closes both
+// sides.
+func Relay(ctx context.Context, left, right net.Conn) error {
+	results := make(chan error, 2)
+	var closeOnce sync.Once
+	closeBoth := func() {
+		closeOnce.Do(func() {
+			_ = left.Close()
+			_ = right.Close()
+		})
+	}
+	cancelled := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			closeBoth()
+		case <-cancelled:
+		}
+	}()
+
+	pump := func(dst, src net.Conn) {
+		_, err := io.Copy(dst, src)
+		if err == nil {
+			if cw, ok := dst.(closeWriter); ok {
+				err = cw.CloseWrite()
+			} else {
+				// A generic net.Conn cannot represent a half-close. Closing is
+				// safer than leaving a permanently blocked peer goroutine.
+				err = dst.Close()
+			}
+		}
+		// A local Close is also an abort: the reverse copy may still be
+		// blocked reading an idle upstream. Only a clean EOF half-closes.
+		if err != nil {
+			closeBoth()
+		}
+		results <- err
+	}
+	go pump(right, left)
+	go pump(left, right)
+
+	first := <-results
+	second := <-results
+	close(cancelled)
+	if first != nil && !errors.Is(first, net.ErrClosed) {
+		return first
+	}
+	if second != nil && !errors.Is(second, net.ErrClosed) {
+		return second
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}

@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { ApiClient } from "./api";
-import { currentConsumerURL, disabledSmartProxy, nodes, readyStatus } from "./test/fixtures";
+import { currentConsumerURL, disabledSmartProxy, nodes, readyStatus, updatedConsumerURL } from "./test/fixtures";
 import { TestEventSource } from "./test/setup";
 
 function response(payload: unknown, status = 200) {
@@ -18,7 +18,7 @@ function mountConsole(firstStatus?: Promise<Response>) {
   const fetchMock = vi.fn((resource: RequestInfo | URL): Promise<Response> => {
     const path = String(resource);
     if (path === "/api/v1/access/status")
-      return Promise.resolve(response({ initialized: true, authenticated: true, csrfToken: "csrf-test" }));
+      return Promise.resolve(response({ initialized: true, authenticated: true }));
     if (path === "/api/v1/status") {
       statusRequests += 1;
       if (statusRequests === 1 && firstStatus) return firstStatus;
@@ -40,7 +40,7 @@ function mountConsole(firstStatus?: Promise<Response>) {
     update: () => {
       status = { ...readyStatus(), state: "degraded" };
       inventory = [{ ...nodes[0], group: "Updated group" }];
-      subscriptionURL = `${currentConsumerURL}-updated`;
+      subscriptionURL = updatedConsumerURL;
     },
   };
 }
@@ -79,7 +79,7 @@ describe("event stream authoritative reconciliation", () => {
     const source = TestEventSource.instances[0];
     console.update();
     await act(async () => source.open());
-    await screen.findByText(`${currentConsumerURL}-updated`);
+    await screen.findByText(updatedConsumerURL);
     expect(screen.getByText("Needs attention", { exact: true })).toBeTruthy();
     expect(screen.getByRole("option", { name: "Updated group" })).toBeTruthy();
     expect(console.statusRequests()).toBe(2);
@@ -107,7 +107,7 @@ describe("event stream authoritative reconciliation", () => {
     console.setFailure(0);
     console.update();
     await act(async () => source.open());
-    await screen.findByText(`${currentConsumerURL}-updated`);
+    await screen.findByText(updatedConsumerURL);
 
     expect(console.statusRequests()).toBe(4);
     expect(screen.getByText("Needs attention", { exact: true })).toBeTruthy();

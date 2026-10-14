@@ -1,16 +1,16 @@
 #!/usr/bin/env sh
 # Create an owner-preserving state archive without following output paths. A
-# running service is backed up online through `kfadapter backup`, which streams
+# running service is backed up online through `chinadapter backup`, which streams
 # a validated point-in-time snapshot; a stopped service is copied offline.
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
-STATE_VOLUME=kfadapter_db_data
-SERVICE_IDENTITY="kfadapter/kfadapter volume:$STATE_VOLUME"
+STATE_VOLUME=chinadapter_db_data
+SERVICE_IDENTITY="chinadapter/chinadapter volume:$STATE_VOLUME"
 BACKUP_DIR=${BACKUP_DIR:-"$PROJECT_ROOT/backups"}
-STATE_UID=${KFADAPTER_HOST_UID:-65532}
-STATE_GID=${KFADAPTER_HOST_GID:-65532}
+STATE_UID=${CHINADAPTER_HOST_UID:-65532}
+STATE_GID=${CHINADAPTER_HOST_GID:-65532}
 
 fail() {
     printf '%s\n' "backup-state: $*" >&2
@@ -50,9 +50,9 @@ if [ "$mode" = online ]; then
     [ "$container_count" = 1 ] || fail "more than one container mounts the Docker state volume; stop the others before an online backup"
     # The snapshot runs inside the container, so it must be the Compose service
     # whose ./data is this volume, not merely some container that mounts it.
-    identity=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}/{{index .Config.Labels "com.docker.compose.service"}} {{range .Mounts}}{{if eq .Destination "/kfadapter/data"}}{{.Type}}:{{.Name}}{{end}}{{end}}' "$running_services") ||
+    identity=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}/{{index .Config.Labels "com.docker.compose.service"}} {{range .Mounts}}{{if eq .Destination "/chinadapter/data"}}{{.Type}}:{{.Name}}{{end}}{{end}}' "$running_services") ||
         fail "could not inspect the running service"
-    [ "$identity" = "$SERVICE_IDENTITY" ] || fail "the container mounting the Docker state volume is not the kfadapter service with its state at /kfadapter/data"
+    [ "$identity" = "$SERVICE_IDENTITY" ] || fail "the container mounting the Docker state volume is not the chinadapter service with its state at /chinadapter/data"
     set -- --online-container "$running_services" --uid "$STATE_UID" --gid "$STATE_GID"
 else
     [ -z "$running_services" ] || fail "Docker state volume is in use; stop every container mounting it before creating an offline state backup"

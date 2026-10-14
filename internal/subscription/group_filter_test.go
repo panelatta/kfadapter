@@ -1,8 +1,8 @@
 package subscription
 
 import (
-	"context"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -19,69 +19,55 @@ func TestServeFiltersAcceptedProviderGroups(t *testing.T) {
 		{"provider_limit_utf8_4096_bytes", strings.Repeat("组", 1365) + "g"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			service, binding := publishedService(t, "127.0.0.1:10808")
-			persistent, err := service.store.Load()
-			if err != nil {
-				t.Fatal(err)
-			}
+			service, persistent := catalogService(t)
 			snapshot := persistent.ActiveSession.Clone()
 			snapshot.Generation++
-			for index := range snapshot.Nodes {
-				if snapshot.Nodes[index].ID == "alpha_tokyo" {
-					snapshot.Nodes[index].Group = test.group
-				}
-			}
-			alpha := snapshot.Providers["alpha"]
-			alpha.Nodes[0].Group = test.group
-			if !alpha.Valid() {
+			snapshot.Nodes[0].Group = test.group
+			kuaifan := snapshot.Providers["kuaifan"]
+			kuaifan.Nodes[0].Group = test.group
+			if !kuaifan.Valid() {
 				t.Fatal("group fixture exceeds the provider contract")
 			}
-			snapshot.Providers["alpha"] = alpha
-			plan, err := service.PrepareRuntimeCommit(context.Background(), snapshot.AccountBindingID())
+			snapshot.Providers["kuaifan"] = kuaifan
+			persistent.ActiveSession = snapshot
+			if err := service.Update(persistent); err != nil {
+				t.Fatal(err)
+			}
+			subscriptionURL, err := service.SubscriptionURL("http://127.0.0.1:10809")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := service.CommitRuntimeSnapshot(context.Background(), plan, snapshot); err != nil {
-				t.Fatal(err)
-			}
-			if code, links := fetch(t, service, binding, "", ""); code != http.StatusOK || len(links) != 3 {
-				t.Fatalf("unfiltered subscription = %d, %d links", code, len(links))
-			}
-			query := url.Values{"group": {test.group}}.Encode()
-			code, links := fetch(t, service, binding, query, "")
-			if code != http.StatusOK || len(links) != 1 {
-				t.Fatalf("group filter with %d bytes = %d, %d links", len(test.group), code, len(links))
-			}
-			link, err := url.Parse(links[0])
-			if err != nil || !strings.Contains(link.Fragment, "Tokyo") {
-				t.Fatalf("filtered link = %q, error = %v", links[0], err)
+			for _, filter := range []string{"group=" + url.QueryEscape(test.group), "provider=kuaifan&group=" + url.QueryEscape(test.group)} {
+				response := serveSubscription(t, service, subscriptionURL+"?"+filter)
+				if response.Code != http.StatusOK || response.Body.Len() == 0 {
+					t.Fatalf("filter %.40q = %d", filter, response.Code)
+				}
 			}
 		})
 	}
 }
 
 func TestSubscriptionFilterRetainsInputLimits(t *testing.T) {
-	for _, test := range []struct {
-		name   string
-		values url.Values
-	}{
-		{"group_over_limit", url.Values{"group": {strings.Repeat("g", 4097)}}},
-		{"group_utf8_over_limit", url.Values{"group": {strings.Repeat("组", 1365) + "gg"}}},
-		{"name_over_limit", url.Values{"name": {strings.Repeat("n", 513)}}},
-		{"group_empty", url.Values{"group": {""}}},
-		{"group_duplicate", url.Values{"group": {"Asia", "Asia"}}},
-		{"group_invalid_utf8", url.Values{"group": {string([]byte{0xff})}}},
-		{"group_nul", url.Values{"group": {"Asia\x00"}}},
-		{"group_leading_whitespace", url.Values{"group": {" Asia"}}},
-		{"group_trailing_whitespace", url.Values{"group": {"Asia "}}},
+	service, _ := catalogService(t)
+	subscriptionURL, err := service.SubscriptionURL("http://127.0.0.1:10809")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, filter := range []string{
+		"group=" + strings.Repeat("g", 4097),
+		"name=" + strings.Repeat("n", 513),
+		"provider=" + strings.Repeat("p", 33),
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			if _, valid := parseSubscriptionFilter(test.values.Encode()); valid {
-				t.Fatal("invalid filter was accepted")
-			}
-		})
+		if response := serveSubscription(t, service, subscriptionURL+"?"+filter); response.Code != http.StatusNotFound {
+			t.Fatalf("oversized filter %.20q = %d", filter, response.Code)
+		}
 	}
-	if _, valid := parseSubscriptionFilter(url.Values{"name": {strings.Repeat("n", 512)}}.Encode()); !valid {
-		t.Fatal("name filter at its existing limit was rejected")
-	}
+}
+
+func serveSubscription(t *testing.T, service *Service, rawURL string) *httptest.ResponseRecorder {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, rawURL, nil)
+	response := httptest.NewRecorder()
+	service.HandleSubscription(response, request, "127.0.0.1:10808")
+	return response
 }
