@@ -76,6 +76,24 @@ func TestRunRejectsUnknownAndExtraServeArguments(t *testing.T) {
 	}
 }
 
+func runCommand(t *testing.T, arguments ...string) (int, string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	code := run(arguments, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+func TestHealthcheckReportsWhyItFailed(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if err := os.WriteFile(configPath, []byte("bogus: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, stderr := runCommand(t, "healthcheck")
+	if code != 1 || !strings.Contains(stderr, "chinadapter: healthcheck failed") || !strings.Contains(stderr, "decode configuration") {
+		t.Fatalf("healthcheck = %d %q", code, stderr)
+	}
+}
+
 func writeWorkingConfig(t *testing.T, management, proxy string) {
 	t.Helper()
 	t.Chdir(t.TempDir())

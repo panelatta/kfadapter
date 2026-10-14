@@ -59,6 +59,7 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 	switch arguments[0] {
 	case "healthcheck":
 		if err := healthcheck(arguments[1:]); err != nil {
+			slog.Error("healthcheck failed", "err", err)
 			fmt.Fprintln(stderr, "chinadapter: healthcheck failed")
 			return 1
 		}
