@@ -54,15 +54,22 @@ type loginResponse struct {
 }
 
 func (payload accountPayload) account(location *time.Location, now time.Time) (provider.Account, error) {
+	account, _, err := payload.accountStatus(location, now)
+	return account, err
+}
+
+// accountStatus also reports unverifiedPaid: the profile claims a paid tier
+// but lists no current exact period, so the account was downgraded.
+func (payload accountPayload) accountStatus(location *time.Location, now time.Time) (account provider.Account, unverifiedPaid bool, err error) {
 	if payload.UserID <= 0 {
-		return provider.Account{}, ErrSchema
+		return provider.Account{}, false, ErrSchema
 	}
 	identity := strings.TrimSpace(payload.Email)
 	if identity == "" {
 		identity = strings.TrimSpace(payload.Username)
 	}
 	if !validMetadata(identity) {
-		return provider.Account{}, ErrSchema
+		return provider.Account{}, false, ErrSchema
 	}
 	tier := standardTier
 	subscriptionGrade := 0
@@ -102,11 +109,12 @@ func (payload accountPayload) account(location *time.Location, now time.Time) (p
 	if !active {
 		// A paid flag without a current exact period is treated as a standard
 		// account, which only ever narrows node eligibility.
+		unverifiedPaid = subscriptionGrade != 0
 		tier = standardTier
 		subscriptionEndsAt = time.Time{}
 	}
 	return provider.Account{
 		UserID: strconv.FormatInt(payload.UserID, 10), Display: provider.RedactAccount(identity), Tier: tier,
 		SubscriptionActive: active, SubscriptionEndsAt: subscriptionEndsAt,
-	}, nil
+	}, unverifiedPaid, nil
 }

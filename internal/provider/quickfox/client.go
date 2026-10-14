@@ -23,8 +23,11 @@ var (
 	ErrBusinessCode  = errors.New("quickfox: unexpected business code")
 	ErrLoginRejected = errors.New("quickfox: login rejected")
 	ErrSchema        = errors.New("quickfox: invalid response schema")
-	ErrCrypto        = errors.New("quickfox: invalid encrypted envelope")
-	ErrInvalidLine   = errors.New("quickfox: invalid line")
+	// ErrPaidTierUnverified keeps a paid snapshot when a refresh profile still
+	// claims a paid tier but lists no current period; login downgrades instead.
+	ErrPaidTierUnverified = fmt.Errorf("%w: paid tier without a current subscription period", ErrSchema)
+	ErrCrypto             = errors.New("quickfox: invalid encrypted envelope")
+	ErrInvalidLine        = errors.New("quickfox: invalid line")
 )
 
 type httpStatusError struct{ status int }

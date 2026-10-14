@@ -218,3 +218,35 @@ func catalogHTTPResponse(t *testing.T, path string) *http.Response {
 	}
 	return responseWriter.Result()
 }
+
+func TestQuickFoxRefreshKeepsPaidSnapshotWhenPaidTierIsUnverified(t *testing.T) {
+	unverified := catalogFixture()
+	unverified.Profile.VIPSubscription = []vipPeriod{{EndTime: "2026-07-01 00:00:00", Grade: 1}, {EndTime: "garbage", Grade: 9}}
+	driver := refreshTestDriver(t, controlRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		if request.URL.Path == "/user/info" {
+			writeEncryptedResponse(t, recorder, unverified.Profile)
+		} else {
+			writeEncryptedResponse(t, recorder, unverified)
+		}
+		return recorder.Result(), nil
+	}))
+	paid := refreshTestSnapshot(t, driver)
+	if !paid.Account.SubscriptionActive {
+		t.Fatal("fixture snapshot is not a paid account")
+	}
+	if _, err := driver.Refresh(context.Background(), paid); !errors.Is(err, ErrPaidTierUnverified) || errors.Is(err, provider.ErrSessionRejected) {
+		t.Fatalf("paid refresh with an unverified tier = %v, want a transient ErrPaidTierUnverified", err)
+	}
+	standard := paid.Clone()
+	standard.Account = provider.Account{UserID: paid.Account.UserID, Display: paid.Account.Display, Tier: standardTier}
+	next, err := driver.Refresh(context.Background(), standard)
+	if err != nil || next.Account.Tier != standardTier || next.Account.SubscriptionActive {
+		t.Fatalf("standard refresh = %#v, %v", next.Account, err)
+	}
+	for _, node := range next.Nodes {
+		if node.Eligible && node.Name == "西雅图专线" {
+			t.Fatal("paid line became eligible for an unverified tier")
+		}
+	}
+}

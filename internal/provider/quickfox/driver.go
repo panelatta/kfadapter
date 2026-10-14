@@ -96,6 +96,12 @@ func (driver *Driver) Refresh(ctx context.Context, current provider.Snapshot) (p
 	if catalog.Profile.UserID != stored.UserID {
 		return provider.Snapshot{}, provider.ErrNoSession
 	}
+	// One inconsistent profile must not drop paid lines from a working
+	// subscription: keep the previous snapshot and retry on the normal
+	// refresh backoff. A fresh login still downgrades to the standard tier.
+	if _, unverifiedPaid, err := catalog.Profile.accountStatus(driver.client.location, driver.clock().UTC()); err == nil && unverifiedPaid && current.Account.SubscriptionActive {
+		return provider.Snapshot{}, ErrPaidTierUnverified
+	}
 	return driver.snapshot(stored, catalog)
 }
 
