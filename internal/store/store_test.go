@@ -290,6 +290,13 @@ func TestFutureDatedBrowserSessionsArePrunedNotCorrupt(t *testing.T) {
 	if _, err := store.Load(t.Context()); err != nil {
 		t.Fatalf("clock skew made state corrupt: %v", err)
 	}
+	// Validation that must not write skips the row instead of pruning it.
+	if err := ValidateSQLiteFile(t.Context(), store.Path()); err != nil {
+		t.Fatalf("clock skew made restore validation fail: %v", err)
+	}
+	if _, err := SnapshotSQLiteFile(t.Context(), store.Path()); err != nil {
+		t.Fatalf("clock skew made backup fail: %v", err)
+	}
 	restored := 0
 	if err := store.RestoreBrowserSessions(t.Context(), now, 16, func([]byte, time.Time) error { restored++; return nil }); err != nil {
 		t.Fatal(err)

@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	domain "github.com/oshinop/chinadapter/internal/state"
 )
@@ -46,6 +48,144 @@ func (s *SQLiteStore) validate() error {
 		return domain.ErrInsecureStatePath
 	}
 	return ValidateStateDir(s.dir)
+}
+
+// ValidateSQLiteFile validates an existing state.db without writing it, as a
+// restore would accept it. A current database is validated in place. An older
+// supported schema is copied into a private temporary directory and opened by
+// the normal store, which checks and migrates it exactly as daemon startup
+// would; the copy is then validated as current state and removed. Optional
+// semantic validators inspect the aggregate after relational validation.
+func ValidateSQLiteFile(ctx context.Context, path string, semantic ...func(domain.PersistentState) error) error {
+	var image []byte
+	defer func() { clear(image) }()
+	err := readSQLiteFile(ctx, path, func(conn *sql.Conn, tx *sql.Tx) error {
+		var version int
+		if err := tx.QueryRowContext(ctx, "SELECT version FROM schema_version WHERE id = 1").Scan(&version); err != nil {
+			return corruptDatabase(err)
+		}
+		if version == sqliteSchemaVersion {
+			return validateCurrentSQLiteStateTx(ctx, tx, semantic)
+		}
+		var err error
+		image, err = serializeSQLite(conn)
+		return err
+	})
+	if err != nil || image == nil {
+		return err
+	}
+	return validateMigratedSQLiteImage(ctx, image, semantic)
+}
+
+// readSQLiteFile opens an existing state.db read-only and runs read inside one
+// read transaction on a dedicated connection, after the journal mode and
+// integrity checks. The file is never written.
+func readSQLiteFile(ctx context.Context, path string, read func(*sql.Conn, *sql.Tx) error) error {
+	if path == "" {
+		return domain.ErrInsecureStatePath
+	}
+	clean := filepath.Clean(path)
+	if err := ValidateStateDir(filepath.Dir(clean)); err != nil {
+		return err
+	}
+	if err := validateSecureStateFile(clean, maxSQLiteStateBytes); err != nil {
+		return err
+	}
+	db, err := openSQLite(ctx, clean, true)
+	if err != nil {
+		return corruptDatabase(err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := configureSQLiteReadOnly(ctx, db); err != nil {
+		return corruptDatabase(err)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return corruptDatabase(err)
+	}
+	defer func() { _ = conn.Close() }()
+	// With _txlock=immediate only a read-only transaction issues a plain BEGIN,
+	// so this reader never asks for the write lock the daemon's writers need.
+	tx, err := conn.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return corruptDatabase(err)
+	}
+	defer tx.Rollback()
+	// The first read takes the shared lock that pins this point in time.
+	if err := validateSQLiteJournalMode(ctx, tx); err != nil {
+		return err
+	}
+	if err := checkSQLiteIntegrity(ctx, tx); err != nil {
+		return err
+	}
+	if err := read(conn, tx); err != nil {
+		return err
+	}
+	return corruptDatabase(tx.Commit())
+}
+
+// validateCurrentSQLiteStateTx checks the exact current schema and the
+// aggregate it stores, without pruning browser sessions.
+func validateCurrentSQLiteStateTx(ctx context.Context, tx *sql.Tx, semantic []func(domain.PersistentState) error) error {
+	if err := validateSQLiteSchema(ctx, tx); err != nil {
+		return err
+	}
+	state, err := loadPersistentStateTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err := validateBrowserSessionsTx(ctx, tx, time.Now().UTC(), maxBrowserSessions, false); err != nil {
+		return err
+	}
+	return validatePersistentStateSemantics(state, semantic)
+}
+
+// validateMigratedSQLiteImage migrates a private copy of an older database the
+// way daemon startup would, then validates the result as current state.
+func validateMigratedSQLiteImage(ctx context.Context, image []byte, semantic []func(domain.PersistentState) error) (err error) {
+	dir, err := os.MkdirTemp("", "chinadapter-state-")
+	if err != nil {
+		return fmt.Errorf("create state validation directory: %w", err)
+	}
+	defer func() {
+		if removeErr := os.RemoveAll(dir); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove state validation copy: %w", removeErr))
+		}
+	}()
+	// MkdirTemp honors the umask; the store requires exactly 0700.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("chmod state validation directory: %w", err)
+	}
+	path := filepath.Join(dir, sqliteStateFileName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return fmt.Errorf("create state validation copy: %w", err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("chmod state validation copy: %w", err)
+	}
+	if _, err := file.Write(image); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write state validation copy: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close state validation copy: %w", err)
+	}
+	store, err := NewSQLiteStore(dir)
+	if err != nil {
+		return err
+	}
+	_, err = store.Load(ctx)
+	if closeErr := store.Close(ctx); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return readSQLiteFile(ctx, path, func(_ *sql.Conn, tx *sql.Tx) error {
+		return validateCurrentSQLiteStateTx(ctx, tx, semantic)
+	})
 }
 
 func validatePersistentStateSemantics(state domain.PersistentState, validators []func(domain.PersistentState) error) error {
@@ -135,7 +275,14 @@ func openSecureStateFile(path string, maximum int64) (*os.File, error) {
 	return file, nil
 }
 
-func validateSQLiteJournalMode(ctx context.Context, db *sql.DB) error {
+// sqliteQuerier is satisfied by *sql.DB, *sql.Conn, and *sql.Tx, so validation
+// can also run inside a caller's read transaction.
+type sqliteQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func validateSQLiteJournalMode(ctx context.Context, db sqliteQuerier) error {
 	var mode string
 	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
 		return corruptDatabase(err)
@@ -146,11 +293,11 @@ func validateSQLiteJournalMode(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func validateSQLiteSchema(ctx context.Context, db *sql.DB) error {
+func validateSQLiteSchema(ctx context.Context, db sqliteQuerier) error {
 	return validateSQLiteSchemaDefinition(ctx, db, sqliteSchemaVersion, sqliteSchemaTables, sqliteSchemaStatements)
 }
 
-func validateSQLiteSchemaDefinition(ctx context.Context, db *sql.DB, expectedVersion int, expectedTables map[string]int, expectedStatements []string) error {
+func validateSQLiteSchemaDefinition(ctx context.Context, db sqliteQuerier, expectedVersion int, expectedTables map[string]int, expectedStatements []string) error {
 	if err := validateSQLiteJournalMode(ctx, db); err != nil {
 		return err
 	}
@@ -217,7 +364,7 @@ func validateSQLiteSchemaDefinition(ctx context.Context, db *sql.DB, expectedVer
 	return nil
 }
 
-func checkSQLiteIntegrity(ctx context.Context, db *sql.DB) error {
+func checkSQLiteIntegrity(ctx context.Context, db sqliteQuerier) error {
 	var integrity string
 	if err := db.QueryRowContext(ctx, "PRAGMA integrity_check(1)").Scan(&integrity); err != nil {
 		return corruptDatabase(err)

@@ -441,6 +441,10 @@ func TestSQLiteSizeLimitRollsBackMigration(t *testing.T) {
 			if actualLength != length {
 				t.Fatal("failed migration changed node metadata")
 			}
+			// Restore validation migrates a copy and reports the same failure.
+			if err := ValidateSQLiteFile(t.Context(), path); !errors.Is(err, domain.ErrStateFull) {
+				t.Fatalf("validation of full v%d database = %v", fixture.version, err)
+			}
 			// Freeing pages makes migration retryable without replacing the database.
 			if _, err := raw.ExecContext(t.Context(), "UPDATE active_session_nodes SET name = ? WHERE "+firstNode, name); err != nil {
 				t.Fatal(err)
@@ -454,6 +458,9 @@ func TestSQLiteSizeLimitRollsBackMigration(t *testing.T) {
 			}
 			if loaded.ActiveSession == nil || len(loaded.ActiveSession.Nodes) == 0 || loaded.ActiveSession.Nodes[0].Name != name {
 				t.Fatal("migration retry lost node metadata")
+			}
+			if err := ValidateSQLiteFile(t.Context(), path); err != nil {
+				t.Fatalf("migrated database: %v", err)
 			}
 		})
 	}
