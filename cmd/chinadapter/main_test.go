@@ -203,3 +203,28 @@ func writeWorkingConfig(t *testing.T, management, proxy string) {
 		t.Fatal(err)
 	}
 }
+
+func TestValidateConfigReportsReasonWithoutCreatingFiles(t *testing.T) {
+	t.Chdir(t.TempDir())
+	if code, _, _ := runCommand(t, "validate-config"); code != 1 {
+		t.Fatalf("missing config = %d", code)
+	}
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("validate-config created a configuration file")
+	}
+	if code, _, _ := runCommand(t, "healthcheck"); code != 1 {
+		t.Fatalf("healthcheck without config = %d", code)
+	}
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("healthcheck created a configuration file")
+	}
+	if err := os.WriteFile(configPath, []byte("listenAddr: 127.0.0.1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := runCommand(t, "validate-config"); code != 0 || !strings.Contains(stdout, "configuration valid") {
+		t.Fatalf("valid config = %d %q %q", code, stdout, stderr)
+	}
+	if code, _, _ := runCommand(t, "validate-config", "extra"); code != 1 {
+		t.Fatal("validate-config accepted arguments")
+	}
+}

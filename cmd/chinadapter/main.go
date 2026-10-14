@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/oshinop/chinadapter/internal/app"
+	"github.com/oshinop/chinadapter/internal/config"
 	"github.com/oshinop/chinadapter/internal/lifecycle"
 )
 
@@ -97,7 +99,10 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 }
 
 func serve(arguments []string) error {
-	cfg, err := loadConfig(arguments)
+	if len(arguments) != 0 {
+		return errors.New("configuration arguments are not supported")
+	}
+	cfg, err := config.LoadOrCreate(configPath)
 	if err != nil {
 		return err
 	}

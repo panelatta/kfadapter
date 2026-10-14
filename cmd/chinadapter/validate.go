@@ -11,6 +11,7 @@ import (
 	"github.com/oshinop/chinadapter/internal/store"
 )
 
+// loadConfig never writes: healthcheck and validate-config only inspect.
 func loadConfig(arguments []string) (config.Config, error) {
 	if len(arguments) != 0 {
 		return config.Config{}, errors.New("configuration arguments are not supported")

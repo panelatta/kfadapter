@@ -33,20 +33,40 @@ func (r *Runtime) Probe(ctx context.Context, nodeID string) (web.ProbeResult, er
 	if !node.TunnelEligible() {
 		return web.ProbeResult{}, &problemError{cause: errors.New("node ineligible"), code: "node_ineligible", status: http.StatusConflict}
 	}
-	target := probeTarget{id: node.ID, selector: node.Selector, provider: string(node.Provider), host: node.Host, port: node.Port}
+	target := &probeTarget{node: node}
+	if providerSnapshot, available := current.Providers[node.Provider]; available {
+		target.accountID = providerSnapshot.Account.UserID
+	}
 	select {
 	case r.probeSlots <- struct{}{}:
 		defer func() { <-r.probeSlots }()
 	default:
 		return web.ProbeResult{}, &problemError{cause: ErrProbeBusy, code: "probe_busy", status: http.StatusTooManyRequests}
 	}
+	// Only the newest probe of a node may publish: an older, slower dial must
+	// not overwrite a newer result.
+	r.mutations.Lock()
+	if r.probes == nil {
+		r.probes = make(map[string]*probeTarget)
+	}
+	r.probes[nodeID] = target
+	r.mutations.Unlock()
+	defer func() {
+		r.mutations.Lock()
+		if r.probes[nodeID] == target {
+			delete(r.probes, nodeID)
+		}
+		r.mutations.Unlock()
+	}()
 
 	probeCtx, cancel := context.WithTimeout(ctx, r.probeTimeout)
 	defer cancel()
 	started := r.now()
 	connection, dialErr := r.dial(probeCtx, "tcp", net.JoinHostPort(node.Host, strconv.Itoa(int(node.Port))))
-	finished := r.now().UTC()
-	latency := finished.Sub(started)
+	// Subtract before UTC(), which strips the monotonic clock reading.
+	observed := r.now()
+	latency := observed.Sub(started)
+	finished := observed.UTC()
 	if latency < 0 {
 		latency = 0
 	}
@@ -68,7 +88,7 @@ func (r *Runtime) Probe(ctx context.Context, nodeID string) (web.ProbeResult, er
 		return web.ProbeResult{}, errRuntimeStopped
 	}
 	latest := r.manager.Current()
-	if !target.matches(latest) || !state.SessionUsable(latest, r.now()) {
+	if r.probes[nodeID] != target || !target.matches(latest) || !state.SessionUsable(latest, r.now()) {
 		r.mutations.Unlock()
 		return result, &problemError{cause: ErrStaleProbe, code: "stale_probe", status: http.StatusConflict}
 	}
@@ -87,20 +107,25 @@ func (r *Runtime) Probe(ctx context.Context, nodeID string) (web.ProbeResult, er
 	return result, nil
 }
 
+// probeTarget pins the probed route and the account that offered it. Tunnel
+// authority bytes rotate on every provider refresh and are not pinned.
 type probeTarget struct {
-	id       string
-	selector string
-	provider string
-	host     string
-	port     uint16
+	node      state.Node
+	accountID string
 }
 
-func (target probeTarget) matches(snapshot *state.RuntimeSnapshot) bool {
+func (target *probeTarget) matches(snapshot *state.RuntimeSnapshot) bool {
 	if snapshot == nil {
 		return false
 	}
-	node, found := snapshot.NodeByID(target.id)
-	return found && node.ID == target.id && node.Selector == target.selector && string(node.Provider) == target.provider && node.Host == target.host && node.Port == target.port
+	node, found := snapshot.NodeByID(target.node.ID)
+	if !found || !node.TunnelEligible() || node.Selector != target.node.Selector || node.Provider != target.node.Provider ||
+		node.Protocol != target.node.Protocol || node.AuthorityID != target.node.AuthorityID ||
+		node.Host != target.node.Host || node.Port != target.node.Port || snapshot.Selectors[node.Selector].NodeID != node.ID {
+		return false
+	}
+	providerSnapshot, available := snapshot.Providers[node.Provider]
+	return available && providerSnapshot.Account.UserID == target.accountID
 }
 
 func (r *Runtime) updateProbe(current *state.RuntimeSnapshot, nodeID string, health state.NodeHealth, latency time.Duration, observed time.Time) (*state.RuntimeSnapshot, error) {

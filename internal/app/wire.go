@@ -41,6 +41,7 @@ type Daemon struct {
 	socksServer        *socks.Server
 	socksListener      net.Listener
 	startupLog         io.Writer
+	version            string
 	managementEndpoint string
 	proxyEndpoint      string
 }
@@ -160,11 +161,13 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 		Credentials: credentialCoordinator, MutationMu: mutationMu, SocksAddress: proxyAddress, HTTPAddress: managementAddress,
 		Version: version, StartedAt: startedAt,
 		RefreshEvery: cfg.Provider.RefreshInterval.Value(), ProbeTimeout: cfg.Proxy.DialTimeout.Value(),
-		AccountRefresh: func(_ provider.ID, err error) {
+		AccountRefresh: func(id provider.ID, err error) {
 			if err != nil {
 				// Provider text may contain secrets; emit only its classification.
-				slog.Warn("provider refresh failed", "class", refreshErrorClass(err))
+				slog.Warn("provider refresh failed", "provider", id, "class", refreshErrorClass(err))
+				return
 			}
+			slog.Info("provider refreshed", "provider", id)
 		},
 	})
 	if err != nil {
@@ -187,7 +190,7 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 		_ = httpListener.Close()
 		return nil, err
 	}
-	return &Daemon{runtime: runtimeFacade, smart: smartService, manager: manager, store: store, httpServer: server, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, startupLog: os.Stdout, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
+	return &Daemon{runtime: runtimeFacade, smart: smartService, manager: manager, store: store, httpServer: server, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, startupLog: os.Stdout, version: version, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
 }
 
 func validateListenInterface(listen string) error {
@@ -278,7 +281,8 @@ func (d *Daemon) Run(ctx context.Context) (result error) {
 		return err
 	}
 	if d.startupLog != nil {
-		_, _ = fmt.Fprintf(d.startupLog, "chinadapter: ready management=%s proxy=%s\n", d.managementEndpoint, d.proxyEndpoint)
+		// Deployment checks look for exactly one structured "msg=ready" line.
+		slog.New(slog.NewTextHandler(d.startupLog, nil)).Info("ready", "version", d.version, "management", d.managementEndpoint, "proxy", d.proxyEndpoint)
 	}
 	return supervisor.Run(ctx)
 }
@@ -320,8 +324,7 @@ func (d *Daemon) watchdog(ctx context.Context) error {
 	if !d.runtime.Healthy() {
 		return errors.New("runtime is stopped")
 	}
-	_, err := d.store.Load(ctx)
-	return err
+	return d.store.Ping(ctx)
 }
 
 // refreshErrorClass names a refresh failure category without rendering the

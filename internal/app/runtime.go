@@ -79,6 +79,8 @@ type Runtime struct {
 	dial         func(context.Context, string, string) (net.Conn, error)
 	probeTimeout time.Duration
 	probeSlots   chan struct{}
+	// probes retains only the latest in-flight probe per node, under mutations.
+	probes map[string]*probeTarget
 
 	mutations    *sync.Mutex
 	refreshEvery time.Duration
@@ -113,16 +115,10 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 	if config.RefreshEvery < minRefreshPolicy || config.RefreshEvery > maxRefreshPolicy {
 		config.RefreshEvery = 23 * time.Hour
 	}
-	persistent, err := config.Store.Load(context.Background())
-	if err != nil {
+	// A persisted refresh_policy is a legacy preference with no control left
+	// to change it; provider.refreshInterval in config.yaml is authoritative.
+	if _, err := config.Store.Load(context.Background()); err != nil {
 		return nil, err
-	}
-	if persistent.Preferences.RefreshPolicy != "" {
-		refreshEvery, err := parseRefreshPolicy(persistent.Preferences.RefreshPolicy)
-		if err != nil {
-			return nil, err
-		}
-		config.RefreshEvery = refreshEvery
 	}
 	mutationMu := config.MutationMu
 	if mutationMu == nil {
@@ -189,12 +185,4 @@ func (r *Runtime) RefreshEvery() time.Duration {
 // RunAccounts runs the independent provider schedules as a lifecycle worker.
 func (r *Runtime) RunAccounts(ctx context.Context) error {
 	return r.accounts.Start(ctx)
-}
-
-func parseRefreshPolicy(value string) (time.Duration, error) {
-	interval, err := time.ParseDuration(value)
-	if err != nil || interval < minRefreshPolicy || interval > maxRefreshPolicy {
-		return 0, errors.New("app: refresh policy must be between 15m and 24h")
-	}
-	return interval, nil
 }

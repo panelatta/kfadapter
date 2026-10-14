@@ -177,7 +177,9 @@ func parseSubscriptionFilter(rawQuery string) (Filter, bool) {
 	if !ok {
 		return Filter{}, false
 	}
-	group, ok := singleFilterValue(values, "group", maxMetadataFilterBytes)
+	// QuickFox composite groups exceed the name limit; accept every group a
+	// provider snapshot may carry.
+	group, ok := singleFilterValue(values, "group", provider.MaxNodeGroupBytes)
 	if !ok {
 		return Filter{}, false
 	}

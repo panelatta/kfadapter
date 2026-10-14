@@ -380,3 +380,30 @@ func TestAccessTokenChangeRevokesURLPasswordAndBrowserSessions(t *testing.T) {
 		t.Fatal("verifier did not rotate")
 	}
 }
+
+func TestLegacyRefreshPolicyDoesNotOverrideConfiguredInterval(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	persistence, err := store.NewSQLiteStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistence.LoadOrCreate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persistence.Update(t.Context(), func(candidate *state.PersistentState) error {
+		candidate.Preferences.RefreshPolicy = "15m"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistence.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	harness := newStableHarness(t, directory)
+	if got := harness.runtime.RefreshEvery(); got != time.Hour {
+		t.Fatalf("refresh interval = %s, want the configured 1h", got)
+	}
+}

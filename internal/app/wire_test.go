@@ -67,7 +67,8 @@ func TestAdapterLifecycleShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter.startupLog = &bytes.Buffer{}
+	startupLog := &bytes.Buffer{}
+	adapter.startupLog = startupLog
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan error, 1)
 	go func() { finished <- adapter.Run(ctx) }()
@@ -83,6 +84,9 @@ func TestAdapterLifecycleShutdown(t *testing.T) {
 	}
 	if adapter.runtime.Healthy() {
 		t.Fatal("runtime remained healthy")
+	}
+	if got := startupLog.String(); strings.Count(got, "level=INFO msg=ready ") != 1 || !strings.Contains(got, "version=devel") {
+		t.Fatalf("startup log = %q", got)
 	}
 }
 
