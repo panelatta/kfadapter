@@ -58,7 +58,7 @@ func (a *API) browserBoundary(route apiRoute) http.Handler {
 				return
 			}
 		}
-		mutation := route.method == http.MethodPost
+		mutation := route.method != http.MethodGet
 		if route.path == "/api/v1/events" {
 			if !originAllowed(r.Header.Get("Origin"), "http://"+r.Host) {
 				a.writeProblem(w, http.StatusForbidden, "invalid_origin", "Invalid Origin")

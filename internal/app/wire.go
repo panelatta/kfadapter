@@ -17,10 +17,12 @@ import (
 
 	"github.com/oshinop/chinadapter/internal/accounts"
 	"github.com/oshinop/chinadapter/internal/config"
+	"github.com/oshinop/chinadapter/internal/credentials"
 	"github.com/oshinop/chinadapter/internal/lifecycle"
 	"github.com/oshinop/chinadapter/internal/provider"
 	"github.com/oshinop/chinadapter/internal/provider/kuaifan"
 	"github.com/oshinop/chinadapter/internal/provider/quickfox"
+	"github.com/oshinop/chinadapter/internal/smart"
 	"github.com/oshinop/chinadapter/internal/socks"
 	"github.com/oshinop/chinadapter/internal/state"
 	"github.com/oshinop/chinadapter/internal/store"
@@ -31,6 +33,7 @@ import (
 // Daemon owns the wired services, listeners, and process lifecycle workers.
 type Daemon struct {
 	runtime            *Runtime
+	smart              *smart.Service
 	manager            *state.Manager
 	store              *store.SQLiteStore
 	httpServer         *http.Server
@@ -104,14 +107,28 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 		return nil, err
 	}
 	mutationMu := &sync.Mutex{}
-	socksServer, err := socks.New(socks.Config{
-		Snapshots: manager, Identity: authority, InitialSnapshot: persistent.ActiveSession, Providers: providers, DialContext: dialer.DialContext,
-		HandshakeTimeout: cfg.Proxy.HandshakeTimeout.Value(),
+	var credentialCoordinator *CredentialCoordinator
+	smartService, err := smart.New(smart.Config{
+		Manager: manager, Store: store, Policy: persistent.Preferences.SmartProxy, Providers: providers,
+		Dial: dialer.DialContext, MutationMu: mutationMu,
+		Identity: func() *credentials.Identity {
+			if credentialCoordinator == nil {
+				return authority
+			}
+			return credentialCoordinator.Identity()
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	credentialCoordinator, err := NewCredentialCoordinator(socksServer, authority)
+	socksServer, err := socks.New(socks.Config{
+		Smart: smartService, Snapshots: manager, Identity: authority, InitialSnapshot: persistent.ActiveSession, Providers: providers,
+		DialContext: dialer.DialContext, HandshakeTimeout: cfg.Proxy.HandshakeTimeout.Value(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	credentialCoordinator, err = NewCredentialCoordinator(socksServer, authority)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +174,7 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 		Listen: managementAddress, Hostname: cfg.Hostname, SocksListen: proxyAddress,
 		Version: version, StartedAt: startedAt, SessionTTL: cfg.Management.SessionTTL.Value(),
 		ProviderRequestTimeout: cfg.Provider.RequestTimeout.Value(),
-	}, web.Dependencies{Backend: runtimeFacade, Subscriptions: NewSubscriptionAdapter(subscriptionService), Sessions: store, Liveness: runtimeFacade})
+	}, web.Dependencies{Backend: runtimeFacade, Smart: NewSmartProxyAdapter(smartService), Subscriptions: NewSubscriptionAdapter(subscriptionService), Sessions: store, Liveness: runtimeFacade})
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +187,7 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 		_ = httpListener.Close()
 		return nil, err
 	}
-	return &Daemon{runtime: runtimeFacade, manager: manager, store: store, httpServer: server, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, startupLog: os.Stdout, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
+	return &Daemon{runtime: runtimeFacade, smart: smartService, manager: manager, store: store, httpServer: server, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, startupLog: os.Stdout, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
 }
 
 func validateListenInterface(listen string) error {
@@ -254,6 +271,7 @@ func (d *Daemon) Run(ctx context.Context) (result error) {
 		{Name: "proxy", Run: d.runSOCKS, Shutdown: d.shutdownSOCKS},
 		{Name: "management", Run: d.runWeb, Shutdown: d.shutdownWeb},
 		{Name: "accounts", Run: d.runtime.RunAccounts, Shutdown: func(context.Context) error { d.runtime.Stop(); return nil }},
+		{Name: "smart-proxy", Run: d.runSmartProxy},
 		{Name: "watchdog", Run: lifecycle.Watchdog(10*time.Second, 3, d.watchdog)},
 	})
 	if err != nil {
@@ -284,6 +302,14 @@ func (d *Daemon) runWeb(ctx context.Context) error {
 		return ctx.Err()
 	}
 	return err
+}
+
+func (d *Daemon) runSmartProxy(ctx context.Context) error {
+	if d.smart == nil {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return d.smart.Run(ctx)
 }
 
 func (d *Daemon) shutdownWeb(ctx context.Context) error {

@@ -70,6 +70,17 @@ func (identity *Identity) Credentials(route provider.Route) (Credentials, bool) 
 	return Credentials{Username: "n_" + base64.RawURLEncoding.EncodeToString(digest[:12]), Password: identity.password}, true
 }
 
+// SmartCredentials names the automatic route. Its "a_" prefix keeps it out of
+// the "n_" node namespace, and it shares the instance password, so it changes
+// only when the access token does.
+func (identity *Identity) SmartCredentials() (Credentials, bool) {
+	if identity == nil || !identity.initialized {
+		return Credentials{}, false
+	}
+	digest := mac(identity.key[:], "chinadapter/smart-user/v1")
+	return Credentials{Username: "a_" + base64.RawURLEncoding.EncodeToString(digest[:12]), Password: identity.password}, true
+}
+
 func (identity *Identity) AuthenticatePassword(password string) bool {
 	return identity != nil && identity.initialized && subtle.ConstantTimeCompare([]byte(password), []byte(identity.password)) == 1
 }

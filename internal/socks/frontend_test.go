@@ -21,16 +21,26 @@ import (
 const frontendTestTimeout = 5 * time.Second
 
 type frontendSnapshots struct {
-	mu    sync.Mutex
-	pin   state.TunnelPin
-	calls atomic.Int32
+	mu       sync.Mutex
+	pin      state.TunnelPin
+	calls    atomic.Int32
+	signedIn bool
 }
 
 func (source *frontendSnapshots) CompactPin(string, time.Time) (state.TunnelPin, error) {
 	source.calls.Add(1)
 	source.mu.Lock()
 	defer source.mu.Unlock()
+	if !source.signedIn {
+		return state.TunnelPin{}, state.ErrSelectorUnknown
+	}
 	return source.pin, nil
+}
+
+func (source *frontendSnapshots) signOut() {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	source.signedIn = false
 }
 
 func (source *frontendSnapshots) SessionCurrentPin(pin state.TunnelPin, _ time.Time) bool {
@@ -111,11 +121,18 @@ type frontendFixture struct {
 	server      *Server
 	snapshots   *frontendSnapshots
 	listener    *frontendListener
+	identity    *credentials.Identity
 	credentials credentials.Credentials
 	serveDone   chan error
 }
 
 func newFrontendFixture(t *testing.T, transport provider.Transport, maxConnections int, peerIP net.IP) *frontendFixture {
+	t.Helper()
+	return newConfiguredFrontendFixture(t, transport, maxConnections, peerIP, nil)
+}
+
+// newConfiguredFrontendFixture lets configure adjust the server before Serve.
+func newConfiguredFrontendFixture(t *testing.T, transport provider.Transport, maxConnections int, peerIP net.IP, configure func(*Server)) *frontendFixture {
 	t.Helper()
 	authority, err := credentials.New(bytes.Repeat([]byte{0x42}, 32), "00112233445566778899aabbccddeeff")
 	if err != nil {
@@ -131,7 +148,7 @@ func newFrontendFixture(t *testing.T, transport provider.Transport, maxConnectio
 	}
 	node.Selector = credentials.Username
 	pin := state.TunnelPin{Node: node, Authority: provider.Authority{Protocol: node.Protocol, Data: []byte("test authority")}}
-	snapshots := &frontendSnapshots{pin: pin}
+	snapshots := &frontendSnapshots{pin: pin, signedIn: true}
 	registry, err := provider.NewRegistry(nil, []provider.Transport{transport})
 	if err != nil {
 		t.Fatal(err)
@@ -149,13 +166,16 @@ func newFrontendFixture(t *testing.T, transport provider.Transport, maxConnectio
 	if err != nil {
 		t.Fatal(err)
 	}
+	if configure != nil {
+		configure(server)
+	}
 	base, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	listener := &frontendListener{Listener: base, peerIP: peerIP}
 	fixture := &frontendFixture{
-		server: server, snapshots: snapshots, listener: listener, credentials: credentials,
+		server: server, snapshots: snapshots, listener: listener, identity: authority, credentials: credentials,
 		serveDone: make(chan error, 1),
 	}
 	ctx, cancel := context.WithCancel(context.Background())

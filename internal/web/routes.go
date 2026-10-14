@@ -35,6 +35,10 @@ func (a *API) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/subscription/url", false, plain(a.subscriptionURL)},
 		{http.MethodGet, "/api/v1/events", false, a.events},
 		{http.MethodPost, "/api/v1/diagnostics/export", false, plain(a.diagnostics)},
+		{http.MethodGet, "/api/v1/smart-proxy", false, plain(a.smartProxyStatus)},
+		{http.MethodPut, "/api/v1/smart-proxy/config", false, plain(a.smartProxyConfigure)},
+		{http.MethodPost, "/api/v1/smart-proxy/probe", false, plain(a.smartProxyProbe)},
+		{http.MethodGet, "/api/v1/smart-proxy/details", false, plain(a.smartProxyDetails)},
 	}
 }
 
@@ -47,7 +51,7 @@ func (a *API) newHandler() http.Handler {
 	}))
 	for _, route := range a.routes() {
 		handler := a.browserBoundary(route)
-		if route.method == http.MethodPost {
+		if route.method != http.MethodGet {
 			handler = protection.Handler(handler)
 		}
 		mux.Handle(route.method+" "+route.path, handler)

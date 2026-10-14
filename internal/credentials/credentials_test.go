@@ -70,3 +70,33 @@ func TestIdentityDerivationAndStrictUUIDPath(t *testing.T) {
 		t.Fatal("uninitialized installation exposes authority")
 	}
 }
+
+func TestSmartCredentialsUseSeparateNamespace(t *testing.T) {
+	installation := "00112233445566778899aabbccddeeff"
+	if smart, ok := (&Identity{}).SmartCredentials(); ok || smart != (Credentials{}) {
+		t.Fatal("uninitialized identity issued smart credentials")
+	}
+	identity, err := New(bytes.Repeat([]byte{7}, 32), installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	smart, ok := identity.SmartCredentials()
+	if !ok || !strings.HasPrefix(smart.Username, "a_") || smart.Password != identity.Password() {
+		t.Fatal("smart credentials not derived from the instance identity")
+	}
+	node, _ := identity.Credentials(provider.Route{Provider: "kuaifan", Protocol: "kuaifan-wifiin", Host: "node.example", Port: 11000})
+	if node.Username == smart.Username {
+		t.Fatal("smart username collides with a node username")
+	}
+	again, _ := identity.SmartCredentials()
+	if again != smart {
+		t.Fatal("smart credentials are not stable")
+	}
+	rotated, err := New(bytes.Repeat([]byte{8}, 32), installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next, _ := rotated.SmartCredentials(); next.Username == smart.Username || next.Password == smart.Password {
+		t.Fatal("smart credentials survived an access token change")
+	}
+}

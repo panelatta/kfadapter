@@ -56,6 +56,7 @@ type BrowserSessionPersistence interface {
 // control/state/SOCKS services; this package never receives their secrets.
 type Dependencies struct {
 	Backend       Backend
+	Smart         SmartProxy
 	Subscriptions SubscriptionService
 	Liveness      Liveness
 	Sessions      BrowserSessionPersistence
@@ -216,6 +217,7 @@ type Event struct {
 type API struct {
 	config        Config
 	backend       Backend
+	smart         SmartProxy
 	subscriptions SubscriptionService
 	liveness      Liveness
 	listenIP      netip.Addr
@@ -284,7 +286,7 @@ func NewAPI(config Config, dependencies Dependencies) (*API, error) {
 		return nil, fmt.Errorf("restore browser sessions: %w", err)
 	}
 	api := &API{
-		config: config, backend: dependencies.Backend, subscriptions: dependencies.Subscriptions,
+		config: config, backend: dependencies.Backend, smart: dependencies.Smart, subscriptions: dependencies.Subscriptions,
 		liveness: dependencies.Liveness, listenIP: listenIP, listenPort: listenPort, hostname: config.Hostname,
 		socksIP: socksIP, socksPort: socksPort,
 		sessions: sessions,
