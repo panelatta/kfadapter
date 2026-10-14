@@ -2,8 +2,10 @@ package profile
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"testing"
 )
 
@@ -79,5 +81,19 @@ func TestWindowsDefinition(t *testing.T) {
 	}
 	if eligible, err := definition.ValidateLine("WIFIIN", "wrong-password"); !errors.Is(err, ErrInvalidLine) || eligible {
 		t.Fatalf("malformed Windows WIFIIN line = %t, %v", eligible, err)
+	}
+}
+
+func TestRandomIntHandlesBoundsBeyond32Bits(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("int cannot exceed 32 bits")
+	}
+	shift := 40 // a variable shift keeps 32-bit builds compiling
+	n := 1<<shift + 7
+	for range 16 {
+		value, err := RandomInt(rand.Reader, n)
+		if err != nil || value < 0 || value >= n {
+			t.Fatalf("RandomInt = %d, %v", value, err)
+		}
 	}
 }

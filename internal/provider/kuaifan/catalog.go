@@ -97,16 +97,27 @@ func decodeTunnelAuthority(encoded []byte) (tunnelAuthority, error) {
 	return authority, nil
 }
 
+// mergeProfileNodes de-duplicates both profiles' catalogs. Each profile may
+// carry up to maxLines rows, so the union is trimmed to provider.MaxNodes,
+// keeping eligible nodes first, instead of failing the whole snapshot.
 func mergeProfileNodes(ios, windows []provider.Node) []provider.Node {
-	merged := make([]provider.Node, 0, len(ios)+len(windows))
+	merged := make([]provider.Node, 0, min(len(ios)+len(windows), provider.MaxNodes))
 	seen := make(map[string]struct{}, len(ios)+len(windows))
-	for _, profileNodes := range [][]provider.Node{ios, windows} {
-		for _, node := range profileNodes {
-			if _, duplicate := seen[node.ID]; duplicate {
-				continue
+	for _, eligible := range []bool{true, false} {
+		for _, profileNodes := range [][]provider.Node{ios, windows} {
+			for _, node := range profileNodes {
+				if node.Eligible != eligible {
+					continue
+				}
+				if _, duplicate := seen[node.ID]; duplicate {
+					continue
+				}
+				if len(merged) == provider.MaxNodes {
+					return merged
+				}
+				seen[node.ID] = struct{}{}
+				merged = append(merged, node)
 			}
-			seen[node.ID] = struct{}{}
-			merged = append(merged, node)
 		}
 	}
 	return merged

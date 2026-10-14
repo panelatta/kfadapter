@@ -3,8 +3,10 @@ package kuaifan
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"syscall"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
@@ -45,7 +47,13 @@ func retryable(err error) bool {
 		return status.status == http.StatusRequestTimeout || status.status == http.StatusTooManyRequests || status.status >= http.StatusInternalServerError && status.status <= 599
 	}
 	var networkErr net.Error
-	return errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary()) //nolint:staticcheck // Temporary is the errno-level signal net.OpError exposes; dropping it would stop retrying resets and descriptor exhaustion.
+	if errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary()) { //nolint:staticcheck // Temporary is the errno-level signal net.OpError exposes; dropping it would stop retrying interrupted calls and descriptor exhaustion.
+		return true
+	}
+	// A connection the server dropped, reset, or refused is transient, but
+	// outside accept these errors do not report Temporary.
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // MaxInterval caps the library's base interval, not its randomized delay.

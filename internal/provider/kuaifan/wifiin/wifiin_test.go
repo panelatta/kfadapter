@@ -329,3 +329,28 @@ func (r *chunkReader) Read(p []byte) (int, error) {
 type streamTestConn struct{ net.Conn }
 
 func (streamTestConn) CloseWrite() error { return nil }
+
+func TestOversizedUOTFrameIsDroppedWithoutDesync(t *testing.T) {
+	// Frame 1: IPv4 address + flow ID + a payload that cannot fit the caller's
+	// buffer. Frame 2: a small datagram that must still decode.
+	address := []byte{0x01, 192, 0, 2, 1, 1, 187}
+	frame := func(payload []byte) []byte {
+		body := append(append(append([]byte(nil), address...), 0xbe, 0xef), payload...)
+		return append([]byte{byte(len(body) >> 8), byte(len(body))}, body...)
+	}
+	var wire bytes.Buffer
+	wire.Write(frame(bytes.Repeat([]byte{'x'}, 200)))
+	wire.Write(frame([]byte("ok")))
+	reader, err := NewUOTReader(&wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 64)
+	if _, _, err := reader.ReadSOCKSDatagram(buffer); !errors.Is(err, ErrUOTFrameTooLarge) {
+		t.Fatalf("oversized frame error = %v", err)
+	}
+	n, flowID, err := reader.ReadSOCKSDatagram(buffer)
+	if err != nil || flowID != 0xbeef || !bytes.HasSuffix(buffer[:n], []byte("ok")) {
+		t.Fatalf("next frame = %x %#x %v", buffer[:n], flowID, err)
+	}
+}

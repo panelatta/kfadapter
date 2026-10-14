@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 )
 
 const (
@@ -59,6 +60,14 @@ func RandomInt(reader io.Reader, n int) (int, error) {
 		}
 	}
 	const sampleSpace = uint64(1) << 32
+	if uint64(n) > sampleSpace {
+		// A 32-bit sample cannot cover n; the rejection loop would never end.
+		value, err := rand.Int(reader, big.NewInt(int64(n)))
+		if err != nil {
+			return 0, err
+		}
+		return int(value.Int64()), nil // #nosec G115 -- result is strictly less than positive int n.
+	}
 	limit := sampleSpace - sampleSpace%uint64(n)
 	for {
 		var sample [4]byte

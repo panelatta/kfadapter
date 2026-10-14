@@ -157,7 +157,14 @@ func openWIFIIN(ctx context.Context, dial provider.DialContextFunc, nodeHost str
 		err = handshake.ReadACK()
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, nil, nil, nil, ctx.Err()
+		}
 		return nil, nil, nil, nil, fmt.Errorf("kuaifan: WIFIIN handshake: %w", err)
+	}
+	if !stopCancellation() {
+		// Cancellation raced the handshake and has already closed upstream.
+		return nil, nil, nil, nil, ctx.Err()
 	}
 	if err := upstream.SetDeadline(time.Time{}); err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) {
 		return nil, nil, nil, nil, fmt.Errorf("kuaifan: clear handshake deadline: %w", err)
@@ -188,6 +195,10 @@ func uotToPackets(packets provider.PacketIO, reader *wifiin.UOTReader) error {
 	packet := make([]byte, maxUDPDatagramSize)
 	for {
 		n, flowID, err := reader.ReadSOCKSDatagram(packet)
+		if errors.Is(err, wifiin.ErrUOTFrameTooLarge) {
+			// Drop one oversized datagram rather than the whole association.
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("kuaifan: read WIFIIN UOT datagram: %w", err)
 		}

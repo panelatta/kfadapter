@@ -3,6 +3,7 @@ package kuaifan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 )
@@ -32,6 +33,9 @@ type Line struct {
 type Lines struct {
 	Groups []Group
 	Lines  []Line
+	// Skipped counts individually malformed rows that were omitted instead of
+	// failing the whole catalog.
+	Skipped int
 }
 
 // FetchLines uses the login token (not the authority provider token).
@@ -85,14 +89,24 @@ func validateLinesForProfile(fields map[string]json.RawMessage, language string,
 		groups = append(groups, Group{ID: id, Name: name})
 	}
 	lines := make([]Line, 0, len(lineObjects))
+	skipped := 0
 	for _, object := range lineObjects {
 		line, err := parseLine(object, groupIDs, language, profile)
+		if errors.Is(err, ErrInvalidLine) {
+			// One unexpected row (an odd port, a dangling group) must not
+			// discard the whole catalog; structural errors still fail below.
+			skipped++
+			continue
+		}
 		if err != nil {
 			return Lines{}, err
 		}
 		lines = append(lines, line)
 	}
-	return Lines{Groups: groups, Lines: lines}, nil
+	if len(lines) == 0 && skipped != 0 {
+		return Lines{}, ErrInvalidLine
+	}
+	return Lines{Groups: groups, Lines: lines, Skipped: skipped}, nil
 }
 
 func parseLine(object map[string]json.RawMessage, groupIDs map[string]struct{}, language string, profile providerProfile) (Line, error) {

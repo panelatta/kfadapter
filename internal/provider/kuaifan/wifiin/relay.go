@@ -15,7 +15,8 @@ type closeWriter interface {
 // Relay copies both directions using the connections' io.Copy fast paths,
 // without allocating buffers those fast paths would ignore. An EOF causes only
 // a half-close of the peer's write side, allowing the reverse direction to
-// drain. Cancellation or a real copy error closes both sides.
+// drain. Cancellation or any copy error, including a local close, closes both
+// sides.
 func Relay(ctx context.Context, left, right net.Conn) error {
 	results := make(chan error, 2)
 	var closeOnce sync.Once
@@ -45,7 +46,9 @@ func Relay(ctx context.Context, left, right net.Conn) error {
 				err = dst.Close()
 			}
 		}
-		if err != nil && !errors.Is(err, net.ErrClosed) {
+		// A local Close is also an abort: the reverse copy may still be
+		// blocked reading an idle upstream. Only a clean EOF half-closes.
+		if err != nil {
 			closeBoth()
 		}
 		results <- err

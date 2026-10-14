@@ -659,6 +659,26 @@ func TestLineSchemaCaps(t *testing.T) {
 	}
 }
 
+func TestUnexpectedLinesAreSkippedNotFatal(t *testing.T) {
+	groups := []any{map[string]any{"id": "g"}}
+	good := map[string]any{"host": "node.example", "port": 11000, "provider": "WIFIIN", "groupId": "g", "desc": "good"}
+	newProvider := map[string]any{"host": "node2.example", "port": 11001, "provider": "WS", "groupId": "g"}
+	badPort := map[string]any{"host": "node3.example", "port": 0, "provider": "WIFIIN", "groupId": "g"}
+	danglingGroup := map[string]any{"host": "node4.example", "port": 11002, "provider": "WIFIIN", "groupId": "missing"}
+	lines, err := validateLines(rawLineFields(t, groups, []any{good, newProvider, badPort, danglingGroup}))
+	if err != nil {
+		t.Fatalf("one unexpected row failed the catalog: %v", err)
+	}
+	// Unknown provider types remain ineligible metadata; malformed rows are skipped.
+	if len(lines.Lines) != 2 || lines.Lines[0].Host != "node.example" || !lines.Lines[0].Eligible ||
+		lines.Lines[1].Host != "node2.example" || lines.Lines[1].Eligible || lines.Skipped != 2 {
+		t.Fatalf("lines = %#v", lines)
+	}
+	if _, err := validateLines(rawLineFields(t, groups, []any{badPort, danglingGroup})); !errors.Is(err, ErrInvalidLine) {
+		t.Fatalf("all-invalid catalog error = %v", err)
+	}
+}
+
 func TestControlSecretAndAccountStringCaps(t *testing.T) {
 	if _, err := (wireprofile.IOS{}).BuildLoginFields(wireprofile.LoginInput{Account: strings.Repeat("a", maxControlFieldBytes+1), Password: "p", InstallationID: "id"}, "20260715101112123", bytes.NewReader([]byte{0, 0, 0, 0})); !errors.Is(err, wireprofile.ErrInvalidVerifyInput) {
 		t.Fatalf("over-cap account error = %v", err)
