@@ -108,7 +108,13 @@ def assert_chinadapter(service: dict[str, Any]) -> None:
         fail("state mount must use the production db_data volume declaration")
     if config.get("type") != "bind" or config.get("read_only") is not True:
         fail("configuration must be a read-only bind mount")
-    if (config.get("bind") or {}).get("create_host_path") is not False:
+    bind = config.get("bind") or {}
+    if "create_host_path" in bind:
+        if bind["create_host_path"] is not False:
+            fail("configuration bind mount must not create a missing host path")
+    elif not source_declares_no_host_path_creation():
+        # Compose v2 omits a false create_host_path from rendered output, so
+        # the explicit declaration is checked in the source file instead.
         fail("configuration bind mount must not create a missing host path")
 
     tmpfs = service.get("tmpfs", [])
@@ -138,6 +144,25 @@ def assert_managed_state_volume(config: dict[str, Any], expected_name: str) -> N
     state_volume = get(volumes, "db_data")
     if set(state_volume) != {"name"} or state_volume["name"] != expected_name:
         fail(f"db_data must be a bare Compose-managed volume resolving to {expected_name}")
+
+
+def source_declares_no_host_path_creation() -> bool:
+    """Report whether compose.yaml's ./config.yaml mount sets create_host_path: false."""
+    lines = (Path(__file__).resolve().parents[1] / "compose.yaml").read_text().splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "source: ./config.yaml":
+            continue
+        indent = len(line) - len(line.lstrip())
+        for following in lines[index + 1:]:
+            stripped = following.strip()
+            if not stripped:
+                continue
+            following_indent = len(following) - len(following.lstrip())
+            if following_indent < indent or (following_indent == indent and stripped.startswith("- ")):
+                break
+            if stripped == "create_host_path: false":
+                return True
+    return False
 
 
 def render_compose(root: Path, env: dict[str, str], project_name: str | None = None) -> dict[str, Any]:
