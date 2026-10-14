@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -377,5 +378,129 @@ func TestPingChecksTheOpenDatabase(t *testing.T) {
 	}
 	if err := store.Ping(t.Context()); !errors.Is(err, domain.ErrInsecureStatePath) {
 		t.Fatalf("Ping of an insecure state file = %v", err)
+	}
+}
+
+func TestInterruptedFirstRunIsRecreated(t *testing.T) {
+	for name, prepare := range map[string]func(t *testing.T, path string){
+		"empty file": func(t *testing.T, path string) {
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"schema-less database": func(t *testing.T, path string) {
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			for _, statement := range []string{"PRAGMA user_version = 0", "VACUUM"} {
+				if _, err := db.ExecContext(t.Context(), statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Chmod(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		// SIGKILL or power loss during the creating transaction leaves spilled
+		// schema pages beside a hot journal that records an empty database.
+		"hot journal": func(t *testing.T, path string) {
+			source := filepath.Join(t.TempDir(), sqliteStateFileName)
+			db, err := sql.Open("sqlite", source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			connection, err := db.Conn(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			for _, statement := range append([]string{"PRAGMA cache_size = 10", "BEGIN"}, sqliteSchemaStatements...) {
+				if _, err := connection.ExecContext(t.Context(), statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// A large uncommitted row forces dirty pages into the database file.
+			if _, err := connection.ExecContext(t.Context(), "INSERT INTO active_session_providers VALUES ('quickfox', 1, 0, 'user', 'display', 'tier', 0, NULL, zeroblob(1048576))"); err != nil {
+				t.Fatal(err)
+			}
+			for _, suffix := range []string{"", "-journal"} {
+				data, err := os.ReadFile(source + suffix)
+				if err != nil || len(data) == 0 {
+					t.Fatalf("crash image %q: %d bytes, %v", suffix, len(data), err)
+				}
+				if err := os.WriteFile(path+suffix, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := connection.ExecContext(t.Context(), "ROLLBACK"); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			directory := t.TempDir()
+			if err := os.Chmod(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			prepare(t, filepath.Join(directory, sqliteStateFileName))
+			store, err := NewSQLiteStore(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close(t.Context())
+			if _, err := store.LoadOrCreate(t.Context()); err != nil {
+				t.Fatalf("interrupted first run was not recovered: %v", err)
+			}
+			if err := validateSQLiteSchema(t.Context(), store.db); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestUnrecognizedStateIsNotRecreated(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, sqliteStateFileName)
+	garbage := bytes.Repeat([]byte("not a SQLite database "), 512)
+	if err := os.WriteFile(path, garbage, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewSQLiteStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(t.Context())
+	if _, err := store.LoadOrCreate(t.Context()); !errors.Is(err, domain.ErrCorruptState) {
+		t.Fatalf("unrecognized state = %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || !bytes.Equal(data, garbage) {
+		t.Fatal("unrecognized state was modified or removed")
+	}
+}
+
+func TestFirstRunNamesUnexpectedStateDirectoryEntries(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"state.db-journal", "stray"} {
+		if err := os.WriteFile(filepath.Join(directory, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := NewSQLiteStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(t.Context())
+	_, err = store.LoadOrCreate(t.Context())
+	if !errors.Is(err, domain.ErrInsecureStatePath) || !strings.Contains(err.Error(), `contains "state.db-journal", "stray"`) {
+		t.Fatalf("non-empty first-run directory = %v", err)
 	}
 }

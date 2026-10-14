@@ -234,6 +234,30 @@ func (s *SQLiteStore) createInitialStateLocked(ctx context.Context, initial doma
 	return true, nil
 }
 
+// incompleteSQLiteState reports whether path is an empty file or a SQLite
+// database without a single schema object. It opens the database read-write
+// so a hot journal left by the interrupted creation is rolled back first; a
+// read-only connection cannot roll it back and would fail instead.
+func incompleteSQLiteState(ctx context.Context, path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, fmt.Errorf("inspect state database: %w", err)
+	}
+	if info.Size() == 0 {
+		return true, nil
+	}
+	db, err := openSQLite(ctx, path, false)
+	if err != nil {
+		return false, corruptDatabase(err)
+	}
+	defer func() { _ = db.Close() }()
+	var objects int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master").Scan(&objects); err != nil {
+		return false, corruptDatabase(err)
+	}
+	return objects == 0, nil
+}
+
 func removeIncompleteSQLiteState(path, dir string) error {
 	var cleanupErr error
 	for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
@@ -367,6 +391,21 @@ func (s *SQLiteStore) LoadOrCreate(ctx context.Context, semantic ...func(domain.
 	exists, err := stateFileExists(s.path, maxSQLiteStateBytes)
 	if err != nil {
 		return domain.PersistentState{}, err
+	}
+	if exists && s.db == nil && !s.closed {
+		// A process killed during first-run creation leaves a database with no
+		// schema at all. It holds no data, so it is removed and recreated rather
+		// than reported as corruption forever.
+		incomplete, err := incompleteSQLiteState(ctx, s.path)
+		if err != nil {
+			return domain.PersistentState{}, err
+		}
+		if incomplete {
+			if err := removeIncompleteSQLiteState(s.path, s.dir); err != nil {
+				return domain.PersistentState{}, err
+			}
+			exists = false
+		}
 	}
 	if exists {
 		if _, err := s.ensureOpenLocked(ctx, false, nil); err != nil {

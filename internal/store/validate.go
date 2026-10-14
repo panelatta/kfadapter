@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -65,7 +66,11 @@ func validateEmptyStateDir(dir string) error {
 		return fmt.Errorf("read state directory: %w", err)
 	}
 	if len(entries) != 0 {
-		return fmt.Errorf("state directory contains an unexpected artifact: %w", domain.ErrInsecureStatePath)
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, strconv.Quote(entry.Name()))
+		}
+		return fmt.Errorf("state directory must be empty before first run but contains %s: %w", strings.Join(names, ", "), domain.ErrInsecureStatePath)
 	}
 	return nil
 }
