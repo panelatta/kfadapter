@@ -64,11 +64,15 @@ verify_state_mount() {
         state_mount_failure="running service does not use the Compose-managed Docker state volume"
         return 1
     fi
+    # The service is running: a schema migration or write in progress may hold
+    # a transient state.db-journal, so check ownership, mode and identity but
+    # not the at-rest file layout.
     inspected_state_identity=$(python3 "$SCRIPT_DIR/verify-state-path.py" \
         --state-dir "$inspected_state_source" \
         --base "$PROJECT_ROOT" \
         --uid "${CHINADAPTER_HOST_UID:-65532}" \
-        --gid "${CHINADAPTER_HOST_GID:-65532}" 2>/dev/null) || {
+        --gid "${CHINADAPTER_HOST_GID:-65532}" \
+        --allow-damaged-payload 2>/dev/null) || {
         state_mount_failure="running service state path failed identity validation"
         return 1
     }

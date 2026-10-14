@@ -539,6 +539,22 @@ if grep -Fq 'restore archive=' "$work/log"; then
 fi
 assert_replacement_state
 
+# A healthy replacement may hold a transient journal while it migrates or
+# writes; verifying its running mount must not roll the upgrade back.
+cp "$work/baseline-state.db" "$state_dir/state.db"
+printf '%s\n' old-running >"$work/runtime-state"
+: >"$work/log"
+if ! FAKE_STATE_DAMAGE=journal run_upgrade >"$work/output" 2>&1; then
+    fail "transient replacement journal caused a rollback: $(cat "$work/output")"
+fi
+# bash keeps a prefix assignment to a function call; dash does not.
+unset FAKE_STATE_DAMAGE
+grep -Fq 'replacement is healthy' "$work/output" || fail "replacement with a transient journal was not reported healthy"
+if grep -Fq 'restore archive=' "$work/log"; then
+    fail "transient replacement journal restored state"
+fi
+rm -f "$state_dir/state.db-journal"
+
 cp "$work/baseline-state.db" "$state_dir/state.db"
 printf '%s\n' old-running >"$work/runtime-state"
 : >"$work/log"
