@@ -5,11 +5,21 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 PROJECT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd -P)
 STATE_VOLUME=chinadapter_db_data
+LEGACY_STATE_VOLUME=kfadapter_db_data
 BACKUP_DIR=${BACKUP_DIR:-"$PROJECT_ROOT/backups"}
 
 fail() {
     printf '%s\n' "upgrade: $*" >&2
     exit 1
+}
+
+# A host deployed before the rename keeps its state in kfadapter_db_data and
+# must be migrated rather than upgraded.
+reject_unmigrated_legacy_volume() {
+    available_volumes=$(docker volume ls --format '{{.Name}}') || fail "could not list Docker volumes"
+    if printf '%s\n' "$available_volumes" | grep -Fx -- "$LEGACY_STATE_VOLUME" >/dev/null; then
+        fail "found the pre-rename $LEGACY_STATE_VOLUME state volume but no $STATE_VOLUME volume; migrate the existing state first with: sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY,CHINADAPTER_IMAGE_DIGEST scripts/migrate-legacy-state.sh"
+    fi
 }
 
 compose() {
@@ -177,7 +187,14 @@ trap 'handle_upgrade_exit $?' EXIT
 [ -n "${CHINADAPTER_IMAGE_DIGEST:-}" ] || fail "CHINADAPTER_IMAGE_DIGEST is required"
 
 [ "$(id -u)" -eq 0 ] || fail "run as root to preserve numeric state ownership during upgrade and rollback"
-state_dir=$(sh "$SCRIPT_DIR/state-volume-path.sh") || fail "could not resolve Docker state volume"
+if state_dir=$(sh "$SCRIPT_DIR/state-volume-path.sh" --if-present); then
+    :
+else
+    state_resolution_status=$?
+    [ "$state_resolution_status" -eq 3 ] || fail "could not resolve Docker state volume"
+    reject_unmigrated_legacy_volume
+    fail "Docker state volume $STATE_VOLUME does not exist; deploy chinadapter before upgrading it"
+fi
 "$SCRIPT_DIR/preflight.sh" --state-dir "$state_dir"
 state_identity=$(python3 "$SCRIPT_DIR/verify-state-path.py" \
     --state-dir "$state_dir" \

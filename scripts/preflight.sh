@@ -10,6 +10,8 @@ STATE_UID=${CHINADAPTER_HOST_UID:-65532}
 STATE_GID=${CHINADAPTER_HOST_GID:-65532}
 IMAGE_REPOSITORY=${CHINADAPTER_IMAGE_REPOSITORY:-}
 IMAGE_DIGEST=${CHINADAPTER_IMAGE_DIGEST:-}
+STATE_VOLUME=chinadapter_db_data
+LEGACY_STATE_VOLUME=kfadapter_db_data
 LOCAL_BUILD=0
 STATE_ONLY=0
 RESTORE_EXISTING=0
@@ -18,6 +20,27 @@ fail() {
     printf '%s\n' "preflight: $*" >&2
     exit 1
 }
+
+# kfadapter was renamed to chinadapter. A leftover KFADAPTER_* variable is no
+# longer read, so honoring the defaults silently could deploy a different image
+# or validate a different state owner than the operator intended.
+reject_legacy_environment() {
+    legacy_names=$(env | sed -n 's/^\(KFADAPTER_[A-Za-z0-9_]*\)=.*/\1/p' | sort -u | tr '\n' ' ')
+    legacy_names=${legacy_names% }
+    [ -z "$legacy_names" ] ||
+        fail "kfadapter was renamed to chinadapter and these environment variables are no longer read: $legacy_names; set the matching CHINADAPTER_* variables instead (for example CHINADAPTER_IMAGE_DIGEST) and unset the KFADAPTER_* ones"
+}
+
+# A host deployed before the rename keeps its state in kfadapter_db_data.
+# Starting chinadapter beside it would initialize empty state instead.
+reject_unmigrated_legacy_volume() {
+    available_volumes=$(docker volume ls --format '{{.Name}}') || fail "could not list Docker volumes"
+    if printf '%s\n' "$available_volumes" | grep -Fx -- "$LEGACY_STATE_VOLUME" >/dev/null; then
+        fail "found the pre-rename $LEGACY_STATE_VOLUME state volume but no $STATE_VOLUME volume; migrate the existing state first with: sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY,CHINADAPTER_IMAGE_DIGEST scripts/migrate-legacy-state.sh"
+    fi
+}
+
+reject_legacy_environment
 
 if [ -n "${CHINADAPTER_STATE_DIR:-}" ] && [ -n "${STATE_DIR:-}" ] && [ "$CHINADAPTER_STATE_DIR" != "$STATE_DIR" ]; then
     fail "CHINADAPTER_STATE_DIR and STATE_DIR must match when both are set"
@@ -41,6 +64,9 @@ CHINADAPTER_HOST_GID to the mapped state owner. For manual or test state-only
 validation, set CHINADAPTER_STATE_DIR (or STATE_DIR) to an explicit state directory.
 --restore-existing is only for offline recovery: it checks the safety of old
 regular state files without requiring a healthy payload size or layout.
+A host that still has only the pre-rename kfadapter_db_data volume must first
+run scripts/migrate-legacy-state.sh; KFADAPTER_* variables are rejected
+because the project now reads only CHINADAPTER_* variables.
 USAGE
     exit 2
 }
@@ -112,6 +138,7 @@ resolve_production_state_dir() {
         state_resolution_status=$?
     fi
     [ "$state_resolution_status" -eq 3 ] || fail "could not resolve Docker state volume"
+    reject_unmigrated_legacy_volume
     [ -z "$state_dir" ] || fail "production state directory must be the Compose-managed Docker volume mountpoint"
     return 1
 }

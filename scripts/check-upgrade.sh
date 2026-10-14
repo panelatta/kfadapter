@@ -162,7 +162,11 @@ PY
         ;;
     volume)
         if [ "${2:-}" = ls ]; then
-            printf '%s\n' chinadapter_db_data
+            [ "${3:-}" = --format ] && [ "${4:-}" = '{{.Name}}' ] || exit 2
+            log "volume ls"
+            for name in $FAKE_VOLUMES; do
+                printf '%s\n' "$name"
+            done
             exit 0
         fi
         [ "${2:-}" = inspect ] && [ "${3:-}" = --format ] && [ "${5:-}" = chinadapter_db_data ] || exit 2
@@ -348,6 +352,7 @@ run_upgrade() {
             FAKE_STATE_MOUNTPOINT="$state_dir" \
             FAKE_RUNNING_STATE_VOLUME="${FAKE_RUNNING_STATE_VOLUME:-}" \
             FAKE_RUNNING_STATE_MOUNTPOINT="${FAKE_RUNNING_STATE_MOUNTPOINT:-}" \
+            FAKE_VOLUMES="${FAKE_VOLUMES:-chinadapter_db_data}" \
             CHINADAPTER_HOST_UID="$actual_uid" \
             CHINADAPTER_HOST_GID="$actual_gid" \
             CHINADAPTER_IMAGE_DIGEST="$NEW_DIGEST" \
@@ -523,7 +528,9 @@ unset FAKE_STATE_DAMAGE FAIL_PHASE
 cp "$work/baseline-state.db" "$state_dir/state.db"
 printf '%s\n' old-running >"$work/runtime-state"
 : >"$work/log"
-run_upgrade >"$work/output" 2>&1
+# A retained pre-rename volume beside the migrated one must not block upgrades.
+FAKE_VOLUMES='kfadapter_db_data chinadapter_db_data' run_upgrade >"$work/output" 2>&1
+unset FAKE_VOLUMES
 assert_named_volume_flow
 grep -Fq "up $NEW_IMAGE" "$work/log" || fail "new service did not use the requested immutable image"
 grep -Fq 'replacement is healthy' "$work/output" || fail "healthy replacement was not reported"
@@ -632,6 +639,35 @@ grep -Fq 'running service does not use the Compose-managed Docker state volume' 
 if grep -Eq '^(stop|backup )' "$work/log"; then
     fail "state-volume mismatch reached service stop or backup"
 fi
+
+# A host that still has only the pre-rename volume must be migrated, not
+# upgraded; the diagnostic comes before any state resolution or service change.
+: >"$work/log"
+if FAKE_VOLUMES=kfadapter_db_data run_upgrade >"$work/output" 2>&1; then
+    fail "upgrade accepted a host that has only the pre-rename state volume"
+fi
+unset FAKE_VOLUMES
+grep -Fq 'found the pre-rename kfadapter_db_data state volume but no chinadapter_db_data volume' "$work/output" ||
+    fail "unmigrated legacy state volume was not diagnosed"
+grep -Fq 'scripts/migrate-legacy-state.sh' "$work/output" || fail "legacy state diagnostic did not name the migration script"
+[ "$(cat "$work/runtime-state")" = old-running ] || fail "legacy state diagnostic changed the running service"
+if grep -Eq '^(ps|stop|backup )' "$work/log"; then
+    fail "legacy state diagnostic reached the upgrade"
+fi
+if grep -Fq 'preflight ' "$work/log"; then
+    fail "legacy state diagnostic reached preflight"
+fi
+: >"$work/log"
+if FAKE_VOLUMES=none run_upgrade >"$work/output" 2>&1; then
+    fail "upgrade accepted a host without a state volume"
+fi
+unset FAKE_VOLUMES
+grep -Fq 'Docker state volume chinadapter_db_data does not exist' "$work/output" || fail "missing state volume was not diagnosed"
+if grep -Fq 'migrate-legacy-state.sh' "$work/output"; then
+    fail "missing state volume without a legacy volume suggested a migration"
+fi
+[ "$(cat "$work/runtime-state")" = old-running ] || fail "missing state volume changed the running service"
+
 : >"$work/log"
 if FAKE_ID_UID=501 run_upgrade >"$work/output" 2>&1; then
     fail "non-root upgrade did not fail"

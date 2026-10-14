@@ -68,6 +68,9 @@ case "${1:-}" in
         case "${2:-}" in
             ls)
                 [ "${3:-}" = --format ] && [ "${4:-}" = '{{.Name}}' ] || exit 2
+                if [ "${FAKE_LEGACY_VOLUME_EXISTS:-}" = 1 ]; then
+                    printf '%s\n' kfadapter_db_data
+                fi
                 if [ "${FAKE_VOLUME_EXISTS:-}" = 1 ]; then
                     printf '%s\n' chinadapter_db_data
                 fi
@@ -102,6 +105,7 @@ run_preflight() {
             PATH="$work/bin:$PATH" \
             FAKE_DOCKER_LOG="$work/docker.log" \
             FAKE_VOLUME_EXISTS="${FAKE_VOLUME_EXISTS:-}" \
+            FAKE_LEGACY_VOLUME_EXISTS="${FAKE_LEGACY_VOLUME_EXISTS:-}" \
             FAKE_STATE_MOUNTPOINT="${FAKE_STATE_MOUNTPOINT:-$work/state}" \
             FAKE_EXPECTED_IMAGE_REPOSITORY="$image_repository" \
             FAKE_EXPECTED_IMAGE_DIGEST="$image_digest" \
@@ -163,5 +167,56 @@ assert_preflight_rejected invalid-repository 'https://registry.invalid/chinadapt
 assert_preflight_rejected missing-digest '' '' 'CHINADAPTER_IMAGE_DIGEST is required in production mode'
 assert_preflight_rejected short-digest '' 'sha256:0' 'CHINADAPTER_IMAGE_DIGEST must be sha256:<64-lowercase-hex>'
 assert_preflight_rejected uppercase-digest '' 'sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' 'CHINADAPTER_IMAGE_DIGEST must be sha256:<64-lowercase-hex>'
+
+# Pre-rename KFADAPTER_* variables are no longer read, so every mode rejects
+# them before contacting Docker instead of silently using the defaults.
+: >"$work/docker.log"
+if (
+    export KFADAPTER_IMAGE_DIGEST="$IMAGE_DIGEST"
+    run_preflight "" "$IMAGE_DIGEST"
+) >"$work/legacy-env-output" 2>&1; then
+    fail "production preflight accepted a renamed KFADAPTER_IMAGE_DIGEST variable"
+fi
+grep -Fq 'no longer read: KFADAPTER_IMAGE_DIGEST;' "$work/legacy-env-output" || fail "renamed production variable was not diagnosed"
+grep -Fq 'set the matching CHINADAPTER_* variables instead' "$work/legacy-env-output" || fail "renamed production variable diagnostic did not name the replacement"
+[ ! -s "$work/docker.log" ] || fail "renamed production variable reached Docker"
+
+run_state_only() {
+    PATH="$work/bin:$PATH" \
+        FAKE_DOCKER_LOG="$work/docker.log" \
+        CHINADAPTER_HOST_UID="$actual_uid" \
+        CHINADAPTER_HOST_GID="$actual_gid" \
+        "$work/scripts/preflight.sh" --state-only --state-dir "$work/state"
+}
+run_state_only >"$work/state-only-output" 2>&1 || fail "state-only preflight rejected a valid empty state directory"
+if (
+    export KFADAPTER_STATE_DIR="$work/state" KFADAPTER_HOST_UID="$actual_uid"
+    run_state_only
+) >"$work/legacy-state-env-output" 2>&1; then
+    fail "state-only preflight accepted renamed KFADAPTER_* variables"
+fi
+grep -Fq 'no longer read: KFADAPTER_HOST_UID KFADAPTER_STATE_DIR;' "$work/legacy-state-env-output" || fail "renamed state variables were not all diagnosed"
+
+# A host deployed before the rename still holds its state in kfadapter_db_data;
+# production preflight must send it to the migration instead of a first run.
+: >"$work/docker.log"
+if FAKE_VOLUME_EXISTS='' FAKE_LEGACY_VOLUME_EXISTS=1 run_preflight "" "$IMAGE_DIGEST" >"$work/legacy-volume-output" 2>&1; then
+    fail "preflight accepted a host that has only the pre-rename state volume"
+fi
+unset FAKE_VOLUME_EXISTS FAKE_LEGACY_VOLUME_EXISTS
+grep -Fq 'found the pre-rename kfadapter_db_data state volume but no chinadapter_db_data volume' "$work/legacy-volume-output" ||
+    fail "unmigrated legacy state volume was not diagnosed"
+grep -Fq 'sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY,CHINADAPTER_IMAGE_DIGEST scripts/migrate-legacy-state.sh' "$work/legacy-volume-output" ||
+    fail "unmigrated legacy state volume diagnostic did not name the migration command"
+if grep -Fq 'compose --env-file /dev/null -f ' "$work/docker.log"; then
+    fail "unmigrated legacy state volume reached Compose validation"
+fi
+
+: >"$work/docker.log"
+FAKE_VOLUME_EXISTS=1 FAKE_LEGACY_VOLUME_EXISTS=1 run_preflight "" "$IMAGE_DIGEST" >"$work/retained-legacy-output" 2>&1 ||
+    fail "preflight rejected a migrated host that retains the pre-rename volume"
+unset FAKE_VOLUME_EXISTS FAKE_LEGACY_VOLUME_EXISTS
+grep -Fqx 'preflight: passed' "$work/retained-legacy-output" || fail "migrated host preflight did not report success"
+grep -Fq 'volume inspect --format {{.Mountpoint}} chinadapter_db_data' "$work/docker.log" || fail "migrated host preflight did not validate chinadapter_db_data"
 
 printf '%s\n' "preflight-test: passed"
