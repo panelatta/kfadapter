@@ -163,9 +163,9 @@ func validateBrowserSessionsTx(ctx context.Context, tx *sql.Tx, now time.Time, m
 			return corruptDatabase(err)
 		}
 		expiresAt := time.Unix(0, expires).UTC()
-		if !expiresAt.After(now) {
+		if !expiresAt.After(now) || expiresAt.After(now.Add(maxSessionLifetime)) {
 			if prune {
-				return corruptDatabase(errors.New("expired browser session remained after prune"))
+				return corruptDatabase(errors.New("out-of-window browser session remained after prune"))
 			}
 			continue
 		}
@@ -190,7 +190,10 @@ func pruneBrowserSessionsTx(ctx context.Context, tx *sql.Tx, now time.Time, max 
 	if !validBrowserSessionLimit(max) {
 		return domain.ErrCorruptState
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM browser_sessions WHERE expires_at_ns <= ?", nanos(now)); err != nil {
+	// Sessions expiring beyond the maximum lifetime can only come from a wall
+	// clock that has since stepped backwards (for example a router without an
+	// RTC before NTP sync). They are revoked rather than treated as corruption.
+	if _, err := tx.ExecContext(ctx, "DELETE FROM browser_sessions WHERE expires_at_ns <= ? OR expires_at_ns > ?", nanos(now), nanos(now.Add(maxSessionLifetime))); err != nil {
 		return corruptDatabase(err)
 	}
 	_, err := tx.ExecContext(ctx, "DELETE FROM browser_sessions WHERE token_hash IN (SELECT token_hash FROM browser_sessions ORDER BY expires_at_ns DESC, token_hash LIMIT -1 OFFSET ?)", max)
