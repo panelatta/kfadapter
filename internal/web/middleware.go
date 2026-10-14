@@ -23,7 +23,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		w = headResponseWriter{w}
 	}
-	if !requestHostAllowed(a.listenIP, a.listenPort, a.hostname, r.Host) {
+	if !a.publicRequest(r.Host) && !requestHostAllowed(a.listenIP, a.listenPort, a.hostname, r.Host) {
 		setSecurityHeaders(w.Header())
 		setNoStore(w.Header())
 		a.writeProblem(w, http.StatusBadRequest, "invalid_host", "Invalid Host")
@@ -60,7 +60,7 @@ func (a *API) browserBoundary(route apiRoute) http.Handler {
 		}
 		mutation := route.method != http.MethodGet
 		if route.path == "/api/v1/events" {
-			if !originAllowed(r.Header.Get("Origin"), "http://"+r.Host) {
+			if !eventStreamOriginAllowed(r, a.requestOrigin(r.Host)) {
 				a.writeProblem(w, http.StatusForbidden, "invalid_origin", "Invalid Origin")
 				return
 			}
@@ -77,7 +77,35 @@ func (a *API) advertisedHostname(requestHost string) (string, bool) {
 	return acceptedHostname(a.listenIP, a.listenPort, a.hostname, requestHost)
 }
 
+// publicRequest reports whether a request reached the configured TLS proxy.
+// The proxy must set Host to the public authority; forwarding headers are
+// never trusted.
+func (a *API) publicRequest(host string) bool {
+	return a.publicOrigin != nil && strings.EqualFold(host, a.publicOrigin.Host)
+}
+
+func (a *API) requestOrigin(host string) string {
+	if a.publicRequest(host) {
+		return a.config.PublicOrigin
+	}
+	return "http://" + host
+}
+
+// setupAllowed limits first-time access setup to the adapter host itself, so
+// another LAN device cannot claim a fresh installation. A local TLS proxy has
+// a loopback peer too, so its public authority is never allowed to.
+func (a *API) setupAllowed(r *http.Request) bool {
+	return clientIdentity(r.RemoteAddr) == "loopback" && !a.publicRequest(r.Host)
+}
+
 func (a *API) socksAddress(r *http.Request) string {
+	if a.publicOrigin != nil {
+		host := a.publicOrigin.Hostname()
+		if a.hostname != "" {
+			host = a.hostname
+		}
+		return net.JoinHostPort(host, a.socksPort)
+	}
 	if hostname, ok := a.advertisedHostname(r.Host); ok {
 		return net.JoinHostPort(hostname, a.socksPort)
 	}
@@ -139,12 +167,26 @@ func isJSONContentType(header string) bool {
 	return err == nil && mediaType == "application/json"
 }
 
+// eventStreamOriginAllowed checks the read-only event stream. Browsers send
+// no Origin on a same-origin EventSource, so Sec-Fetch-Site decides then.
+func eventStreamOriginAllowed(r *http.Request, expectedOrigin string) bool {
+	if origin := r.Header.Get("Origin"); origin != "" {
+		return originAllowed(origin, expectedOrigin)
+	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return true
+	default:
+		return false
+	}
+}
+
 func originAllowed(header, expected string) bool {
 	if header == "" || header != expected {
 		return false
 	}
 	parsed, err := url.Parse(header)
-	return err == nil && parsed.Scheme == "http" && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == ""
+	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == ""
 }
 
 func setSecurityHeaders(header http.Header) {

@@ -19,6 +19,12 @@ func (a *API) writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func (a *API) writeProblem(w http.ResponseWriter, status int, code, title string) {
+	a.writeProblemDetail(w, status, code, title, "")
+}
+
+// writeProblemDetail adds a fixed, operator-facing explanation. Detail must
+// never carry backend error text.
+func (a *API) writeProblemDetail(w http.ResponseWriter, status int, code, title, detail string) {
 	w.Header().Set("Content-Type", "application/problem+json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(struct {
@@ -26,7 +32,8 @@ func (a *API) writeProblem(w http.ResponseWriter, status int, code, title string
 		Code   string `json:"code"`
 		Status int    `json:"status"`
 		Title  string `json:"title"`
-	}{Type: "urn:chinadapter:problem:" + code, Code: code, Status: status, Title: title})
+		Detail string `json:"detail,omitempty"`
+	}{Type: "urn:chinadapter:problem:" + code, Code: code, Status: status, Title: title, Detail: detail})
 }
 
 func (a *API) writeBodyError(w http.ResponseWriter, err error) {

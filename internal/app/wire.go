@@ -171,7 +171,7 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 		return nil, err
 	}
 	server, api, err := web.NewHTTPServer(web.Config{
-		Listen: managementAddress, Hostname: cfg.Hostname, SocksListen: proxyAddress,
+		Listen: managementAddress, Hostname: cfg.Hostname, PublicOrigin: cfg.Management.PublicOrigin, SocksListen: proxyAddress,
 		Version: version, StartedAt: startedAt, SessionTTL: cfg.Management.SessionTTL.Value(),
 		ProviderRequestTimeout: cfg.Provider.RequestTimeout.Value(),
 	}, web.Dependencies{Backend: runtimeFacade, Smart: NewSmartProxyAdapter(smartService), Subscriptions: NewSubscriptionAdapter(subscriptionService), Sessions: store, Liveness: runtimeFacade})

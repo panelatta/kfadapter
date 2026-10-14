@@ -24,11 +24,15 @@ type sessionStore struct {
 	accessAttempts map[string]accessAttempt
 	loginAttempts  map[string]loginAttempt
 	persistence    BrowserSessionPersistence
-	now            func() time.Time
-	random         io.Reader
-	ttl            time.Duration
-	max            int
-	generation     uint64
+	// undeleted holds revoked session keys awaiting durable deletion. Locking
+	// revokes the in-memory session first, so a storage failure can only
+	// delay, never cancel, the deletion.
+	undeleted  map[string]struct{}
+	now        func() time.Time
+	random     io.Reader
+	ttl        time.Duration
+	max        int
+	generation uint64
 }
 
 func newSessionStore(now func() time.Time, random io.Reader, ttl time.Duration, max int, persistence BrowserSessionPersistence) (*sessionStore, error) {
@@ -50,6 +54,7 @@ func newSessionStore(now func() time.Time, random io.Reader, ttl time.Duration, 
 		accessAttempts: make(map[string]accessAttempt),
 		loginAttempts:  make(map[string]loginAttempt),
 		persistence:    persistence,
+		undeleted:      make(map[string]struct{}),
 		now:            now,
 		random:         random,
 		ttl:            ttl,
@@ -122,6 +127,11 @@ func (s *sessionStore) create(ctx context.Context) (string, browserSession, erro
 			s.deleteBrowserSessions(ctx, expired)
 			continue
 		}
+		if _, revoked := s.undeleted[key]; revoked {
+			s.mu.Unlock()
+			s.deleteBrowserSessions(ctx, expired)
+			continue
+		}
 		s.pending[key] = struct{}{}
 		s.mu.Unlock()
 		s.deleteBrowserSessions(ctx, expired)
@@ -170,31 +180,89 @@ func (s *sessionStore) valid(ctx context.Context, token string) (browserSession,
 	return session, true
 }
 
+// revoke invalidates the in-memory session and its event streams before
+// touching storage, then retries the durable deletion within this request.
 func (s *sessionStore) revoke(ctx context.Context, token string) error {
 	if token == "" {
 		return nil
 	}
 	token = sessionKey(token)
+	// Queue the deletion before attempting it so cancellation cannot forget an
+	// already revoked session.
+	s.mu.Lock()
+	s.removeSessionLocked(token)
 	if s.persistence != nil {
-		if err := s.persistence.DeleteBrowserSession(ctx, []byte(token)); err != nil {
+		s.undeleted[token] = struct{}{}
+	}
+	s.mu.Unlock()
+	// Include earlier failed revocations: a later successful lock must not
+	// silently leave an older known session able to return after a restart.
+	return s.retryPersistence(ctx, func() error { return s.persistBrowserSessionDeletes(ctx, nil) })
+}
+
+// retryPersistence retries a durable write with a bounded, cancelable backoff
+// inside the calling request; no detached worker outlives HTTP shutdown.
+func (s *sessionStore) retryPersistence(ctx context.Context, write func() error) error {
+	if s.persistence == nil {
+		return nil
+	}
+	var lastErr error
+	for _, delay := range [...]time.Duration{0, 50 * time.Millisecond, 150 * time.Millisecond} {
+		if delay != 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+		if lastErr = write(); lastErr == nil {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 	}
-	s.mu.Lock()
-	s.removeSessionLocked(token)
-	s.mu.Unlock()
-	return nil
+	return lastErr
 }
 
 func (s *sessionStore) deleteBrowserSessions(ctx context.Context, tokens []string) {
+	_ = s.persistBrowserSessionDeletes(ctx, tokens)
+}
+
+// persistBrowserSessionDeletes makes one pass over tokens plus every revoked
+// session still awaiting durable deletion.
+func (s *sessionStore) persistBrowserSessionDeletes(ctx context.Context, tokens []string) error {
 	if s.persistence == nil {
-		return
+		return nil
 	}
+	s.mu.Lock()
 	for _, token := range tokens {
 		if token != "" {
-			_ = s.persistence.DeleteBrowserSession(ctx, []byte(token))
+			s.undeleted[token] = struct{}{}
 		}
 	}
+	pending := make([]string, 0, len(s.undeleted))
+	for token := range s.undeleted {
+		pending = append(pending, token)
+	}
+	s.mu.Unlock()
+	var result error
+	for _, token := range pending {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := s.persistence.DeleteBrowserSession(ctx, []byte(token))
+		s.mu.Lock()
+		if err == nil {
+			delete(s.undeleted, token)
+		} else {
+			result = err
+		}
+		s.mu.Unlock()
+	}
+	return result
 }
 
 // matches verifies that the exact session which started a stream remains
@@ -232,10 +300,15 @@ func (s *sessionStore) revokeAll(ctx context.Context) error {
 	clear(s.pending)
 	clear(s.loginAttempts)
 	s.mu.Unlock()
-	if s.persistence != nil {
-		return s.persistence.DeleteAllBrowserSessions(ctx)
-	}
-	return nil
+	return s.retryPersistence(ctx, func() error {
+		if err := s.persistence.DeleteAllBrowserSessions(ctx); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		clear(s.undeleted)
+		s.mu.Unlock()
+		return nil
+	})
 }
 
 func (s *sessionStore) removeSessionLocked(token string) {
@@ -288,24 +361,28 @@ func (a *API) revokeBrowserSession(ctx context.Context, token string) error {
 	return a.sessions.revoke(ctx, token)
 }
 
-func setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
+// Cookies issued through the TLS proxy are Secure; direct local HTTP
+// sessions stay usable.
+func setSessionCookie(w http.ResponseWriter, token string, expires time.Time, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
 		Path:     "/api/v1",
 		Expires:  expires,
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }
 
-func clearSessionCookie(w http.ResponseWriter) {
+func clearSessionCookie(w http.ResponseWriter, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/api/v1",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteStrictMode,
 	})
 }

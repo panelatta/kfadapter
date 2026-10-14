@@ -33,6 +33,9 @@ func (a *API) subscriptionURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) baseURL(requestHost string) string {
+	if a.publicOrigin != nil {
+		return a.config.PublicOrigin
+	}
 	if hostname, ok := a.advertisedHostname(requestHost); ok {
 		if a.listenPort == "80" {
 			return "http://" + hostname

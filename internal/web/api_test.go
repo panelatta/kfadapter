@@ -280,6 +280,7 @@ func TestAPIWildcardAndHostnamePolicy(t *testing.T) {
 	setup := func(origin string) *httptest.ResponseRecorder {
 		request := httptest.NewRequest(http.MethodPost, "http://"+remoteHost+"/api/v1/access/setup", strings.NewReader(`{"token":"`+validTestToken+`"}`))
 		request.Host = remoteHost
+		request.RemoteAddr = "127.0.0.1:40000"
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Origin", origin)
 		response := httptest.NewRecorder()
@@ -480,6 +481,45 @@ func TestAccessTokenValidationBounds(t *testing.T) {
 	}
 }
 
+func TestAccessSetupRequiresLoopbackClient(t *testing.T) {
+	backend := &fakeBackend{}
+	api := newTestAPI(t, backend, newFakeSubscriptions())
+	status := func(remote string) map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "http://"+testHost+"/api/v1/access/status", nil)
+		req.Host = testHost
+		req.RemoteAddr = remote
+		response := httptest.NewRecorder()
+		api.ServeHTTP(response, req)
+		var body map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	if body := status("192.0.2.1:10001"); body["setupAllowed"] != false {
+		t.Fatalf("LAN client may set up: %v", body)
+	}
+	if body := status("[::1]:10001"); body["setupAllowed"] != true {
+		t.Fatalf("loopback client may not set up: %v", body)
+	}
+	req := httptest.NewRequest(http.MethodPost, "http://"+testHost+"/api/v1/access/setup", strings.NewReader(`{"token":"`+validTestToken+`"}`))
+	req.Host = testHost
+	req.RemoteAddr = "192.0.2.1:10001"
+	req.Header.Set("Origin", testOrigin)
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	api.ServeHTTP(response, req)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "setup_requires_loopback") {
+		t.Fatalf("LAN setup = %d %s", response.Code, response.Body.String())
+	}
+	backend.mu.Lock()
+	calls := backend.accessSetupCalls
+	backend.mu.Unlock()
+	if calls != 0 {
+		t.Fatal("LAN setup reached the backend")
+	}
+}
+
 func TestAccessSetupFirstClaimIsAtomic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		backend := &fakeBackend{}
@@ -488,47 +528,36 @@ func TestAccessSetupFirstClaimIsAtomic(t *testing.T) {
 		backend.accessSetupStarted = started
 		backend.accessSetupRelease = release
 		api := newTestAPI(t, backend, newFakeSubscriptions())
-
-		responses := make(chan *httptest.ResponseRecorder, 2)
-		for _, remote := range []string{"192.0.2.1:10001", "192.0.2.2:10002"} {
-			go func(remote string) {
-				req := httptest.NewRequest(http.MethodPost, "http://"+testHost+"/api/v1/access/setup", strings.NewReader(`{"token":"`+validTestToken+`"}`))
-				req.Host = testHost
-				req.RemoteAddr = remote
-				req.Header.Set("Origin", testOrigin)
-				req.Header.Set("Content-Type", "application/json")
-				response := httptest.NewRecorder()
-				api.ServeHTTP(response, req)
-				responses <- response
-			}(remote)
+		setup := func() *httptest.ResponseRecorder {
+			return request(api, http.MethodPost, "/api/v1/access/setup", `{"token":"`+validTestToken+`"}`, nil, testOrigin)
 		}
+
+		first := make(chan *httptest.ResponseRecorder, 1)
+		go func() { first <- setup() }()
 		synctest.Wait()
-		for range 2 {
-			select {
-			case <-started:
-			default:
-				t.Fatal("concurrent setup did not reach backend")
-			}
+		select {
+		case <-started:
+		default:
+			t.Fatal("setup did not reach backend")
+		}
+		// Setup is loopback-only and every loopback peer shares one admission
+		// slot, so a concurrent claim is refused while the first is in flight.
+		if concurrent := setup(); concurrent.Code != http.StatusTooManyRequests {
+			t.Fatalf("concurrent setup = %d", concurrent.Code)
 		}
 		close(release)
 		synctest.Wait()
-		statuses := map[int]int{}
-		for range 2 {
-			select {
-			case response := <-responses:
-				statuses[response.Code]++
-			default:
-				t.Fatal("concurrent setup did not finish")
-			}
+		if response := <-first; response.Code != http.StatusCreated {
+			t.Fatalf("first setup = %d", response.Code)
 		}
-		if statuses[http.StatusCreated] != 1 || statuses[http.StatusConflict] != 1 {
-			t.Fatalf("atomic setup statuses = %#v", statuses)
+		if again := setup(); again.Code != http.StatusConflict {
+			t.Fatalf("second claim = %d", again.Code)
 		}
 		backend.mu.Lock()
-		calls, initialized := backend.accessSetupCalls, backend.accessInitialized
+		initialized := backend.accessInitialized
 		backend.mu.Unlock()
-		if calls != 2 || !initialized {
-			t.Fatalf("first claim backend state calls=%d initialized=%t", calls, initialized)
+		if !initialized {
+			t.Fatal("first claim did not initialize")
 		}
 	})
 }
@@ -1052,18 +1081,46 @@ func TestAPIMutationCrossOriginProtection(t *testing.T) {
 	}
 }
 
-func TestSSERequiresExactOriginEvenWithSameOriginFetchSite(t *testing.T) {
+func TestSSERejectsForeignOrigins(t *testing.T) {
 	api := newTestAPI(t, &fakeBackend{}, newFakeSubscriptions())
 	cookie := establish(t, api)
-	for _, origin := range []string{"", "http://evil.test", testOrigin + "/", "https://" + testHost} {
-		response := rawRequest(api, http.MethodGet, "/api/v1/events", "", cookie, origin, "same-origin")
+	for _, test := range []struct{ origin, fetchSite string }{
+		{"http://evil.test", "same-origin"}, {testOrigin + "/", "same-origin"}, {"https://" + testHost, "same-origin"},
+		{"", "cross-site"}, {"", "same-site"},
+	} {
+		response := rawRequest(api, http.MethodGet, "/api/v1/events", "", cookie, test.origin, test.fetchSite)
 		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), `"code":"invalid_origin"`) {
-			t.Fatalf("SSE Origin %q = %d: %s", origin, response.Code, response.Body.String())
+			t.Fatalf("SSE Origin %q Sec-Fetch-Site %q = %d: %s", test.origin, test.fetchSite, response.Code, response.Body.String())
 		}
 	}
 	if response := rawRequest(api, http.MethodGet, "/api/v1/status", "", cookie, "http://evil.test", "cross-site"); response.Code != http.StatusOK {
 		t.Fatalf("safe status = %d: %s", response.Code, response.Body.String())
 	}
+}
+
+func TestSSEAcceptsSameOriginBrowserRequestsWithoutOrigin(t *testing.T) {
+	backend := &fakeBackend{events: make(chan Event), subscribed: make(chan struct{}, 1)}
+	api := newTestAPI(t, backend, newFakeSubscriptions())
+	cookie := establish(t, api)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "http://"+testHost+"/api/v1/events", nil).WithContext(ctx)
+	req.Host = testHost
+	// Chromium sends no Origin on a same-origin EventSource GET.
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.AddCookie(cookie)
+	done := make(chan struct{})
+	go func() {
+		api.ServeHTTP(httptest.NewRecorder(), req)
+		close(done)
+	}()
+	select {
+	case <-backend.subscribed:
+	case <-time.After(time.Second):
+		t.Fatal("same-origin SSE without Origin was rejected")
+	}
+	cancel()
+	<-done
 }
 
 func establish(t *testing.T, api *API) *http.Cookie {
@@ -1092,6 +1149,7 @@ func assertAccessStatus(t *testing.T, response *httptest.ResponseRecorder, initi
 	}
 	var body struct {
 		Initialized   bool       `json:"initialized"`
+		SetupAllowed  bool       `json:"setupAllowed"`
 		Authenticated bool       `json:"authenticated"`
 		ExpiresAt     *time.Time `json:"expiresAt"`
 	}
@@ -1118,6 +1176,8 @@ func rawRequest(api *API, method, route, body string, cookie *http.Cookie, origi
 	}
 	req := httptest.NewRequest(method, "http://"+testHost+route, reader)
 	req.Host = testHost
+	// First-time setup is accepted only from the adapter host itself.
+	req.RemoteAddr = "127.0.0.1:40000"
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}

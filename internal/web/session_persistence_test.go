@@ -16,14 +16,18 @@ type persistedBrowserSession struct {
 }
 
 type fakeBrowserSessionPersistence struct {
-	mu           sync.Mutex
-	sessions     map[string]persistedBrowserSession
-	restoreErr   error
-	saveErr      error
-	deleteErr    error
-	restoreCalls int
-	saveCalls    int
-	deleteCalls  int
+	mu         sync.Mutex
+	sessions   map[string]persistedBrowserSession
+	restoreErr error
+	saveErr    error
+	deleteErr  error
+	// deleteFailures fails that many deletions before deleteErr applies;
+	// deleteErrors fails deletion of specific token hashes.
+	deleteFailures int
+	deleteErrors   map[string]error
+	restoreCalls   int
+	saveCalls      int
+	deleteCalls    int
 }
 
 func (p *fakeBrowserSessionPersistence) RestoreBrowserSessions(_ context.Context, now time.Time, max int, add func(tokenHash []byte, expiresAt time.Time) error) error {
@@ -75,8 +79,15 @@ func (p *fakeBrowserSessionPersistence) DeleteBrowserSession(_ context.Context, 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.deleteCalls++
+	if p.deleteFailures > 0 {
+		p.deleteFailures--
+		return errors.New("temporary delete failure")
+	}
 	if p.deleteErr != nil {
 		return p.deleteErr
+	}
+	if err := p.deleteErrors[string(tokenHash)]; err != nil {
+		return err
 	}
 	delete(p.sessions, string(tokenHash))
 	return nil
@@ -224,7 +235,7 @@ func TestBrowserSessionPersistenceFailuresFailClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("delete failure preserves live durable session", func(t *testing.T) {
+	t.Run("delete failure still locks the console and retries deletion", func(t *testing.T) {
 		now := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)
 		persistence := &fakeBrowserSessionPersistence{}
 		backend := &fakeBackend{}
@@ -236,15 +247,24 @@ func TestBrowserSessionPersistenceFailuresFailClosed(t *testing.T) {
 		persistence.mu.Unlock()
 
 		locked := request(api, http.MethodPost, "/api/v1/access/logout", `{}`, cookie, testOrigin)
-		if locked.Code != http.StatusServiceUnavailable || locked.Header().Get("Cache-Control") != "no-store" || locked.Header().Get("Set-Cookie") != "" {
-			t.Fatalf("session delete failure = %d %#v", locked.Code, locked.Header())
+		if locked.Code != http.StatusServiceUnavailable || locked.Header().Get("Cache-Control") != "no-store" || !strings.Contains(locked.Header().Get("Set-Cookie"), sessionCookieName+"=;") {
+			t.Fatalf("lock with failed durable delete = %d %#v", locked.Code, locked.Header())
 		}
-		if response := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusOK {
-			t.Fatalf("session revoked in memory after failed durable delete = %d", response.Code)
+		if response := request(api, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusUnauthorized {
+			t.Fatalf("session still accepted after lock = %d", response.Code)
 		}
-		recreated := newPersistentTestAPI(t, clock, backend, persistence)
-		if response := request(recreated, http.MethodGet, "/api/v1/status", "", cookie, ""); response.Code != http.StatusOK {
-			t.Fatalf("session missing after failed durable delete and recreation = %d", response.Code)
+		persistence.mu.Lock()
+		persistence.deleteErr = nil
+		persistence.mu.Unlock()
+		// The next session operation retries the pending durable deletion.
+		if login := request(api, http.MethodPost, "/api/v1/access/login", `{"token":"`+validTestToken+`"}`, nil, testOrigin); login.Code != http.StatusOK {
+			t.Fatalf("follow-up login = %d", login.Code)
+		}
+		persistence.mu.Lock()
+		_, stillStored := persistence.sessions[sessionKey(cookie.Value)]
+		persistence.mu.Unlock()
+		if stillStored {
+			t.Fatal("revoked session row was never deleted")
 		}
 	})
 }

@@ -19,9 +19,10 @@ func (a *API) accessStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	response := struct {
 		Initialized   bool       `json:"initialized"`
+		SetupAllowed  bool       `json:"setupAllowed"`
 		Authenticated bool       `json:"authenticated"`
 		ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
-	}{Initialized: status.Initialized}
+	}{Initialized: status.Initialized, SetupAllowed: !status.Initialized && a.setupAllowed(r)}
 	if _, session, authenticated := a.authenticate(r); authenticated {
 		response.Authenticated = true
 		expiresAt := session.expiresAt
@@ -43,6 +44,11 @@ func (a *API) access(w http.ResponseWriter, r *http.Request, setup bool) {
 		return
 	}
 	body.Token = strings.TrimSpace(body.Token)
+	if setup && !a.setupAllowed(r) {
+		a.writeProblemDetail(w, http.StatusForbidden, "setup_requires_loopback", "Setup must run on the adapter host",
+			"Open the console on the device running chinadapter, or through an SSH tunnel to its loopback address, to create the first access token.")
+		return
+	}
 	client := clientIdentity(r.RemoteAddr)
 	admission, retry := a.sessions.beginAccess(client)
 	switch admission {
@@ -87,7 +93,7 @@ func (a *API) access(w http.ResponseWriter, r *http.Request, setup bool) {
 	if setup {
 		status = http.StatusCreated
 	}
-	setSessionCookie(w, token, session.expiresAt)
+	setSessionCookie(w, token, session.expiresAt, a.publicRequest(r.Host))
 	a.writeJSON(w, status, struct {
 		Initialized   bool      `json:"initialized"`
 		Authenticated bool      `json:"authenticated"`
@@ -152,7 +158,7 @@ func (a *API) changeAccessToken(w http.ResponseWriter, r *http.Request, token st
 		a.writeProblem(w, http.StatusServiceUnavailable, "session_unavailable", "Session unavailable")
 		return
 	}
-	setSessionCookie(w, newToken, newSession.expiresAt)
+	setSessionCookie(w, newToken, newSession.expiresAt, a.publicRequest(r.Host))
 	a.writeJSON(w, http.StatusOK, struct {
 		Initialized   bool      `json:"initialized"`
 		Authenticated bool      `json:"authenticated"`
@@ -165,11 +171,15 @@ func (a *API) lock(w http.ResponseWriter, r *http.Request, token string) {
 		a.writeBodyError(w, err)
 		return
 	}
-	if err := a.revokeBrowserSession(r.Context(), token); err != nil {
-		a.writeProblem(w, http.StatusServiceUnavailable, "session_unavailable", "Session unavailable")
+	// Always lock this browser immediately, but report success only after the
+	// durable deletion succeeds. A failed deletion can survive a process restart.
+	err := a.revokeBrowserSession(r.Context(), token)
+	clearSessionCookie(w, a.publicRequest(r.Host))
+	if err != nil {
+		a.writeProblemDetail(w, http.StatusServiceUnavailable, "session_revocation_pending", "Session lock could not be saved",
+			"The console is locked now, but an old session could become valid again after the service restarts. Repair persistent storage, then unlock and lock the console again to retry.")
 		return
 	}
-	clearSessionCookie(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 

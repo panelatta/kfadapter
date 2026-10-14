@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"sync"
 	"time"
 
@@ -19,15 +20,18 @@ import (
 // Config defines the HTTP listener and optional DNS hostname accepted by the
 // browser boundary.
 type Config struct {
-	Listen      string
-	Hostname    string
-	SocksListen string
-	Version     string
-	StartedAt   time.Time
-	Now         func() time.Time
-	Random      io.Reader
-	SessionTTL  time.Duration
-	MaxSessions int
+	Listen   string
+	Hostname string
+	// PublicOrigin is the canonical HTTPS origin of an optional TLS reverse
+	// proxy. Requests carrying its authority as Host are served as that origin.
+	PublicOrigin string
+	SocksListen  string
+	Version      string
+	StartedAt    time.Time
+	Now          func() time.Time
+	Random       io.Reader
+	SessionTTL   time.Duration
+	MaxSessions  int
 	// MaxConnections bounds all accepted local HTTP connections. Zero defaults
 	// to 128; values above 1024 are rejected.
 	MaxConnections int
@@ -189,7 +193,7 @@ type NodeDetails struct {
 	SocksUsername string `json:"socksUsername"`
 	SocksPassword string `json:"socksPassword"`
 	Health        string `json:"health"`
-	TCPLatencyMS  int    `json:"tcpLatencyMs"`
+	TCPLatencyMS  int    `json:"tcpLatencyMs,omitempty"`
 }
 
 // ProbeResult reports the latest bounded TCP probe for one node.
@@ -223,6 +227,7 @@ type API struct {
 	listenIP      netip.Addr
 	listenPort    string
 	hostname      string
+	publicOrigin  *url.URL
 	socksIP       netip.Addr
 	socksPort     string
 	sessions      *sessionStore
@@ -249,6 +254,12 @@ func NewAPI(config Config, dependencies Dependencies) (*API, error) {
 	if config.Hostname != "" {
 		if err := adapterconfig.ValidateHostname(config.Hostname); err != nil {
 			return nil, fmt.Errorf("hostname %w", err)
+		}
+	}
+	var publicOrigin *url.URL
+	if config.PublicOrigin != "" {
+		if publicOrigin, err = adapterconfig.ParseHTTPSOrigin(config.PublicOrigin); err != nil {
+			return nil, fmt.Errorf("public origin %w", err)
 		}
 	}
 	if config.Now == nil {
@@ -288,7 +299,7 @@ func NewAPI(config Config, dependencies Dependencies) (*API, error) {
 	api := &API{
 		config: config, backend: dependencies.Backend, smart: dependencies.Smart, subscriptions: dependencies.Subscriptions,
 		liveness: dependencies.Liveness, listenIP: listenIP, listenPort: listenPort, hostname: config.Hostname,
-		socksIP: socksIP, socksPort: socksPort,
+		socksIP: socksIP, socksPort: socksPort, publicOrigin: publicOrigin,
 		sessions: sessions,
 	}
 	api.handler = api.newHandler()

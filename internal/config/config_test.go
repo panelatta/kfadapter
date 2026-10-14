@@ -113,7 +113,7 @@ func TestLoadAcceptsAnyCanonicalNumericListener(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidListeners(t *testing.T) {
-	for _, listenAddr := range []string{"localhost", "127.0.0.1:10809", "0:0:0:0:0:0:0:1", " 127.0.0.1"} {
+	for _, listenAddr := range []string{"localhost", "127.0.0.1:10809", "0:0:0:0:0:0:0:1", " 127.0.0.1", "fe80::1%eth0"} {
 		t.Run(listenAddr, func(t *testing.T) {
 			_, err := Load(writeConfig(t, configWithListenAddr(t, listenAddr)))
 			if err == nil || !strings.Contains(err.Error(), "listenAddr") {
