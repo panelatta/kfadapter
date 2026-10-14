@@ -11,12 +11,18 @@ import (
 	"unicode/utf8"
 )
 
+// MaxNodes bounds the nodes one provider snapshot may carry.
+const MaxNodes = 4096
+
+// MaxNodeGroupBytes bounds node group metadata and exact subscription group
+// filters.
+const MaxNodeGroupBytes = maxFieldBytes
+
 const (
 	maxIdentifierBytes = 32
 	maxFieldBytes      = 4096
 	maxStateBytes      = 1 << 20
 	maxAuthorities     = 16
-	maxNodes           = 4096
 )
 
 var (
@@ -27,7 +33,6 @@ var (
 	ErrLoginRejected    = errors.New("provider: login rejected")
 	ErrAccountExists    = errors.New("provider: account already exists")
 	ErrNoSession        = errors.New("provider: no refreshable session")
-	ErrAuthorityExpired = errors.New("provider: authority expired")
 	// ErrSessionRejected means the upstream explicitly invalidated the stored
 	// session. Only explicit rejection codes map here; every other driver error
 	// is transient and must never delete provider state.
@@ -137,7 +142,7 @@ type Node struct {
 func (node Node) Valid() bool {
 	return validField(node.ID) && validField(node.AuthorityID) && node.Protocol.Valid() &&
 		validField(node.Host) && node.Port != 0 && len(node.Name) <= maxFieldBytes &&
-		len(node.Group) <= maxFieldBytes && len(node.Model) <= maxFieldBytes
+		len(node.Group) <= MaxNodeGroupBytes && len(node.Model) <= maxFieldBytes
 }
 
 // Snapshot is one provider account's complete refresh result. RefreshState and
@@ -156,7 +161,7 @@ type Snapshot struct {
 func (snapshot Snapshot) Valid() bool {
 	if !snapshot.Provider.Valid() || !snapshot.Account.Valid() || snapshot.ExpiresAt.IsZero() ||
 		len(snapshot.RefreshState) == 0 || len(snapshot.RefreshState) > maxStateBytes ||
-		len(snapshot.Authorities) == 0 || len(snapshot.Authorities) > maxAuthorities || len(snapshot.Nodes) > maxNodes {
+		len(snapshot.Authorities) == 0 || len(snapshot.Authorities) > maxAuthorities || len(snapshot.Nodes) > MaxNodes {
 		return false
 	}
 	for id, authority := range snapshot.Authorities {
