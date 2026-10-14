@@ -19,7 +19,7 @@ const (
 	configPath     = "./config.yaml"
 	stateDirectory = "./data"
 )
-const usageLine = "usage: chinadapter [serve|healthcheck|version|validate-config]"
+const usageLine = "usage: chinadapter [serve|healthcheck|version|validate-config|validate-state|backup]"
 
 // version is overwritten by Docker's -ldflags at build time.
 var version = "devel"
@@ -74,6 +74,21 @@ func run(arguments []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintln(stdout, "configuration valid")
+		return 0
+	case "validate-state":
+		if err := validateState(arguments[1:]); err != nil {
+			slog.Error("invalid state", "err", err)
+			fmt.Fprintln(stderr, "chinadapter: invalid state")
+			return 1
+		}
+		fmt.Fprintln(stdout, "state valid")
+		return 0
+	case "backup":
+		// stdout carries only the database image.
+		if err := backupState(arguments[1:], stdout); err != nil {
+			fmt.Fprintln(stderr, "chinadapter: backup failed: "+err.Error())
+			return 1
+		}
 		return 0
 	default:
 		fmt.Fprintln(stderr, usageLine)
