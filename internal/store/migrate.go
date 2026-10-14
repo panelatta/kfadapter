@@ -35,6 +35,9 @@ func migrateSQLiteSchema(ctx context.Context, db *sql.DB) error {
 		}
 		version = 6
 	}
+	if version == 9 || version == 10 {
+		return migrateSQLiteV9OrForkToV11(ctx, db, version)
+	}
 	if version != 6 && version != 7 && version != 8 {
 		return corruptDatabase(errors.New("unsupported SQLite schema version"))
 	}
@@ -58,7 +61,10 @@ func migrateSQLiteSchema(ctx context.Context, db *sql.DB) error {
 	if err := validateSQLiteSchemaDefinition(ctx, db, 8, sqliteSchemaV8Tables, sqliteSchemaV8Statements); err != nil {
 		return err
 	}
-	return migrateSQLiteV8ToV9(ctx, db)
+	if err := migrateSQLiteV8ToV9(ctx, db); err != nil {
+		return err
+	}
+	return migrateSQLiteV9ToV11(ctx, db)
 }
 
 func migrateSQLiteV4ToV5(ctx context.Context, db *sql.DB) error {

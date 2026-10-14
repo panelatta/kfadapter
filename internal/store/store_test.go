@@ -70,8 +70,11 @@ func TestV8FixtureMigrationPreservesProvidersAndSessions(t *testing.T) {
 	if len(loaded.ActiveSession.Selectors) != 2 {
 		t.Fatal("live credential map not rebuilt")
 	}
+	if loaded.Preferences.SmartProxy != (domain.SmartProxyPreferences{}) {
+		t.Fatal("v8 migration did not default smart proxy to disabled")
+	}
 	var version int
-	if err := store.db.QueryRowContext(t.Context(), "SELECT version FROM schema_version WHERE id = 1").Scan(&version); err != nil || version != 9 {
+	if err := store.db.QueryRowContext(t.Context(), "SELECT version FROM schema_version WHERE id = 1").Scan(&version); err != nil || version != sqliteSchemaVersion {
 		t.Fatalf("schema version %d: %v", version, err)
 	}
 	if err := validateSQLiteSchema(t.Context(), store.db); err != nil {
@@ -99,7 +102,7 @@ func TestV8FixtureMigrationPreservesProvidersAndSessions(t *testing.T) {
 	}
 }
 
-func TestHistoricalSchemasMigrateToExactV9(t *testing.T) {
+func TestHistoricalSchemasMigrateToCurrentSchema(t *testing.T) {
 	for _, fixture := range []struct {
 		version    int
 		statements []string

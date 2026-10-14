@@ -79,3 +79,47 @@ var sqliteSchemaV5Statements = []string{
 	`CREATE TABLE active_session_windows (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES active_session(id) ON DELETE CASCADE, session_user_id TEXT NOT NULL, session_login_token TEXT NOT NULL, session_provider_token TEXT NOT NULL, session_tunnel_password TEXT NOT NULL, session_tunnel_method TEXT NOT NULL, session_provider_extension TEXT NOT NULL)`,
 	`CREATE TABLE active_session_node_profiles (position INTEGER PRIMARY KEY REFERENCES active_session_nodes(position) ON DELETE CASCADE, client_profile TEXT NOT NULL)`,
 }
+
+// sqliteSchemaV9Tables is upstream chinadapter v9: the current schema without
+// smart-proxy preferences.
+var sqliteSchemaV9Tables = func() map[string]int {
+	tables := make(map[string]int, len(sqliteSchemaTables)-1)
+	for name, index := range sqliteSchemaTables {
+		if name != "smart_proxy_preferences" {
+			tables[name] = index
+		}
+	}
+	return tables
+}()
+
+var sqliteSchemaV9Statements = sqliteSchemaStatements[:len(sqliteSchemaV9Tables)]
+
+// The kfadapter fork reused versions 9 and 10 for a different lineage: v8 plus
+// a per-provider account roster (fork v9), then smart-proxy preferences (fork
+// v10). Exact definitions tell fork v9 apart from upstream v9.
+var sqliteSchemaForkV10Tables = func() map[string]int {
+	tables := make(map[string]int, len(sqliteSchemaV8Tables)+2)
+	for name, index := range sqliteSchemaV8Tables {
+		tables[name] = index
+	}
+	tables["subscription_account_roster"] = len(sqliteSchemaV8Tables)
+	tables["smart_proxy_preferences"] = len(sqliteSchemaV8Tables) + 1
+	return tables
+}()
+
+var sqliteSchemaForkV9Tables = func() map[string]int {
+	tables := make(map[string]int, len(sqliteSchemaV8Tables)+1)
+	for name, index := range sqliteSchemaForkV10Tables {
+		if name != "smart_proxy_preferences" {
+			tables[name] = index
+		}
+	}
+	return tables
+}()
+
+var sqliteSchemaForkV10Statements = append(append([]string(nil), sqliteSchemaV8Statements...),
+	`CREATE TABLE subscription_account_roster (provider_id TEXT PRIMARY KEY, authority_id INTEGER NOT NULL REFERENCES subscription_authority(id) ON DELETE CASCADE, account_digest BLOB NOT NULL)`,
+	sqliteSchemaStatements[sqliteSchemaTables["smart_proxy_preferences"]],
+)
+
+var sqliteSchemaForkV9Statements = sqliteSchemaForkV10Statements[:len(sqliteSchemaForkV9Tables)]

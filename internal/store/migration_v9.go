@@ -13,11 +13,37 @@ import (
 // and tunnel authority. Both transports route by host and port; v8 stores all
 // nodeKey inputs, so neither provider needs clearing or another login.
 func migrateSQLiteV8ToV9(ctx context.Context, db *sql.DB) error {
+	return migrateSQLiteV8Layout(ctx, db, v8LayoutMigration{sessionHash: hashRawBrowserSessionToken, version: 9})
+}
+
+// v8LayoutMigration describes one lineage that still stores the v8 tables.
+type v8LayoutMigration struct {
+	// prepare runs first inside the migration transaction.
+	prepare []string
+	// sessionHash maps a stored browser_sessions.token to its token hash.
+	sessionHash func(stored string) ([]byte, bool)
+	version     int
+}
+
+func hashRawBrowserSessionToken(token string) ([]byte, bool) {
+	if !validOpaqueBrowserToken(token) {
+		return nil, false
+	}
+	hash := BrowserSessionTokenHash(token)
+	return hash[:], true
+}
+
+func migrateSQLiteV8Layout(ctx context.Context, db *sql.DB, migration v8LayoutMigration) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return corruptDatabase(err)
 	}
 	defer tx.Rollback()
+	for _, query := range migration.prepare {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return corruptDatabase(err)
+		}
+	}
 	type migratedNode struct {
 		position        int
 		oldID, id, host string
@@ -83,8 +109,9 @@ func migrateSQLiteV8ToV9(ctx context.Context, db *sql.DB) error {
 		return corruptDatabase(err)
 	}
 	type browserSession struct {
-		token, csrf string
-		expires     int64
+		hash    []byte
+		csrf    string
+		expires int64
 	}
 	var sessions []browserSession
 	sessionRows, err := tx.QueryContext(ctx, "SELECT token, csrf, expires_at_ns FROM browser_sessions")
@@ -94,10 +121,13 @@ func migrateSQLiteV8ToV9(ctx context.Context, db *sql.DB) error {
 	defer sessionRows.Close()
 	for sessionRows.Next() {
 		var session browserSession
-		if err := sessionRows.Scan(&session.token, &session.csrf, &session.expires); err != nil {
+		var token string
+		if err := sessionRows.Scan(&token, &session.csrf, &session.expires); err != nil {
 			return corruptDatabase(err)
 		}
-		if !validOpaqueBrowserToken(session.token) || !validOpaqueBrowserToken(session.csrf) {
+		var valid bool
+		session.hash, valid = migration.sessionHash(token)
+		if !valid || !validOpaqueBrowserToken(session.csrf) {
 			return corruptDatabase(errors.New("invalid migration browser session"))
 		}
 		sessions = append(sessions, session)
@@ -143,15 +173,15 @@ func migrateSQLiteV8ToV9(ctx context.Context, db *sql.DB) error {
 	}
 	defer func() { _ = sessionStatement.Close() }()
 	for _, session := range sessions {
-		hash := BrowserSessionTokenHash(session.token)
-		if _, err := sessionStatement.ExecContext(ctx, hash[:], session.csrf, session.expires); err != nil {
+		if _, err := sessionStatement.ExecContext(ctx, session.hash, session.csrf, session.expires); err != nil {
 			return corruptDatabase(err)
 		}
 	}
-	for _, query := range []string{"DROP TABLE v8_nodes", "UPDATE schema_version SET version = 9 WHERE id = 1"} {
-		if _, err := tx.ExecContext(ctx, query); err != nil {
-			return corruptDatabase(err)
-		}
+	if _, err := tx.ExecContext(ctx, "DROP TABLE v8_nodes"); err != nil {
+		return corruptDatabase(err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE schema_version SET version = ? WHERE id = 1", migration.version); err != nil {
+		return corruptDatabase(err)
 	}
 	return corruptDatabase(tx.Commit())
 }

@@ -324,9 +324,21 @@ func nodeMatchesProviderSnapshot(node Node, snapshot provider.Snapshot) bool {
 	return false
 }
 
+// SmartProxyPreferences control the automatic route. A zero interval is the
+// disabled default written by migrations; enabling requires 30 or 60 minutes.
+type SmartProxyPreferences struct {
+	Enabled         bool `json:"enabled"`
+	IntervalMinutes int  `json:"intervalMinutes"`
+}
+
+func (p SmartProxyPreferences) Valid() bool {
+	return p.IntervalMinutes == 30 || p.IntervalMinutes == 60 || (!p.Enabled && p.IntervalMinutes == 0)
+}
+
 // Preferences are durable, non-secret user choices. ExcludedNodeIDs does not
 // affect runtime tunnel selection.
 type Preferences struct {
+	SmartProxy      SmartProxyPreferences
 	ExcludedNodeIDs map[string]bool
 	RevealEndpoints bool
 	RefreshPolicy   string
@@ -526,6 +538,9 @@ func BuildSelectors(nodes []Node, authority *credentialspkg.Identity) (map[strin
 }
 
 func validatePreferences(preferences Preferences) error {
+	if !preferences.SmartProxy.Valid() {
+		return fmt.Errorf("invalid smart proxy policy")
+	}
 	for nodeID, excluded := range preferences.ExcludedNodeIDs {
 		if nodeID == "" || !excluded {
 			return fmt.Errorf("invalid excluded node preference")
