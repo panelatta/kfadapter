@@ -27,10 +27,11 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Build and test frontend
+      - name: Build, lint, and test frontend
         working-directory: web
         run: |
           npm ci --prefer-offline --no-audit
+          npm run lint
           npm run build
           npm test
       - name: Vet and test Go
@@ -38,11 +39,19 @@ jobs:
           go vet ./...
           go test -race -count=1 ./...
       - name: Validate Compose
-        run: docker compose -f compose.yaml config --quiet
+        env:
+          CHINADAPTER_IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+        run: |
+          docker compose --env-file /dev/null -f compose.yaml config --quiet
+          docker compose --env-file /dev/null --project-name chinadapter-local -f deploy/compose.local-build.yaml config --quiet
       - name: Build and smoke-test image
         run: |
           docker build --build-arg VERSION=0.0.0-ci -t chinadapter:ci .
           docker run --rm chinadapter:ci version
+      - name: Assert image security structure
+        run: ./scripts/check-image-security.sh chinadapter:ci
+      - name: Prove local Compose first-run state initialization
+        run: ./scripts/check-local-compose-first-run.sh chinadapter:ci
 
   lint:
     runs-on: ubuntu-24.04
@@ -67,20 +76,50 @@ jobs:
       - name: Scan reachable vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
+  deployment:
+    name: Deployment scripts
+    runs-on: ubuntu-24.04
+    env:
+      CHINADAPTER_IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - name: Assert static deployment supply-chain contract
+        run: ./scripts/check-deployment-assets.sh
+      - name: Assert SQLite state filesystem safeguards
+        run: |
+          ./scripts/check-restore-state.sh
+          ./scripts/check-restore-commit.sh
+          ./scripts/check-backup-state.sh
+          ./scripts/check-upgrade.sh
+      - name: Assert pre-rename state migration and rollback
+        run: ./scripts/check-migrate-legacy-state.sh
+      - name: Assert config-derived healthcheck
+        run: ./scripts/check-configured-healthcheck.sh
+      - name: Assert first-run and existing-volume preflight behavior
+        run: ./scripts/check-preflight.sh
+      - name: Assert developer Compose isolation with inherited environment
+        run: sh scripts/check-local-compose-isolation.sh
+      - name: Validate deployment preflight
+        run: sudo --preserve-env=CHINADAPTER_IMAGE_DIGEST ./scripts/preflight.sh
+      - name: Assert Compose isolation structure
+        run: ./scripts/check-compose-security.py --image-repository registry.invalid/chinadapter-override --image-digest "$CHINADAPTER_IMAGE_DIGEST"
+
   publish:
-    needs: [verify, lint, vulncheck]
+    # Images are published only from commits whose verification passed.
+    needs: [verify, lint, vulncheck, deployment]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     env:
-      IMAGE_NAME: ghcr.io/${{ github.repository }}
+      # The image keeps the project name even though this repository does not.
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/chinadapter
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
       - name: Select image tag and labels
         id: metadata
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -99,20 +138,42 @@ jobs:
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and publish image
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: true
+          provenance: true
+          sbom: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           build-args: VERSION=${{ steps.version.outputs.value }}
           cache-from: type=gha,scope=chinadapter-image
           cache-to: type=gha,mode=max,scope=chinadapter-image,ignore-error=true
+      - name: Record image digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          {
+            echo "### Published image"
+            echo
+            echo "Image: \`$IMAGE_NAME@$DIGEST\`"
+            echo
+            echo "Version: \`$VERSION\`"
+            echo
+            echo '```sh'
+            echo "export CHINADAPTER_IMAGE_REPOSITORY=$IMAGE_NAME"
+            echo "export CHINADAPTER_IMAGE_DIGEST=$DIGEST"
+            echo 'sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY,CHINADAPTER_IMAGE_DIGEST scripts/preflight.sh'
+            echo 'docker compose --env-file /dev/null -f compose.yaml up -d'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
