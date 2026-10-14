@@ -82,7 +82,9 @@ func (IOS) BuildLoginFields(input LoginInput, timestamp string, randomness io.Re
 	if !withinLimit(input.Account) || !withinLimit(input.Password) || !withinLimit(input.InstallationID) || strings.TrimSpace(input.Account) == "" || input.Password == "" || strings.TrimSpace(input.InstallationID) == "" {
 		return nil, ErrInvalidVerifyInput
 	}
-	deviceDigest := sha1.Sum([]byte("chinadapter-kuaifan-device\x00" + input.InstallationID))
+	// This fork keeps the pre-rename label so installations migrated from
+	// kfadapter present the same device identity to KuaiFan.
+	deviceDigest := sha1.Sum([]byte("kfadapter-kuaifan-device\x00" + input.InstallationID))
 	deviceID := hex.EncodeToString(deviceDigest[:])
 	verify, err := ComputeIOSVerify(deviceID, timestamp, randomness)
 	if err != nil {
