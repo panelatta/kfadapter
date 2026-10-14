@@ -255,10 +255,7 @@ func openSQLite(ctx context.Context, path string, readOnly bool) (*sql.DB, error
 		query.Set("mode", "ro")
 	}
 	uri := &url.URL{Scheme: "file", Path: absolute, RawQuery: query.Encode()}
-	db, err := sql.Open("sqlite", uri.String())
-	if err != nil {
-		return nil, err
-	}
+	db := sql.OpenDB(&sqliteStateConnector{dsn: uri.String()})
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	if err := db.PingContext(ctx); err != nil {
@@ -460,12 +457,16 @@ func (s *SQLiteStore) Update(ctx context.Context, change func(*domain.Persistent
 }
 
 func corruptDatabase(err error) error {
-	if err == nil || errors.Is(err, domain.ErrCorruptState) || errors.Is(err, domain.ErrStateBusy) {
+	if err == nil || errors.Is(err, domain.ErrCorruptState) || errors.Is(err, domain.ErrStateBusy) || errors.Is(err, domain.ErrStateFull) {
 		return err
 	}
 	var sqliteError *sqlite.Error
 	if errors.As(err, &sqliteError) && sqliteError.Code()&0xff == 5 {
 		return fmt.Errorf("%w: %w", domain.ErrStateBusy, err)
+	}
+	// SQLITE_FULL: the size limit rejected growth and the write rolled back.
+	if errors.As(err, &sqliteError) && sqliteError.Code()&0xff == 13 {
+		return fmt.Errorf("%w: %w", domain.ErrStateFull, err)
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err

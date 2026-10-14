@@ -27,6 +27,7 @@ var (
 	ErrStateNotFound                 = errors.New("persistent state not found")
 	ErrCorruptState                  = errors.New("persistent state is corrupt")
 	ErrStateBusy                     = errors.New("state database is busy")
+	ErrStateFull                     = errors.New("state database is full")
 	ErrInsecureStatePath             = errors.New("state path has insecure ownership or mode")
 	ErrInvalidSnapshot               = errors.New("invalid runtime snapshot")
 	ErrInvalidTransition             = errors.New("invalid service state transition")
