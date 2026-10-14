@@ -8,6 +8,9 @@ import { describeError, isSessionProblem } from "@/lib/errors";
 import { replaceRoute, routeFromLocation } from "./session";
 import type { Route, SessionState } from "./session";
 
+const tokenChangedSessionLostMessage =
+    "The access token was changed, but this browser could not start a new session. Unlock the console with the new access token.";
+
 const unconfirmedLockMessage =
     "The console could not confirm the lock with the service. If this browser is shared, reload and lock again.";
 
@@ -218,6 +221,31 @@ export function useConsoleSession(providedApi?: ApiClient) {
         completeAccess();
     };
 
+    // The service revokes every browser session and issues this browser a
+    // replacement one, so a success restarts the authenticated session.
+    const changeAccessToken = async (
+        current: string,
+        next: string,
+    ): Promise<void> => {
+        const revision = sessionRevision.current;
+        try {
+            await api.changeAccessToken(current, next);
+        } catch (error) {
+            if (revision === sessionRevision.current && error instanceof ApiError) {
+                const { code, status: httpStatus } = error.problem;
+                if (code === "not_authenticated" || httpStatus === 403) {
+                    loseAccessSession();
+                } else if (code === "session_unavailable") {
+                    // The token changed but the replacement session failed.
+                    loseAccessSession();
+                    setLoadError(tokenChangedSessionLostMessage);
+                }
+            }
+            throw error;
+        }
+        if (revision === sessionRevision.current) completeAccess();
+    };
+
     const lockConsole = async (): Promise<void> => {
         if (lockPending.current) return;
         lockPending.current = true;
@@ -271,6 +299,7 @@ export function useConsoleSession(providedApi?: ApiClient) {
         refreshing,
         setupAccess,
         loginAccess,
+        changeAccessToken,
         loseAccessSession,
         lockConsole,
         retryLoad,

@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { Download, LockKeyhole } from "lucide-react";
+import { Download, KeyRound, LockKeyhole } from "lucide-react";
 import type { ApiClient } from "./api";
 import type { NodeRecord, StatusResponse } from "./types";
 import { FormError } from "@/components/forms";
@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/card";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { AccessTokenCard } from "@/features/access/AccessTokenCard";
+import { ChangeAccessTokenCard } from "@/features/access/ChangeAccessTokenCard";
 import { LoadingCard } from "@/features/access/LoadingCard";
 import { ServiceErrorCard } from "@/features/access/ServiceErrorCard";
 import { useConsoleSession } from "@/features/access/useConsoleSession";
@@ -48,6 +49,7 @@ export function App({ api: providedApi }: AppProps) {
         setupAccess,
         loginAccess,
         loginAccount,
+        changeAccessToken,
         loseAccessSession,
         lockConsole,
         retryLoad,
@@ -110,6 +112,7 @@ export function App({ api: providedApi }: AppProps) {
                 loadError={loadError}
                 nodes={nodes}
                 onAccessLost={loseAccessSession}
+                onChangeAccessToken={changeAccessToken}
                 onLockConsole={lockConsole}
                 onNodesChange={setNodes}
                 onLoginAccount={loginAccount}
@@ -133,6 +136,7 @@ function StatusConsole({
     loadError,
     nodes,
     onAccessLost,
+    onChangeAccessToken,
     onLockConsole,
     onLoginAccount,
     onNodesChange,
@@ -149,6 +153,7 @@ function StatusConsole({
     loadError: string;
     nodes: NodeRecord[];
     onAccessLost: () => void;
+    onChangeAccessToken: (current: string, next: string) => Promise<void>;
     onLockConsole: () => Promise<void>;
     onLoginAccount: (
         provider: string,
@@ -184,6 +189,13 @@ function StatusConsole({
             : eligibleNodes.filter((node) => node.provider === activeProvider);
     const activeAccount =
         activeProvider === "all" ? undefined : accounts[activeProvider];
+    const [changingToken, setChangingToken] = useState(false);
+    const [tokenChanged, setTokenChanged] = useState(false);
+    const changeToken = async (current: string, next: string) => {
+        await onChangeAccessToken(current, next);
+        setChangingToken(false);
+        setTokenChanged(true);
+    };
 
     return (
         <main className="min-h-screen bg-background px-4 py-6 text-foreground sm:px-6 lg:px-10">
@@ -229,6 +241,23 @@ function StatusConsole({
                                 <TooltipContent>
                                     Download a redacted diagnostics report
                                 </TooltipContent>
+                            </Tooltip>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Button
+                                        aria-expanded={changingToken}
+                                        aria-label="Change access token"
+                                        onClick={() => {
+                                            setChangingToken((open) => !open);
+                                            setTokenChanged(false);
+                                        }}
+                                        size="sm"
+                                        variant="ghost"
+                                    >
+                                        <KeyRound className="size-4" />
+                                    </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Change access token</TooltipContent>
                             </Tooltip>
                             <Button
                                 aria-label="Lock console"
@@ -286,6 +315,20 @@ function StatusConsole({
                         </Button>
                     ))}
                 </nav>
+
+                {changingToken ? (
+                    <ChangeAccessTokenCard
+                        onCancel={() => setChangingToken(false)}
+                        onSubmit={changeToken}
+                    />
+                ) : null}
+                {tokenChanged ? (
+                    <p className="text-sm text-muted-foreground" role="status">
+                        Access token changed. Other browsers were signed out;
+                        copy the new subscription URL and smart proxy address
+                        into your clients.
+                    </p>
+                ) : null}
 
                 {loadError ? <FormError message={loadError} /> : null}
                 {diagnostics.error ? (
