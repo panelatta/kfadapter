@@ -11,7 +11,7 @@ export type NodeHealth = "healthy" | "degraded" | "unhealthy" | "unknown";
 
 export interface AccountSummary {
   provider: string;
-  display: string;
+  display?: string;
   tier: string;
   subscriptionActive: boolean;
   subscriptionEndsAt?: string;
@@ -55,7 +55,6 @@ export interface NodeRecord {
   probeError?: string;
   udpHealth: "unavailable" | "healthy" | "unhealthy" | string;
   eligible: boolean;
-  compatibilityError?: string;
 }
 
 export interface NodeDetails {
@@ -90,6 +89,8 @@ export interface SubscriptionURLResponse {
 
 export interface AccessStatusResponse {
   initialized: boolean;
+  /** Only a browser on the adapter host itself may create the first token. */
+  setupAllowed?: boolean;
   authenticated: boolean;
   expiresAt?: string;
 }
@@ -103,10 +104,8 @@ export interface AccessTokenChangeInput {
   next: string;
 }
 
-export interface LoginResponse {
-  account?: AccountSummary;
-  status?: StatusResponse;
-}
+/** POST /auth/login returns the connected account (web.Account in Go). */
+export type LoginResponse = AccountSummary;
 
 export interface ProbeResult {
   nodeId: string;

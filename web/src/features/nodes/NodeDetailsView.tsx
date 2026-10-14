@@ -1,44 +1,28 @@
-import { useEffect, useRef, useState } from "react";
 import { Copy } from "lucide-react";
 import type { NodeDetails } from "@/types";
 import { Button } from "@/components/ui/button";
-import { copyText } from "@/lib/clipboard";
+import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatLatency, healthLabel } from "./health";
 
 export function NodeDetailsView({ details }: { details: NodeDetails }) {
-    const [copyMessage, setCopyMessage] = useState("");
-    const copyResetTimer = useRef<number | undefined>(undefined);
     const socksURL = `socks5://${encodeURIComponent(details.socksUsername)}:${encodeURIComponent(details.socksPassword)}@${details.socksAddress}`;
-
-    const clearCopyMessage = () => {
-        clearTimeout(copyResetTimer.current);
-        copyResetTimer.current = undefined;
-        setCopyMessage("");
-    };
-
-    useEffect(() => () => clearTimeout(copyResetTimer.current), []);
-
-    const copySocksURL = async () => {
-        clearCopyMessage();
-        setCopyMessage(
-            (await copyText(socksURL))
-                ? "SOCKS5 URL copied."
-                : "Copy is unavailable.",
-        );
-        copyResetTimer.current = window.setTimeout(
-            () => setCopyMessage(""),
-            2500,
-        );
-    };
+    const { message: copyMessage, copy: copySocksURL } = useCopyFeedback(
+        socksURL,
+        "SOCKS5 URL copied.",
+    );
 
     return (
         <div className="grid gap-4">
-            <dl className="grid gap-2.5 text-sm">
-                <DetailRow
-                    label="Upstream"
-                    value={`${details.upstreamHost}:${details.upstreamPort}`}
-                />
-                <div className="grid grid-cols-3 gap-3 border-t border-dashed border-border pt-3">
+            {/* Each <dl> holds only name/value groups; layout wrappers stay
+                outside the description lists. */}
+            <div className="grid gap-2.5 text-sm">
+                <dl>
+                    <DetailRow
+                        label="Upstream"
+                        value={`${details.upstreamHost}:${details.upstreamPort}`}
+                    />
+                </dl>
+                <dl className="grid grid-cols-3 gap-3 border-t border-dashed border-border pt-3">
                     <DetailRow
                         label="Health"
                         value={healthLabel(details.health)}
@@ -47,8 +31,8 @@ export function NodeDetailsView({ details }: { details: NodeDetails }) {
                         label="Latency"
                         value={formatLatency(details.tcpLatencyMs)}
                     />
-                </div>
-            </dl>
+                </dl>
+            </div>
             <div className="flex flex-wrap items-center gap-3">
                 <Button
                     onClick={() => void copySocksURL()}

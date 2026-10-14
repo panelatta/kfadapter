@@ -6,7 +6,9 @@ export class TestEventSource {
   readonly listeners = new Map<string, Set<EventListener>>();
   readonly close = vi.fn(() => { this.closed = true; });
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onopen: ((event: Event) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
+  readyState = 0;
   closed = false;
 
   constructor(readonly url: string, readonly options?: EventSourceInit) {
@@ -27,7 +29,20 @@ export class TestEventSource {
     for (const listener of this.listeners.get(type) || []) listener(new MessageEvent(type, { data }));
   }
 
+  open(): void {
+    this.readyState = 1;
+    this.onopen?.(new Event("open"));
+  }
+
+  /** A dropped connection that the browser will retry by itself. */
   fail(): void {
+    this.readyState = 0;
+    this.onerror?.(new Event("error"));
+  }
+
+  /** A non-200 response: the browser closes the stream for good. */
+  reject(): void {
+    this.readyState = 2;
     this.onerror?.(new Event("error"));
   }
 }

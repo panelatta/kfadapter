@@ -95,4 +95,18 @@ describe("API response contracts", () => {
     expect(fetchMock.mock.calls[0][1].method).toBe("POST");
 		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ provider: "kuaifan" });
   });
+
+  it("posts an empty JSON body to export diagnostics and returns the report", async () => {
+    const report = JSON.stringify({ version: "0.1.0" });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(report, { status: 200, headers: jsonHeaders }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const blob = await new ApiClient().diagnostics();
+
+    expect(await blob.text()).toBe(report);
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/diagnostics/export");
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: "POST", credentials: "same-origin", cache: "no-store" });
+    expect(fetchMock.mock.calls[0][1].headers).toEqual({ Accept: "application/json", "Content-Type": "application/json" });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({});
+  });
 });

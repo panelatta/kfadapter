@@ -36,11 +36,13 @@ export function AccountPanel({
     const {
         activeProvider,
         confirmRemoval,
+        confirmSignOutAll,
         providerBusy,
         providerError,
         runProviderAction,
         selectProvider,
         setConfirmRemoval,
+        setConfirmSignOutAll,
     } = accountView;
     const accounts = status.accounts ?? {};
     const activeAccount =
@@ -84,7 +86,7 @@ export function AccountPanel({
                             </span>
                             <span className="text-xs text-muted-foreground">
                                 {account
-                                    ? account.display
+                                    ? (account.display ?? "Account connected")
                                     : "No account connected"}
                             </span>
                             <span className="font-sans text-sm font-semibold uppercase tracking-[0.08em] text-primary/90">
@@ -120,20 +122,44 @@ export function AccountPanel({
                         />
                         Refresh all
                     </Button>
-                    <Button
-                        className="border border-destructive/60 text-destructive hover:border-destructive hover:bg-destructive/10 hover:text-destructive"
-                        disabled={
-                            refreshing ||
-                            providerBusy ||
-                            Object.keys(accounts).length === 0
-                        }
-                        onClick={() => void onSignOutAll()}
-                        size="sm"
-                        variant="outline"
-                    >
-                        <LogOut />
-                        Sign out all
-                    </Button>
+                    {confirmSignOutAll ? (
+                        <>
+                            <Button
+                                onClick={() => setConfirmSignOutAll(false)}
+                                size="sm"
+                                variant="ghost"
+                            >
+                                Cancel
+                            </Button>
+                            <Button
+                                disabled={refreshing || providerBusy}
+                                onClick={() => {
+                                    setConfirmSignOutAll(false);
+                                    void onSignOutAll();
+                                }}
+                                size="sm"
+                                variant="destructive"
+                            >
+                                <LogOut />
+                                Confirm sign out
+                            </Button>
+                        </>
+                    ) : (
+                        <Button
+                            className="border border-destructive/60 text-destructive hover:border-destructive hover:bg-destructive/10 hover:text-destructive"
+                            disabled={
+                                refreshing ||
+                                providerBusy ||
+                                Object.keys(accounts).length === 0
+                            }
+                            onClick={() => setConfirmSignOutAll(true)}
+                            size="sm"
+                            variant="outline"
+                        >
+                            <LogOut />
+                            Sign out all
+                        </Button>
+                    )}
                 </div>
             </CardFooter>
         </Card>

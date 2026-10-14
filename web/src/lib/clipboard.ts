@@ -1,4 +1,8 @@
-export async function copyText(value: string): Promise<boolean> {
+export async function copyText(
+    value: string,
+    isCurrent: () => boolean = () => true,
+): Promise<boolean> {
+    if (!isCurrent()) return false;
     try {
         if (navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(value);
@@ -8,13 +12,27 @@ export async function copyText(value: string): Promise<boolean> {
         // Fall through to the legacy copy command for non-secure LAN origins.
     }
 
+    // A native clipboard request cannot be undone. If its caller lost access
+    // while it was pending, do not start a second copy through the fallback.
+    if (!isCurrent()) return false;
+
+    // Keep the temporary field next to the focused control so selecting it does
+    // not move focus out of an open popover (which would dismiss it), and put
+    // focus back afterwards.
+    const previousFocus =
+        document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null;
+    const container = previousFocus?.parentElement ?? document.body;
     const textArea = document.createElement("textarea");
     textArea.value = value;
     textArea.setAttribute("readonly", "");
+    textArea.setAttribute("aria-hidden", "true");
+    textArea.tabIndex = -1;
     textArea.style.position = "fixed";
     textArea.style.opacity = "0";
     textArea.style.pointerEvents = "none";
-    document.body.append(textArea);
+    container.append(textArea);
     textArea.select();
     try {
         return document.execCommand("copy");
@@ -22,5 +40,6 @@ export async function copyText(value: string): Promise<boolean> {
         return false;
     } finally {
         textArea.remove();
+        previousFocus?.focus({ preventScroll: true });
     }
 }

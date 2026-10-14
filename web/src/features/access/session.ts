@@ -1,5 +1,10 @@
 export type Route = "/" | "/signin";
-export type SessionState = "checking" | "setup" | "access_login" | "available";
+export type SessionState =
+    | "checking"
+    | "setup"
+    | "access_login"
+    | "available"
+    | "locking";
 
 export function routeFromLocation(): Route {
     return window.location.pathname === "/signin" ? "/signin" : "/";

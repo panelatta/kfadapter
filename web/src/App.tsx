@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import { LockKeyhole } from "lucide-react";
+import { Download, LockKeyhole } from "lucide-react";
 import type { ApiClient } from "./api";
 import type { NodeRecord, StatusResponse } from "./types";
 import { FormError } from "@/components/forms";
@@ -13,15 +13,17 @@ import {
     CardHeader,
     CardTitle,
 } from "@/components/ui/card";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { AccessTokenCard } from "@/features/access/AccessTokenCard";
 import { LoadingCard } from "@/features/access/LoadingCard";
+import { ServiceErrorCard } from "@/features/access/ServiceErrorCard";
 import { useConsoleSession } from "@/features/access/useConsoleSession";
 import { AccountPanel } from "@/features/accounts/AccountPanel";
 import { ProviderLoginCard } from "@/features/accounts/ProviderLoginCard";
 import { providerLabel, providerLoginStates } from "@/features/accounts/providers";
 import { StatusBadge, stateDetails } from "@/features/accounts/StatusBadge";
 import { useAccountViews } from "@/features/accounts/useAccountViews";
+import { useDiagnosticsExport } from "@/features/diagnostics/useDiagnosticsExport";
 import { NodeList } from "@/features/nodes/NodeList";
 import { SubscriptionLinkCard } from "@/features/subscription/SubscriptionLinkCard";
 import { useSubscriptionLink } from "@/features/subscription/useSubscriptionLink";
@@ -36,6 +38,7 @@ export function App({ api: providedApi }: AppProps) {
         api,
         route,
         session,
+        setupAllowed,
         status,
         nodes,
         subscriptionURL,
@@ -46,6 +49,7 @@ export function App({ api: providedApi }: AppProps) {
         loginAccount,
         loseAccessSession,
         lockConsole,
+        retryLoad,
         getSessionRevision,
         setNodes,
         refreshAll,
@@ -57,12 +61,20 @@ export function App({ api: providedApi }: AppProps) {
     let content;
     if (session === "checking") {
         content = <LoadingCard />;
+    } else if (session === "locking") {
+        content = (
+            <LoadingCard
+                title="Locking console"
+                description="Waiting for the service to finish locking this session."
+            />
+        );
     } else if (session === "setup") {
         content = (
             <AccessTokenCard
                 mode="setup"
                 onSubmit={setupAccess}
                 error={loadError}
+                setupAllowed={setupAllowed}
             />
         );
     } else if (session === "access_login") {
@@ -73,14 +85,18 @@ export function App({ api: providedApi }: AppProps) {
                 error={loadError}
             />
         );
-    } else if (
-        !status ||
-        route === "/signin" ||
-        providerLoginStates[status.state]
-    ) {
+    } else if (!status) {
+        // The status is still loading or failed to load. Neither case means the
+        // provider account is signed out.
+        content = loadError ? (
+            <ServiceErrorCard message={loadError} onRetry={retryLoad} />
+        ) : (
+            <LoadingCard description="Loading the service status." />
+        );
+    } else if (route === "/signin" || providerLoginStates[status.state]) {
         content = (
             <ProviderLoginCard
-                providers={status?.providers ?? []}
+                providers={status.providers}
                 onSubmit={loginAccount}
                 error={loadError}
             />
@@ -156,6 +172,11 @@ function StatusConsole({
     const subscriptionLink = useSubscriptionLink(eligibleNodes, subscriptionURL);
     const accountView = useAccountViews(status, subscriptionLink.resetFilters);
     const { activeProvider, selectProvider } = accountView;
+    const diagnostics = useDiagnosticsExport({
+        api,
+        getSessionRevision,
+        onAccessLost,
+    });
     const visibleNodes =
         activeProvider === "all"
             ? eligibleNodes
@@ -190,6 +211,24 @@ function StatusConsole({
                             )}
                         </div>
                         <div className="flex flex-nowrap items-center gap-1 sm:gap-2">
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Button
+                                        aria-label="Export diagnostics"
+                                        disabled={diagnostics.exporting}
+                                        onClick={() =>
+                                            void diagnostics.exportDiagnostics()
+                                        }
+                                        size="sm"
+                                        variant="ghost"
+                                    >
+                                        <Download className="size-4" />
+                                    </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                    Download a redacted diagnostics report
+                                </TooltipContent>
+                            </Tooltip>
                             <Button
                                 aria-label="Lock console"
                                 onClick={() => void onLockConsole()}
@@ -248,6 +287,9 @@ function StatusConsole({
                 </nav>
 
                 {loadError ? <FormError message={loadError} /> : null}
+                {diagnostics.error ? (
+                    <FormError message={diagnostics.error} />
+                ) : null}
 
                 <AccountPanel
                     accountView={accountView}

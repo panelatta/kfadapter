@@ -12,10 +12,13 @@ export function AccessTokenCard({
     mode,
     onSubmit,
     error,
+    setupAllowed = true,
 }: {
     mode: "setup" | "login";
     onSubmit: (token: string) => Promise<void>;
     error: string;
+    /** False when this browser is not on the adapter host (setup is loopback-only). */
+    setupAllowed?: boolean;
 }) {
     const [token, setToken] = useState("");
     const [confirmation, setConfirmation] = useState("");
@@ -69,54 +72,63 @@ export function AccessTokenCard({
                 </CardDescription>
             </CardHeader>
             <CardContent>
-                <form className="grid gap-4" noValidate onSubmit={submit}>
-                    <FormError message={localError || error} />
-                    <Field label="Access token" name="access-token">
-                        <Input
-                            autoComplete="off"
-                            id="access-token"
-                            name="access-token"
-                            onChange={(event) =>
-                                setToken(event.currentTarget.value)
-                            }
-                            type="password"
-                            value={token}
-                        />
-                    </Field>
-                    {isSetup ? (
-                        <Field
-                            label="Confirm access token"
-                            name="access-token-confirmation"
-                        >
+                {isSetup && !setupAllowed ? (
+                    <p className="text-sm leading-6" role="alert">
+                        For safety, the first access token can only be created
+                        from the device running chinadapter. Open this console
+                        at http://127.0.0.1 on that device, for example through
+                        an SSH port forward, then return here to unlock it.
+                    </p>
+                ) : (
+                    <form className="grid gap-4" noValidate onSubmit={submit}>
+                        <FormError message={localError || error} />
+                        <Field label="Access token" name="access-token">
                             <Input
                                 autoComplete="off"
-                                id="access-token-confirmation"
-                                name="access-token-confirmation"
+                                id="access-token"
+                                name="access-token"
                                 onChange={(event) =>
-                                    setConfirmation(event.currentTarget.value)
+                                    setToken(event.currentTarget.value)
                                 }
                                 type="password"
-                                value={confirmation}
+                                value={token}
                             />
                         </Field>
-                    ) : null}
-                    <Button
-                        className="mt-2 w-full"
-                        disabled={submitting}
-                        type="submit"
-                    >
-                        {submitting ? (
-                            <>
-                                <LoaderCircle className="size-4 animate-spin" />
-                                Checking
-                            </>
-                        ) : isSetup ? (
-                            "Create access"
-                        ) : (
-                            "Continue"
-                        )}
-                    </Button>
-                </form>
+                        {isSetup ? (
+                            <Field
+                                label="Confirm access token"
+                                name="access-token-confirmation"
+                            >
+                                <Input
+                                    autoComplete="off"
+                                    id="access-token-confirmation"
+                                    name="access-token-confirmation"
+                                    onChange={(event) =>
+                                        setConfirmation(event.currentTarget.value)
+                                    }
+                                    type="password"
+                                    value={confirmation}
+                                />
+                            </Field>
+                        ) : null}
+                        <Button
+                            className="mt-2 w-full"
+                            disabled={submitting}
+                            type="submit"
+                        >
+                            {submitting ? (
+                                <>
+                                    <LoaderCircle className="size-4 animate-spin" />
+                                    Checking
+                                </>
+                            ) : isSetup ? (
+                                "Create access"
+                            ) : (
+                                "Continue"
+                            )}
+                        </Button>
+                    </form>
+                )}
             </CardContent>
         </AuthCardShell>
     );

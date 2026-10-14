@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import type { NodeRecord } from "@/types";
-import { copyText } from "@/lib/clipboard";
+import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { compareGroupNames, groupNameCollator } from "@/lib/groups";
 
 export function useSubscriptionLink(eligibleNodes: NodeRecord[], subscriptionURL: string) {
-    const [copyMessage, setCopyMessage] = useState("");
-    const [filterProvider, setFilterProvider] = useState("");
-    const [filterGroup, setFilterGroup] = useState("");
+    // The selections are preferences. They apply only while the current nodes
+    // offer them, and come back if a reload makes them available again.
+    const [selectedProvider, setFilterProvider] = useState("");
+    const [selectedGroup, setFilterGroup] = useState("");
     const [filterName, setFilterName] = useState("");
-    const copyResetTimer = useRef<number | undefined>(undefined);
 
     const nodeProviders = useMemo(
         () =>
@@ -17,6 +17,10 @@ export function useSubscriptionLink(eligibleNodes: NodeRecord[], subscriptionURL
             ),
         [eligibleNodes],
     );
+    // The select, the group options, and the URL all use this effective value.
+    const filterProvider = nodeProviders.includes(selectedProvider)
+        ? selectedProvider
+        : "";
     const filterGroups = useMemo(
         () =>
             [
@@ -32,11 +36,9 @@ export function useSubscriptionLink(eligibleNodes: NodeRecord[], subscriptionURL
             ].sort(compareGroupNames),
         [eligibleNodes, filterProvider],
     );
-
-    useEffect(() => {
-        if (filterGroup && !filterGroups.includes(filterGroup))
-            setFilterGroup("");
-    }, [filterGroup, filterGroups]);
+    const filterGroup = filterGroups.includes(selectedGroup)
+        ? selectedGroup
+        : "";
 
     const filteredSubscriptionURL = useMemo(() => {
         if (!subscriptionURL) return "";
@@ -53,30 +55,12 @@ export function useSubscriptionLink(eligibleNodes: NodeRecord[], subscriptionURL
         }
     }, [filterGroup, filterName, filterProvider, subscriptionURL]);
 
-    const clearCopyMessage = () => {
-        clearTimeout(copyResetTimer.current);
-        copyResetTimer.current = undefined;
-        setCopyMessage("");
-    };
-
-    useEffect(() => () => clearTimeout(copyResetTimer.current), []);
-    useEffect(() => {
-        clearCopyMessage();
-    }, [filteredSubscriptionURL]);
-
-    const copySubscription = async () => {
-        if (!filteredSubscriptionURL) return;
-        clearCopyMessage();
-        setCopyMessage(
-            (await copyText(filteredSubscriptionURL))
-                ? "Link copied."
-                : "Copy is unavailable.",
-        );
-        copyResetTimer.current = window.setTimeout(
-            () => setCopyMessage(""),
-            2500,
-        );
-    };
+    // The copy message belongs to the copied URL and hides once it changes.
+    const {
+        message: copyMessage,
+        copy: copySubscription,
+        clear: clearCopyMessage,
+    } = useCopyFeedback(filteredSubscriptionURL, "Link copied.");
 
     const resetFilters = () => {
         clearCopyMessage();

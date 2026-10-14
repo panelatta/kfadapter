@@ -8,7 +8,7 @@ interface SubscriptionValidity {
 function describeSubscriptionValidity(
     subscriptionActive: boolean,
     subscriptionEndsAt?: string,
-) {
+): SubscriptionValidity {
     if (!subscriptionActive) return { summary: "Free" };
     if (!subscriptionEndsAt)
         return { summary: "Active · End date unavailable" };

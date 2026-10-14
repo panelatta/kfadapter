@@ -6,7 +6,6 @@ import type {
   LoginResponse,
   NodeDetails,
   NodeHealth,
-  NodeRecord,
   NodesResponse,
   ProbeResult,
   ServiceState,
@@ -33,7 +32,9 @@ export class ApiError extends Error {
 }
 
 const API_ROOT = "/api/v1";
-
+const EVENT_SOURCE_CLOSED = 2;
+const EVENT_RETRY_INITIAL_MS = 1_000;
+const EVENT_RETRY_MAX_MS = 30_000;
 
 async function asProblem(response: Response): Promise<ApiError> {
   let problem: Partial<ProblemDetails> = {};
@@ -110,6 +111,7 @@ export class ApiClient {
     const body: AccessTokenChangeInput = { current, next };
     return this.request<AccessSessionResponse>("/access/token", { method: "POST", body });
   }
+
   async status(): Promise<StatusResponse> {
     return this.request<StatusResponse>("/status");
   }
@@ -126,7 +128,6 @@ export class ApiClient {
         tcpLatencyMs: node.tcpLatencyMs,
         udpHealth: node.udpHealth,
         eligible: node.eligible,
-        compatibilityError: node.compatibilityError,
       })),
     };
   }
@@ -134,8 +135,6 @@ export class ApiClient {
   async nodeDetails(id: string): Promise<NodeDetails> {
     return this.request<NodeDetails>(`/nodes/${encodeURIComponent(id)}/details`);
   }
-
-
 
   async login(provider: string, account: string, password: string): Promise<LoginResponse> {
     return this.request<LoginResponse>("/auth/login", {
@@ -168,36 +167,83 @@ export class ApiClient {
     });
   }
 
-
   async subscriptionURL(): Promise<SubscriptionURLResponse> {
     return this.request<SubscriptionURLResponse>("/subscription/url");
   }
 
+  /** Downloads the redacted diagnostics report as a JSON blob. */
+  async diagnostics(): Promise<Blob> {
+    const response = await this.send("/diagnostics/export", { method: "POST", body: {} });
+    return response.blob();
+  }
 
-  events(onEvent: (event: EventMessage) => void, onFailure: () => void): () => void {
-    const stream = new EventSource(`${API_ROOT}/events`, { withCredentials: true });
+  events(onEvent: (event: EventMessage) => void, onFailure: () => void, onOpen?: () => void): () => void {
+    // EventSource reconnects by itself after a dropped connection, but a non-200
+    // response (403, 429, 503) closes it permanently. Recreate closed streams
+    // with capped exponential backoff so live updates always recover.
     const names = ["state", "refresh", "probe"] as const;
+    let stream: EventSource | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retryDelay = EVENT_RETRY_INITIAL_MS;
+    let stopped = false;
     const listeners = names.map((type) => {
       const listener = (message: Event) => {
+        if (stopped) return;
         const data = (message as MessageEvent<unknown>).data;
         if (typeof data !== "string") return;
         const event = parseNamedEvent(type, data);
         if (event) onEvent(event);
       };
-      stream.addEventListener(type, listener);
       return [type, listener] as const;
     });
-    stream.onerror = () => onFailure();
+    const detach = (current: EventSource) => {
+      for (const [type, listener] of listeners) current.removeEventListener(type, listener);
+      current.onopen = null;
+      current.onerror = null;
+      current.close();
+    };
+    const connect = () => {
+      retryTimer = null;
+      if (stopped) return;
+      const current = new EventSource(`${API_ROOT}/events`, { withCredentials: true });
+      let connected = false;
+      stream = current;
+      for (const [type, listener] of listeners) current.addEventListener(type, listener);
+      current.onopen = () => {
+        if (stopped || stream !== current || connected) return;
+        connected = true;
+        retryDelay = EVENT_RETRY_INITIAL_MS;
+        // The server does not replay missed events. Reconcile after both the
+        // first connection and browser-managed or explicitly recreated streams.
+        onOpen?.();
+      };
+      current.onerror = () => {
+        if (stopped || stream !== current) return;
+        connected = false;
+        onFailure();
+        if (current.readyState !== EVENT_SOURCE_CLOSED) return;
+        detach(current);
+        stream = null;
+        retryTimer = setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, EVENT_RETRY_MAX_MS);
+      };
+    };
+    connect();
     return () => {
-      for (const [type, listener] of listeners) stream.removeEventListener(type, listener);
-      stream.close();
+      stopped = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      if (stream) detach(stream);
+      stream = null;
     };
   }
 
-  private async request<T>(
-    path: string,
-    init: { method?: "POST" | "PUT" | "DELETE"; body?: unknown; expectEmptyResponse?: boolean } = {},
-  ): Promise<T> {
+  private async request<T>(path: string, init: RequestOptions = {}): Promise<T> {
+    const response = await this.send(path, init);
+    if (init.expectEmptyResponse || response.status === 204) return undefined as T;
+    return (await response.json()) as T;
+  }
+
+  private async send(path: string, init: RequestOptions): Promise<Response> {
     const isWrite = Boolean(init.method);
     const response = await fetch(`${API_ROOT}${path}`, {
       method: init.method || "GET",
@@ -214,7 +260,12 @@ export class ApiClient {
       ...(isWrite ? { body: JSON.stringify(init.body ?? {}) } : {}),
     });
     if (!response.ok) throw await asProblem(response);
-    if (init.expectEmptyResponse || response.status === 204) return undefined as T;
-    return (await response.json()) as T;
+    return response;
   }
+}
+
+interface RequestOptions {
+  method?: "POST" | "PUT" | "DELETE";
+  body?: unknown;
+  expectEmptyResponse?: boolean;
 }

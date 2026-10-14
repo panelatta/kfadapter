@@ -9,7 +9,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { isSessionProblem } from "@/lib/errors";
 import { compareGroupNames, groupNameCollator } from "@/lib/groups";
-import { formatLatency, healthLabel, probeFailureLabel } from "./health";
+import { applyProbeResult, formatLatency, healthLabel } from "./health";
 import { NodeDetailsPopover } from "./NodeDetailsPopover";
 
 export function NodeList({
@@ -29,25 +29,16 @@ export function NodeList({
     const [probingAll, setProbingAll] = useState(false);
     const active = useRef(true);
 
-    useEffect(
-        () => () => {
+    useEffect(() => {
+        active.current = true;
+        return () => {
             active.current = false;
-        },
-        [],
-    );
+        };
+    }, []);
 
     const markProbeFailed = (nodeId: string, requestError: unknown) => {
         onNodesChange((previous) =>
-            previous.map((current) =>
-                current.id === nodeId
-                    ? {
-                          ...current,
-                          health: "unhealthy",
-                          tcpLatencyMs: undefined,
-                          probeError: probeFailureLabel(requestError),
-                      }
-                    : current,
-            ),
+            applyProbeResult(previous, { nodeId, error: requestError }),
         );
     };
 
@@ -58,16 +49,7 @@ export function NodeList({
             const result = await api.probeNode(node.id);
             if (!active.current || revision !== getSessionRevision()) return;
             onNodesChange((previous) =>
-                previous.map((current) =>
-                    current.id === node.id
-                        ? {
-                              ...current,
-                              health: result.health,
-                              tcpLatencyMs: result.tcpLatencyMs,
-                              probeError: undefined,
-                          }
-                        : current,
-                ),
+                applyProbeResult(previous, { ...result, nodeId: node.id }),
             );
         } catch (requestError) {
             if (!active.current || revision !== getSessionRevision()) return;
@@ -120,16 +102,10 @@ export function NodeList({
                         )
                             return;
                         onNodesChange((previous) =>
-                            previous.map((current) =>
-                                current.id === node.id
-                                    ? {
-                                          ...current,
-                                          health: result.health,
-                                          tcpLatencyMs: result.tcpLatencyMs,
-                                          probeError: undefined,
-                                      }
-                                    : current,
-                            ),
+                            applyProbeResult(previous, {
+                                ...result,
+                                nodeId: node.id,
+                            }),
                         );
                     } catch (requestError) {
                         if (
@@ -184,100 +160,98 @@ export function NodeList({
                 </CardAction>
             </CardHeader>
             <CardContent className="min-w-0">
-                <div
-                    aria-label="Nodes by group"
-                    className="grid gap-2.5"
-                    role="tree"
-                >
+                {/* Native lists and disclosure widgets: each group is a named
+                    <details> (role "group") that keyboard and screen-reader
+                    users can toggle without a custom tree implementation. */}
+                <ul aria-label="Nodes by group" className="grid gap-2.5">
                     {groupedNodes.map(([group, members], groupIndex) => (
-                        <details
-                            aria-label={`${group} group`}
-                            className="node-group overflow-hidden rounded-sm border border-border bg-background/40"
-                            key={group}
-                            role="treeitem"
-                        >
-                            <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3 py-2.5 text-sm font-medium transition-colors hover:bg-primary/5 [&::-webkit-details-marker]:hidden">
-                                <ChevronRight
-                                    aria-hidden="true"
-                                    className="node-group__chevron size-4 text-muted-foreground"
-                                />
-                                <span
-                                    aria-hidden="true"
-                                    className="font-sans text-xs font-semibold tabular-nums text-primary/80"
-                                >
-                                    {String(groupIndex + 1).padStart(2, "0")}
-                                </span>
-                                <span className="min-w-0 flex-1 truncate">
-                                    {group}
-                                </span>
-                                <Badge variant="secondary">
-                                    {members.length}
-                                </Badge>
-                            </summary>
-                            <div className="node-group__content" role="group">
-                                <div className="node-group__content-inner divide-y divide-border border-t border-border">
-                                    {members.map((node) => (
-                                        <article
-                                            aria-label={node.name}
-                                            className="grid gap-3 p-3 transition-colors hover:bg-primary/[0.04] sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center"
-                                            key={node.id}
-                                            role="treeitem"
-                                        >
-                                            <div className="min-w-0">
-                                                <p className="truncate text-sm font-medium">
-                                                    {node.name}
-                                                </p>
-                                                <p className="mt-0.5 text-[0.65rem] uppercase tracking-[0.18em] text-muted-foreground">
-                                                    {node.provider}
-                                                </p>
-                                            </div>
-                                            <LatencyReadout node={node} />
-                                            <div className="flex justify-end gap-1">
-                                                <NodeDetailsPopover
-                                                    api={api}
-                                                    getSessionRevision={
-                                                        getSessionRevision
-                                                    }
-                                                    node={node}
-                                                    onAccessLost={onAccessLost}
-                                                />
-                                                <Tooltip>
-                                                    <TooltipTrigger asChild>
-                                                        <Button
-                                                            aria-label={`Check TCP reachability for ${node.name}`}
-                                                            disabled={
-                                                                probingAll ||
-                                                                activeProbe !==
-                                                                    null
-                                                            }
-                                                            onClick={() =>
-                                                                void probe(node)
-                                                            }
-                                                            size="icon"
-                                                            variant="ghost"
-                                                        >
-                                                            <Gauge
-                                                                className={
-                                                                    activeProbe ===
-                                                                    node.id
-                                                                        ? "size-4 animate-pulse"
-                                                                        : "size-4"
+                        <li key={group}>
+                            <details
+                                aria-label={`${group} group`}
+                                className="node-group overflow-hidden rounded-sm border border-border bg-background/40"
+                            >
+                                <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3 py-2.5 text-sm font-medium transition-colors hover:bg-primary/5 [&::-webkit-details-marker]:hidden">
+                                    <ChevronRight
+                                        aria-hidden="true"
+                                        className="node-group__chevron size-4 text-muted-foreground"
+                                    />
+                                    <span
+                                        aria-hidden="true"
+                                        className="font-sans text-xs font-semibold tabular-nums text-primary/80"
+                                    >
+                                        {String(groupIndex + 1).padStart(2, "0")}
+                                    </span>
+                                    <span className="min-w-0 flex-1 truncate">
+                                        {group}
+                                    </span>
+                                    <Badge variant="secondary">
+                                        {members.length}
+                                    </Badge>
+                                </summary>
+                                <div className="node-group__content">
+                                    <ul className="node-group__content-inner divide-y divide-border border-t border-border">
+                                        {members.map((node) => (
+                                            <li
+                                                aria-label={node.name}
+                                                className="grid gap-3 p-3 transition-colors hover:bg-primary/[0.04] sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center"
+                                                key={node.id}
+                                            >
+                                                <div className="min-w-0">
+                                                    <p className="truncate text-sm font-medium">
+                                                        {node.name}
+                                                    </p>
+                                                    <p className="mt-0.5 text-[0.65rem] uppercase tracking-[0.18em] text-muted-foreground">
+                                                        {node.provider}
+                                                    </p>
+                                                </div>
+                                                <LatencyReadout node={node} />
+                                                <div className="flex justify-end gap-1">
+                                                    <NodeDetailsPopover
+                                                        api={api}
+                                                        getSessionRevision={
+                                                            getSessionRevision
+                                                        }
+                                                        node={node}
+                                                        onAccessLost={onAccessLost}
+                                                    />
+                                                    <Tooltip>
+                                                        <TooltipTrigger asChild>
+                                                            <Button
+                                                                aria-label={`Check TCP reachability for ${node.name}`}
+                                                                disabled={
+                                                                    probingAll ||
+                                                                    activeProbe !==
+                                                                        null
                                                                 }
-                                                            />
-                                                        </Button>
-                                                    </TooltipTrigger>
-                                                    <TooltipContent>
-                                                        Check TCP reachability
-                                                    </TooltipContent>
-                                                </Tooltip>
-                                            </div>
-                                        </article>
-                                    ))}
+                                                                onClick={() =>
+                                                                    void probe(node)
+                                                                }
+                                                                size="icon"
+                                                                variant="ghost"
+                                                            >
+                                                                <Gauge
+                                                                    className={
+                                                                        activeProbe ===
+                                                                        node.id
+                                                                            ? "size-4 animate-pulse"
+                                                                            : "size-4"
+                                                                    }
+                                                                />
+                                                            </Button>
+                                                        </TooltipTrigger>
+                                                        <TooltipContent>
+                                                            Check TCP reachability
+                                                        </TooltipContent>
+                                                    </Tooltip>
+                                                </div>
+                                            </li>
+                                        ))}
+                                    </ul>
                                 </div>
-                            </div>
-                        </details>
+                            </details>
+                        </li>
                     ))}
-                </div>
+                </ul>
                 {groupedNodes.length === 0 ? (
                     <p className="px-1 py-8 text-sm text-muted-foreground">
                         No nodes available.
