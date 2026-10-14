@@ -335,3 +335,47 @@ func TestStateBusyIsNotCorruption(t *testing.T) {
 		t.Fatalf("busy state classification = %v", err)
 	}
 }
+
+func TestClosedStoreDoesNotReopen(t *testing.T) {
+	store, now := newClockedStore(t)
+	if err := store.Close(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(t.Context()); !errors.Is(err, domain.ErrStoreClosed) {
+		t.Fatalf("Load after Close = %v", err)
+	}
+	if err := store.Ping(t.Context()); !errors.Is(err, domain.ErrStoreClosed) {
+		t.Fatalf("Ping after Close = %v", err)
+	}
+	if _, err := store.LoadOrCreate(t.Context()); !errors.Is(err, domain.ErrStoreClosed) {
+		t.Fatalf("LoadOrCreate after Close = %v", err)
+	}
+	if _, err := store.Update(t.Context(), func(*domain.PersistentState) error { return nil }); !errors.Is(err, domain.ErrStoreClosed) {
+		t.Fatalf("Update after Close = %v", err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
+	if err := store.SaveBrowserSession(t.Context(), token, now.Add(time.Hour), 4096); !errors.Is(err, domain.ErrStoreClosed) {
+		t.Fatalf("SaveBrowserSession after Close = %v", err)
+	}
+	if store.db != nil {
+		t.Fatal("closed store reopened its database")
+	}
+}
+
+func TestPingChecksTheOpenDatabase(t *testing.T) {
+	store, _ := newClockedStore(t)
+	if err := store.Ping(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := store.Ping(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Ping = %v", err)
+	}
+	if err := os.Chmod(store.Path(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Ping(t.Context()); !errors.Is(err, domain.ErrInsecureStatePath) {
+		t.Fatalf("Ping of an insecure state file = %v", err)
+	}
+}

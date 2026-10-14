@@ -26,6 +26,7 @@ var (
 	ErrInvalidNextAccessToken        = errors.New("invalid next access token")
 	ErrStateNotFound                 = errors.New("persistent state not found")
 	ErrCorruptState                  = errors.New("persistent state is corrupt")
+	ErrStoreClosed                   = errors.New("persistent state store is closed")
 	ErrStateBusy                     = errors.New("state database is busy")
 	ErrStateFull                     = errors.New("state database is full")
 	ErrInsecureStatePath             = errors.New("state path has insecure ownership or mode")

@@ -38,6 +38,7 @@ type SQLiteStore struct {
 
 	mu              sync.Mutex
 	db              *sql.DB
+	closed          bool
 	initializeState func(context.Context, *sql.DB, domain.PersistentState) error
 	now             func() time.Time
 }
@@ -84,6 +85,7 @@ func (s *SQLiteStore) Close(_ context.Context) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.closed = true
 	if s.db == nil {
 		return nil
 	}
@@ -96,6 +98,10 @@ func (s *SQLiteStore) Close(_ context.Context) error {
 }
 
 func (s *SQLiteStore) ensureOpenLocked(ctx context.Context, create bool, initial *domain.PersistentState) (bool, error) {
+	if s.closed {
+		// A straggling goroutine after shutdown must not silently reopen state.
+		return false, domain.ErrStoreClosed
+	}
 	if err := s.validate(); err != nil {
 		return false, err
 	}
@@ -293,6 +299,27 @@ func configureSQLiteDurability(ctx context.Context, db *sql.DB) error {
 	}
 	if secureDelete != 1 {
 		return fmt.Errorf("secure_delete is not enabled")
+	}
+	return nil
+}
+
+// Ping verifies that the open database answers a trivial query. It is cheap
+// enough for a liveness watchdog; Load remains the full consistency check.
+func (s *SQLiteStore) Ping(ctx context.Context) error {
+	if s == nil {
+		return domain.ErrInsecureStatePath
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.ensureOpenLocked(ctx, false, nil); err != nil {
+		return err
+	}
+	var one int
+	if err := s.db.QueryRowContext(ctx, "SELECT 1").Scan(&one); err != nil {
+		return corruptDatabase(err)
+	}
+	if one != 1 {
+		return corruptDatabase(errors.New("state database did not answer"))
 	}
 	return nil
 }
