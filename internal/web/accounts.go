@@ -3,9 +3,9 @@ package web
 import (
 	"errors"
 	"net/http"
-	"net/mail"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 func (a *API) login(w http.ResponseWriter, r *http.Request, token string) {
@@ -14,15 +14,16 @@ func (a *API) login(w http.ResponseWriter, r *http.Request, token string) {
 		return
 	}
 	var body struct {
-		Provider string `json:"provider"`
-		Account  string `json:"account"`
-		Password string `json:"password"`
+		Provider string            `json:"provider"`
+		Fields   map[string]string `json:"fields"`
 	}
 	if err := readJSONBody(w, r, a.config.JSONBodyLimit, &body); err != nil {
 		a.writeBodyError(w, err)
 		return
 	}
-	if !validProviderID(body.Provider) || !validEmail(body.Account) || body.Password == "" {
+	// Only the shape is checked here; which fields are required belongs to the
+	// provider's AuthSpec and is enforced by the runtime.
+	if !validProviderID(body.Provider) || !validCredentialFields(body.Fields) {
 		a.writeProblem(w, http.StatusBadRequest, "invalid_login", "Invalid login")
 		return
 	}
@@ -48,7 +49,8 @@ func (a *API) login(w http.ResponseWriter, r *http.Request, token string) {
 	if !a.extendProviderWriteDeadline(w) {
 		return
 	}
-	account, err := a.backend.Login(ctx, LoginInput{Provider: body.Provider, Account: body.Account, Password: body.Password})
+	account, err := a.backend.Login(ctx, LoginInput{Provider: body.Provider, Fields: body.Fields})
+	clear(body.Fields)
 	if err != nil {
 		countedFailure = loginFailureCounts(err)
 		a.writeBackendError(w, err, "login_failed", http.StatusUnauthorized)
@@ -135,7 +137,18 @@ func validProviderID(value string) bool {
 	return true
 }
 
-func validEmail(value string) bool {
-	parsed, err := mail.ParseAddress(value)
-	return err == nil && parsed.Address == value && strings.Contains(value, "@") && !strings.ContainsAny(value, "\r\n")
+const maxCredentialFields = 16
+
+// validCredentialFields bounds the submitted field map: identifier keys and
+// bounded UTF-8 values without NUL. Empty maps are valid for public providers.
+func validCredentialFields(fields map[string]string) bool {
+	if len(fields) > maxCredentialFields {
+		return false
+	}
+	for key, value := range fields {
+		if !validProviderID(key) || len(value) > 4096 || !utf8.ValidString(value) || strings.IndexByte(value, 0) >= 0 {
+			return false
+		}
+	}
+	return true
 }

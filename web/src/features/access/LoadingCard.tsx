@@ -3,8 +3,8 @@ import { AuthCardShell } from "@/components/AuthCardShell";
 import { CardDescription, CardHeader } from "@/components/ui/card";
 
 export function LoadingCard({
-    title = "Opening chinadapter",
-    description = "Checking console access.",
+    title = "Checking access",
+    description,
 }: {
     title?: string;
     description?: string;
@@ -16,7 +16,7 @@ export function LoadingCard({
                     <LoaderCircle className="size-5 animate-spin text-primary" />
                     {title}
                 </h1>
-                <CardDescription>{description}</CardDescription>
+                {description && <CardDescription>{description}</CardDescription>}
             </CardHeader>
         </AuthCardShell>
     );

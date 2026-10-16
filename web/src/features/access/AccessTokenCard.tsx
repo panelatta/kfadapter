@@ -65,11 +65,11 @@ export function AccessTokenCard({
                 <h1 className="font-sans text-xl font-semibold uppercase tracking-[0.05em]">
                     {isSetup ? "Create console access" : "Unlock console"}
                 </h1>
-                <CardDescription>
-                    {isSetup
-                        ? "Set an access token for this console."
-                        : "Enter your access token to continue."}
-                </CardDescription>
+                {isSetup ? (
+                    <CardDescription>
+                        Choose an access token of 16–128 characters.
+                    </CardDescription>
+                ) : null}
             </CardHeader>
             <CardContent>
                 {isSetup && !setupAllowed ? (

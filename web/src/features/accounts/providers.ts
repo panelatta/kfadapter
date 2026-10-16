@@ -8,6 +8,8 @@ export const providerLoginStates: Partial<Record<ServiceState, true>> = {
 const providerLabels: Record<string, string> = {
     kuaifan: "KuaiFan",
     quickfox: "QuickFox",
+    transocks: "Transocks",
+    baidu: "Baidu Proxy",
 };
 
 export function providerLabel(provider: string): string {

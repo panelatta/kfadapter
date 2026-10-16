@@ -2,12 +2,21 @@ import { useState } from "react";
 import type { StatusResponse } from "@/types";
 import { describeError, isSessionProblem } from "@/lib/errors";
 
-export function useAccountViews(status: StatusResponse, resetSubscriptionFilters: () => void) {
+export interface AccountViews {
+    activeProvider: string;
+    confirmRemoval: string;
+    providerBusy: boolean;
+    providerError: string;
+    runProviderAction: (action: () => Promise<void>) => Promise<void>;
+    selectProvider: (provider: string) => void;
+    setConfirmRemoval: (provider: string) => void;
+}
+
+export function useAccountViews(status: StatusResponse, resetSubscriptionFilters: () => void): AccountViews {
     const [selectedProvider, setActiveProvider] = useState("all");
     const [providerError, setProviderError] = useState("");
     const [providerBusy, setProviderBusy] = useState(false);
     const [confirmRemoval, setConfirmRemoval] = useState("");
-    const [confirmSignOutAll, setConfirmSignOutAll] = useState(false);
     // A provider that disappears from the status falls back to the overview.
     const activeProvider =
         selectedProvider === "all" ||
@@ -19,7 +28,6 @@ export function useAccountViews(status: StatusResponse, resetSubscriptionFilters
         setActiveProvider(provider);
         setProviderError("");
         setConfirmRemoval("");
-        setConfirmSignOutAll(false);
         if (provider !== "all") resetSubscriptionFilters();
     };
 
@@ -40,12 +48,10 @@ export function useAccountViews(status: StatusResponse, resetSubscriptionFilters
     return {
         activeProvider,
         confirmRemoval,
-        confirmSignOutAll,
         providerBusy,
         providerError,
         runProviderAction,
         selectProvider,
         setConfirmRemoval,
-        setConfirmSignOutAll,
     };
 }

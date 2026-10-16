@@ -29,7 +29,9 @@ const problemMessages: Record<string, string> = {
         "Use a different access token of 16–128 bytes.",
     access_initialized:
         "Console access has already been created. Unlock it with your access token.",
-    login_rejected: "The provider rejected that email or password.",
+    login_rejected: "The provider rejected those credentials.",
+    device_limit:
+        "The provider account is signed in on too many devices. Sign out of one in the provider's app, then try again.",
     login_unavailable: "The provider could not be reached. Try again later.",
     account_exists:
         "That provider already has a connected account. Remove it first to switch accounts.",

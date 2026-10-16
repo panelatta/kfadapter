@@ -15,7 +15,13 @@ export const readyStatus = (): StatusResponse => ({
   state: "ready",
   version: "0.1.0",
   deployment: { mode: "container" },
-	providers: ["kuaifan", "quickfox"],
+  providers: ["kuaifan", "quickfox", "transocks", "baidu"],
+  providerAuth: {
+    kuaifan: { fields: [{ key: "account", label: "Email", secret: false }, { key: "password", label: "Password", secret: true }] },
+    quickfox: { fields: [{ key: "account", label: "Email", secret: false }, { key: "password", label: "Password", secret: true }] },
+    transocks: { fields: [{ key: "account", label: "Email or phone", secret: false }, { key: "password", label: "Password", secret: true }] },
+    baidu: { fields: [] },
+  },
 	accounts: { kuaifan: { provider: "kuaifan", display: "u•••@example.com", tier: "VIP", subscriptionActive: true, subscriptionEndsAt: "2026-08-15T10:00:00Z" } },
 	controlPlane: { lastRefreshAt: "2026-07-15T10:00:00Z" },
 	dataPlane: { socksAddress: "127.0.0.1:10808", udpMode: "provider_transport" },
@@ -32,8 +38,8 @@ export const signedOutStatus = (): StatusResponse => ({
 });
 
 export const nodes: NodeRecord[] = [
-  { id: "n-east", name: "Shanghai 01", group: "East China", provider: "kuaifan", health: "healthy", tcpLatencyMs: 76, udpHealth: "unavailable", eligible: true },
-  { id: "n-west", name: "Chengdu 02", group: "West China", provider: "kuaifan", health: "degraded", tcpLatencyMs: 114, udpHealth: "unavailable", eligible: true },
+  { id: "n-east", name: "Shanghai 01", group: "East China", provider: "kuaifan", protocol: "kuaifan-wifiin", health: "healthy", tcpLatencyMs: 76, udpHealth: "unavailable", eligible: true },
+  { id: "n-west", name: "Chengdu 02", group: "West China", provider: "kuaifan", protocol: "kuaifan-speedin", health: "degraded", tcpLatencyMs: 114, udpHealth: "unavailable", eligible: true },
 ];
 
 export const chengduDetails: NodeDetails = {

@@ -24,6 +24,7 @@ const (
 // ProviderController is the provider-neutral account lifecycle contract.
 type ProviderController interface {
 	IDs() []provider.ID
+	Auth(provider.ID) (provider.AuthSpec, error)
 	Login(context.Context, provider.ID, provider.Credentials) (provider.Account, error)
 	Refresh(context.Context, provider.ID) error
 	Logout(context.Context, provider.ID) error
@@ -47,12 +48,15 @@ type RuntimeConfig struct {
 	Credentials   *CredentialCoordinator
 	MutationMu    *sync.Mutex
 
-	SocksAddress    string
-	HTTPAddress     string
-	Version         string
-	StartedAt       time.Time
-	Now             func() time.Time
-	DialContext     func(context.Context, string, string) (net.Conn, error)
+	SocksAddress string
+	HTTPAddress  string
+	Version      string
+	StartedAt    time.Time
+	Now          func() time.Time
+	DialContext  func(context.Context, string, string) (net.Conn, error)
+	// Transports resolves a node protocol's transport so probes can honor
+	// provider.ProbeAddresser. Nil probes every node at its route address.
+	Transports      *provider.Registry
 	ProbeTimeout    time.Duration
 	RefreshEvery    time.Duration
 	AccountRefresh  func(provider.ID, error)
@@ -77,6 +81,7 @@ type Runtime struct {
 	startedAt    time.Time
 	now          func() time.Time
 	dial         func(context.Context, string, string) (net.Conn, error)
+	transports   *provider.Registry
 	probeTimeout time.Duration
 	probeSlots   chan struct{}
 	// probes retains only the latest in-flight probe per node, under mutations.
@@ -129,7 +134,7 @@ func NewRuntime(config RuntimeConfig) (*Runtime, error) {
 		subscriptions: config.Subscriptions, credentials: config.Credentials,
 		socksAddress: config.SocksAddress, httpAddress: config.HTTPAddress,
 		version:   config.Version,
-		startedAt: config.StartedAt.UTC(), now: config.Now, dial: config.DialContext,
+		startedAt: config.StartedAt.UTC(), now: config.Now, dial: config.DialContext, transports: config.Transports,
 		probeTimeout: config.ProbeTimeout, probeSlots: make(chan struct{}, config.ProbeConcurrent), mutations: mutationMu,
 		refreshEvery: config.RefreshEvery,
 		events:       newEventHub(config.EventClients, config.EventBuffer),

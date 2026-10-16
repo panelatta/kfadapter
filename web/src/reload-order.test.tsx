@@ -116,12 +116,12 @@ describe("authenticated reload ordering", () => {
     await screen.findByText(currentConsumerURL);
     const pending = await startSlowReload(api);
     api.statusValue = signedOutStatus();
-    await userEvent.click(screen.getByRole("button", { name: "Sign out all" }));
-    await userEvent.click(screen.getByRole("button", { name: "Confirm sign out" }));
-    await screen.findByRole("heading", { name: "Connect account" });
+    await userEvent.click(screen.getByRole("button", { name: "Remove all" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Remove \d+ providers?$/ }));
+    await screen.findByRole("heading", { name: "Add a provider" });
     await act(async () => pending.resolve(readyStatus()));
 
-    expect(screen.getByRole("heading", { name: "Connect account" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Add a provider" })).toBeTruthy();
     expect(screen.queryByText(currentConsumerURL)).toBeNull();
     expect(api.nodes).toHaveBeenCalledTimes(1);
   });
@@ -129,18 +129,18 @@ describe("authenticated reload ordering", () => {
   it("keeps a completed provider login when an older signed-out load arrives", async () => {
     const api = makeApi(signedOutStatus());
     render(<App api={api} />);
-    await screen.findByRole("heading", { name: "Connect account" });
+    await screen.findByRole("heading", { name: "Add a provider" });
     const pending = await startSlowReload(api);
     await userEvent.selectOptions(screen.getByLabelText("Provider"), "kuaifan");
     await userEvent.type(screen.getByLabelText("Email"), "operator@example.com");
     await userEvent.type(screen.getByLabelText("Password"), "secret");
-    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add provider" }));
     await screen.findByText(currentConsumerURL);
     await act(async () => pending.resolve(signedOutStatus()));
 
     expect(screen.getByRole("heading", { name: "Service status" })).toBeTruthy();
     expect(screen.getByText(currentConsumerURL)).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Connect account" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Add a provider" })).toBeNull();
   });
 
   it("does not reload a replaced session after an older provider login finishes", async () => {
@@ -152,7 +152,7 @@ describe("authenticated reload ordering", () => {
     await userEvent.click(screen.getByRole("button", { name: "QuickFox" }));
     await userEvent.type(screen.getByLabelText("Email"), "operator@example.com");
     await userEvent.type(screen.getByLabelText("Password"), "secret");
-    await userEvent.click(screen.getByRole("button", { name: "Connect QuickFox" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add QuickFox" }));
     await waitFor(() => expect(api.login).toHaveBeenCalledOnce());
     await userEvent.click(screen.getByRole("button", { name: "Lock console" }));
     await screen.findByRole("heading", { name: "Unlock console" });

@@ -24,11 +24,10 @@ export function useProviderActions({
 }) {
     const loginAccount = async (
         provider: string,
-        account: string,
-        password: string,
+        fields: Record<string, string>,
     ): Promise<void> => {
         const revision = getSessionRevision();
-        await api.login(provider, account, password);
+        await api.login(provider, fields);
         // The console may have been locked while the provider was answering.
         if (revision !== getSessionRevision()) return;
         await loadAuthenticatedData();

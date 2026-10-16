@@ -20,8 +20,10 @@ import (
 	"github.com/oshinop/chinadapter/internal/credentials"
 	"github.com/oshinop/chinadapter/internal/lifecycle"
 	"github.com/oshinop/chinadapter/internal/provider"
+	"github.com/oshinop/chinadapter/internal/provider/baidu"
 	"github.com/oshinop/chinadapter/internal/provider/kuaifan"
 	"github.com/oshinop/chinadapter/internal/provider/quickfox"
+	"github.com/oshinop/chinadapter/internal/provider/transocks"
 	"github.com/oshinop/chinadapter/internal/smart"
 	"github.com/oshinop/chinadapter/internal/socks"
 	"github.com/oshinop/chinadapter/internal/state"
@@ -100,9 +102,21 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 	if err != nil {
 		return nil, err
 	}
+	transocksClient, err := transocks.NewClient(transocks.Config{RequestTimeout: cfg.Provider.RequestTimeout.Value()})
+	if err != nil {
+		return nil, err
+	}
+	transocksDriver, err := transocks.NewDriver(transocks.DriverConfig{Client: transocksClient})
+	if err != nil {
+		return nil, err
+	}
+	transocksSS, transocksTrojan := transocks.NewTransports(transocksClient)
 	providers, err := provider.NewRegistry(
-		[]provider.Driver{kuaifanDriver, quickfoxDriver},
-		[]provider.Transport{kuaifan.NewTransport(), quickfox.NewTransport()},
+		[]provider.Driver{kuaifanDriver, quickfoxDriver, transocksDriver, baidu.NewDriver(baidu.DriverConfig{})},
+		[]provider.Transport{
+			kuaifan.NewTransport(), kuaifan.NewSPEEDINTransport(), quickfox.NewTransport(),
+			transocksSS, transocksTrojan, baidu.NewTransport(),
+		},
 	)
 	if err != nil {
 		return nil, err
@@ -160,11 +174,11 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 		Manager: manager, Store: store, Providers: providerCoordinator, Subscriptions: subscriptionService,
 		Credentials: credentialCoordinator, MutationMu: mutationMu, SocksAddress: proxyAddress, HTTPAddress: managementAddress,
 		Version: version, StartedAt: startedAt,
-		RefreshEvery: cfg.Provider.RefreshInterval.Value(), ProbeTimeout: cfg.Proxy.DialTimeout.Value(),
+		RefreshEvery: cfg.Provider.RefreshInterval.Value(), ProbeTimeout: cfg.Proxy.DialTimeout.Value(), Transports: providers,
 		AccountRefresh: func(id provider.ID, err error) {
 			if err != nil {
 				// Provider text may contain secrets; emit only its classification.
-				slog.Warn("provider refresh failed", "provider", id, "class", refreshErrorClass(err))
+				slog.Warn("provider refresh failed", "provider", id, "class", accounts.ErrorClass(err))
 				return
 			}
 			slog.Info("provider refreshed", "provider", id)
@@ -325,19 +339,4 @@ func (d *Daemon) watchdog(ctx context.Context) error {
 		return errors.New("runtime is stopped")
 	}
 	return d.store.Ping(ctx)
-}
-
-// refreshErrorClass names a refresh failure category without rendering the
-// underlying provider error, which may echo control-plane text.
-func refreshErrorClass(err error) string {
-	switch {
-	case errors.Is(err, provider.ErrSessionRejected):
-		return "session_rejected"
-	case errors.Is(err, provider.ErrLoginRejected):
-		return "login_rejected"
-	case errors.Is(err, provider.ErrNoSession):
-		return "no_session"
-	default:
-		return "unclassified"
-	}
 }

@@ -9,12 +9,23 @@ export type ServiceState =
 
 export type NodeHealth = "healthy" | "degraded" | "unhealthy" | "unknown";
 
+export type RefreshStatus = "ok" | "refresh_failing" | "needs_relogin";
+
 export interface AccountSummary {
   provider: string;
   display?: string;
   tier: string;
   subscriptionActive: boolean;
   subscriptionEndsAt?: string;
+  refreshStatus?: RefreshStatus;
+  /** Redacted class of the latest failed refresh, e.g. "network". */
+  refreshProblem?: string;
+  lastRefreshAt?: string;
+  nextRefreshAt?: string;
+}
+
+export interface ProviderAuthSpec {
+  fields: { key: string; label: string; secret: boolean }[];
 }
 
 export interface StatusResponse {
@@ -25,6 +36,8 @@ export interface StatusResponse {
     startedAt?: string;
   };
   providers: string[];
+  /** Credential fields declared by each provider; an empty list denotes a public service. */
+  providerAuth: Record<string, ProviderAuthSpec>;
   accounts?: Record<string, AccountSummary>;
   controlPlane: {
     lastRefreshAt?: string;
@@ -50,6 +63,7 @@ export interface NodeRecord {
   name: string;
   group: string;
   provider: string;
+  protocol: string;
   health: NodeHealth;
   tcpLatencyMs?: number;
   probeError?: string;

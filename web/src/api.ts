@@ -126,6 +126,7 @@ export class ApiClient {
         name: node.name,
         group: node.group,
         provider: node.provider,
+        protocol: node.protocol,
         health: node.health,
         tcpLatencyMs: node.tcpLatencyMs,
         udpHealth: node.udpHealth,
@@ -138,10 +139,10 @@ export class ApiClient {
     return this.request<NodeDetails>(`/nodes/${encodeURIComponent(id)}/details`);
   }
 
-  async login(provider: string, account: string, password: string): Promise<LoginResponse> {
+  async login(provider: string, fields: Record<string, string>): Promise<LoginResponse> {
     return this.request<LoginResponse>("/auth/login", {
       method: "POST",
-      body: { provider, account, password },
+      body: { provider, fields },
     });
   }
 

@@ -37,8 +37,12 @@ func (e *problemError) Error() string {
 		return "access unavailable"
 	case "login_rejected":
 		return "login rejected"
+	case "invalid_login":
+		return "invalid provider credentials"
 	case "account_exists":
 		return "provider account already exists"
+	case "device_limit":
+		return "provider device limit reached"
 	case "operation_in_progress":
 		return "login operation in progress"
 	case "login_unavailable":
@@ -85,8 +89,12 @@ func classifyLoginError(cause error) error {
 	switch {
 	case errors.Is(cause, provider.ErrLoginRejected):
 		return &problemError{cause: cause, code: "login_rejected", status: http.StatusUnauthorized}
+	case errors.Is(cause, provider.ErrInvalidInput):
+		return &problemError{cause: cause, code: "invalid_login", status: http.StatusBadRequest}
 	case errors.Is(cause, provider.ErrAccountExists):
 		return &problemError{cause: cause, code: "account_exists", status: http.StatusConflict}
+	case errors.Is(cause, provider.ErrDeviceLimit):
+		return &problemError{cause: cause, code: "device_limit", status: http.StatusConflict}
 	case errors.Is(cause, state.ErrOperationInProgress):
 		return &problemError{cause: cause, code: "operation_in_progress", status: http.StatusConflict}
 	default:

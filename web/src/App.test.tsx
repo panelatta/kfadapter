@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { ApiError } from "./api";
 import { currentConsumerURL, makeApi, nodes, readyStatus, signedOutStatus } from "./test/fixtures";
+import { StatusBadge, stateDetails } from "./features/accounts/StatusBadge";
 
 const accessToken = "console-token-12345";
 
@@ -11,7 +12,7 @@ async function openAccountLogin() {
   window.history.replaceState(null, "", "/");
   const api = makeApi(signedOutStatus());
   render(<App api={api} />);
-  await screen.findByRole("heading", { name: "Connect account" });
+  await screen.findByRole("heading", { name: "Add a provider" });
   await waitFor(() => expect(window.location.pathname).toBe("/signin"));
   return api;
 }
@@ -58,7 +59,7 @@ describe("access token and browser session", () => {
     expect(api.setupAccess).toHaveBeenCalledWith(accessToken);
     expect(token.value).toBe("");
     expect(confirmation.value).toBe("");
-    expect(await screen.findByRole("heading", { name: "Connect account" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Add a provider" })).toBeTruthy();
     expect(JSON.stringify(historyWrites.mock.calls)).not.toContain(accessToken);
   });
 
@@ -100,47 +101,136 @@ describe("access token and browser session", () => {
     expect(token.value).toBe("");
   });
 
-  it("signs into the existing account at the provider route and clears the account password", async () => {
+  it("adds a provider at the existing signin route and clears its secret", async () => {
     const api = await openAccountLogin();
     const historyWrites = vi.spyOn(window.history, "replaceState");
-    const password = screen.getByLabelText("Password") as HTMLInputElement;
     await userEvent.selectOptions(screen.getByLabelText("Provider"), "kuaifan");
-    await userEvent.type(screen.getByLabelText("Email"), "operator@example.com");
+    const password = screen.getByLabelText("Password") as HTMLInputElement;
+    await userEvent.type(screen.getByLabelText("Email"), "  operator@example.com  ");
     await userEvent.type(password, "do-not-retain");
-    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add provider" }));
 
     await screen.findByRole("heading", { name: "Service status" });
     expect(window.location.pathname).toBe("/");
     expect(password.value).toBe("");
-		expect(api.login).toHaveBeenCalledWith("kuaifan", "operator@example.com", "do-not-retain");
+    expect(api.login).toHaveBeenCalledWith("kuaifan", { account: "operator@example.com", password: "do-not-retain" });
     expect(JSON.stringify(historyWrites.mock.calls)).not.toContain("do-not-retain");
   });
 
-  it("shows an invalid account error and clears its password", async () => {
+  it("shows a rejected credentials error and clears its secret", async () => {
     const api = await openAccountLogin();
     Object.assign(api, { login: vi.fn().mockRejectedValue(new ApiError({ title: "Unauthorized", status: 401, code: "login_rejected" })) });
     await userEvent.selectOptions(screen.getByLabelText("Provider"), "kuaifan");
     const password = screen.getByLabelText("Password") as HTMLInputElement;
     await userEvent.type(screen.getByLabelText("Email"), "operator@example.com");
     await userEvent.type(password, "wrong-password");
-    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add provider" }));
 
-    expect(await screen.findByText("The provider rejected that email or password.")).toBeTruthy();
+    expect(await screen.findByText("The provider rejected those credentials.")).toBeTruthy();
     expect(password.value).toBe("");
   });
 
-  it("uses only the button spinner while account sign-in is pending", async () => {
+  it("uses only the button spinner while adding a provider is pending", async () => {
     const api = await openAccountLogin();
     const pending = Promise.withResolvers<void>();
     await userEvent.selectOptions(screen.getByLabelText("Provider"), "kuaifan");
     Object.assign(api, { login: vi.fn().mockReturnValue(pending.promise) });
     await userEvent.type(screen.getByLabelText("Email"), "operator@example.com");
     await userEvent.type(screen.getByLabelText("Password"), "password");
-    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add provider" }));
 
-    expect((screen.getByRole("button", { name: "Signing in" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.queryByText("Signing in to your account…")).toBeNull();
+    expect((screen.getByRole("button", { name: "Adding" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByLabelText("Password") as HTMLInputElement).value).toBe("");
+    expect(screen.queryByText("Adding a provider…")).toBeNull();
   });
+
+  it("adds a public provider without rendering any credential inputs", async () => {
+    const api = await openAccountLogin();
+    await userEvent.selectOptions(screen.getByLabelText("Provider"), "baidu");
+
+    expect(document.querySelectorAll("input")).toHaveLength(0);
+    await userEvent.click(screen.getByRole("button", { name: "Add provider" }));
+
+    await waitFor(() => expect(api.login).toHaveBeenCalledWith("baidu", {}));
+    expect(await screen.findByRole("heading", { name: "Service status" })).toBeTruthy();
+  });
+
+  it("swaps declared fields and resets their values when the selected provider changes", async () => {
+    await openAccountLogin();
+    const provider = screen.getByLabelText("Provider");
+    expect(document.querySelectorAll("input")).toHaveLength(0);
+    await userEvent.selectOptions(provider, "kuaifan");
+    expect((screen.getByLabelText("Email") as HTMLInputElement).type).toBe("text");
+    expect((screen.getByLabelText("Password") as HTMLInputElement).type).toBe("password");
+    await userEvent.type(screen.getByLabelText("Email"), "operator@example.com");
+    await userEvent.type(screen.getByLabelText("Password"), "do-not-carry-over");
+
+    await userEvent.selectOptions(provider, "transocks");
+    expect(screen.queryByLabelText("Email", { exact: true })).toBeNull();
+    expect((screen.getByLabelText("Email or phone") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Password") as HTMLInputElement).value).toBe("");
+    expect(screen.getByLabelText("Email or phone").id).toBe("initial-account");
+
+    await userEvent.selectOptions(provider, "baidu");
+    expect(document.querySelectorAll("input")).toHaveLength(0);
+    await userEvent.selectOptions(provider, "quickfox");
+    expect((screen.getByLabelText("Email") as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Password") as HTMLInputElement).value).toBe("");
+  });
+
+  it.each(["account", "password"])("requires the declared %s field without calling login", async (missingField) => {
+    const api = await openAccountLogin();
+    await userEvent.selectOptions(screen.getByLabelText("Provider"), "kuaifan");
+    await userEvent.type(screen.getByLabelText(missingField === "account" ? "Password" : "Email"), "present-value");
+    await userEvent.click(screen.getByRole("button", { name: "Add provider" }));
+
+    expect(await screen.findByText("Fill in every field.")).toBeTruthy();
+    expect(api.login).not.toHaveBeenCalled();
+    expect((screen.getByLabelText("Password") as HTMLInputElement).value).toBe("");
+  });
+
+  it("renders and submits provider-declared keys rather than assuming account and password", async () => {
+    const status = signedOutStatus();
+    status.providerAuth.quickfox = {
+      fields: [
+        { key: "token", label: "API token", secret: true },
+        { key: "region", label: "Region", secret: false },
+      ],
+    };
+    const api = makeApi(status);
+    const pending = Promise.withResolvers<void>();
+    Object.assign(api, { login: vi.fn().mockReturnValue(pending.promise) });
+    render(<App api={api} />);
+    await screen.findByRole("heading", { name: "Add a provider" });
+    await userEvent.selectOptions(screen.getByLabelText("Provider"), "quickfox");
+    const token = screen.getByLabelText("API token") as HTMLInputElement;
+    const region = screen.getByLabelText("Region") as HTMLInputElement;
+    expect(token.type).toBe("password");
+    expect(token.id).toBe("initial-token");
+    expect(region.type).toBe("text");
+    expect(region.id).toBe("initial-region");
+    expect(screen.queryByLabelText("Email")).toBeNull();
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    await userEvent.type(token, "  keep-secret-spaces  ");
+    await userEvent.type(region, "  cn  ");
+    await userEvent.click(screen.getByRole("button", { name: "Add provider" }));
+
+    expect(api.login).toHaveBeenCalledWith("quickfox", { token: "  keep-secret-spaces  ", region: "cn" });
+    expect(token.value).toBe("");
+    api.statusValue = readyStatus();
+    pending.resolve();
+    expect(await screen.findByRole("heading", { name: "Service status" })).toBeTruthy();
+  });
+
+  it.each([
+    ["signed_out", "No providers", "Add a provider to load nodes."],
+    ["expired", "Expired", "Add the provider again."],
+  ] as const)("uses provider-oriented status wording for %s", (state, label, message) => {
+    render(<StatusBadge detail={stateDetails[state]} />);
+    expect(screen.getByText(label)).toBeTruthy();
+    expect(stateDetails[state].message).toBe(message);
+  });
+
 
 
   it("locks the console separately and returns to the canonical route after unlock", async () => {
@@ -178,7 +268,7 @@ describe("access token and browser session", () => {
     expect(providersCard).not.toBeNull();
     const refreshButton = within(providersCard as HTMLElement).getByRole("button", { name: "Refresh all" });
     expect(refreshButton.querySelector(".lucide-refresh-cw")).toBeTruthy();
-    expect(within(providersCard as HTMLElement).getByRole("button", { name: "Sign out all" })).toBeTruthy();
+    expect(within(providersCard as HTMLElement).getByRole("button", { name: "Remove all" })).toBeTruthy();
 
     await userEvent.click(refreshButton);
 
@@ -223,27 +313,39 @@ describe("access token and browser session", () => {
     expect(screen.getByRole("listitem", { name: "澳大利亚 ➩ 中国 · 7" })).toBeTruthy();
   });
 
-  it("requires an explicit provider before account sign-in", async () => {
+  it("requires an explicit provider before adding one", async () => {
     const api = await openAccountLogin();
-    await userEvent.type(screen.getByLabelText("Email"), "operator@example.com");
-    await userEvent.type(screen.getByLabelText("Password"), "secret");
-    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("Choose a provider before entering account credentials.");
+    await userEvent.click(screen.getByRole("button", { name: "Add provider" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Choose a provider to add.");
     expect(api.login).not.toHaveBeenCalled();
   });
 
-  it("switches provider screens and adds a disconnected provider account", async () => {
+  it("switches provider screens and adds a disconnected provider", async () => {
     const api = makeApi(readyStatus());
     render(<App api={api} />);
     await screen.findByRole("heading", { name: "Service status" });
     await userEvent.click(screen.getByRole("button", { name: "QuickFox" }));
-    expect(screen.getByText("Connect QuickFox", { selector: "[data-slot='card-title']" })).toBeTruthy();
+    expect(screen.getByText("Add QuickFox", { selector: "[data-slot='card-title']" })).toBeTruthy();
     expect(screen.queryByRole("list", { name: "Nodes by group" })).toBeNull();
     await userEvent.type(screen.getByLabelText("Email"), "quickfox@example.com");
     await userEvent.type(screen.getByLabelText("Password"), "quickfox-secret");
-    await userEvent.click(screen.getByRole("button", { name: "Connect QuickFox" }));
-    await waitFor(() => expect(api.login).toHaveBeenCalledWith("quickfox", "quickfox@example.com", "quickfox-secret"));
+    await userEvent.click(screen.getByRole("button", { name: "Add QuickFox" }));
+    await waitFor(() => expect(api.login).toHaveBeenCalledWith("quickfox", { account: "quickfox@example.com", password: "quickfox-secret" }));
   });
+
+  it("adds a public provider from its provider panel without credentials", async () => {
+    const api = makeApi(readyStatus());
+    render(<App api={api} />);
+    await screen.findByRole("heading", { name: "Service status" });
+    await userEvent.click(screen.getByRole("button", { name: "Baidu Proxy" }));
+
+    const addCard = screen.getByText("Add Baidu Proxy", { selector: "[data-slot='card-title']" }).closest("[data-slot='card']");
+    // Scoped to the provider card: the smart proxy card has its own inputs.
+    expect(addCard!.querySelectorAll("input")).toHaveLength(0);
+    await userEvent.click(screen.getByRole("button", { name: "Add Baidu Proxy" }));
+    await waitFor(() => expect(api.login).toHaveBeenCalledWith("baidu", {}));
+  });
+
 
   it("scopes Providers footer actions to the Status tab", async () => {
     render(<App api={makeApi(readyStatus())} />);
@@ -254,25 +356,22 @@ describe("access token and browser session", () => {
     expect(within(views).queryByRole("button", { name: "All providers" })).toBeNull();
     expect(screen.getByText("Providers", { exact: true })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Refresh all" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Sign out all" })).toBeTruthy();
-    expect(screen.getByText("Service", { exact: true })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove all" })).toBeTruthy();
     expect(screen.getByText("Subscription link", { exact: true })).toBeTruthy();
     expect(screen.queryByRole("list", { name: "Nodes by group" })).toBeNull();
 
     await userEvent.click(within(views).getByRole("button", { name: "KuaiFan" }));
-    expect(screen.getByText("KuaiFan account", { selector: "[data-slot='card-title']" })).toBeTruthy();
+    expect(screen.getByText("KuaiFan", { selector: "[data-slot='card-title']" })).toBeTruthy();
     expect(screen.queryByText("Providers", { exact: true })).toBeNull();
     expect(screen.queryByRole("button", { name: "Refresh all" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Sign out all" })).toBeNull();
-    expect(screen.queryByText("Service", { exact: true })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove all" })).toBeNull();
     expect(screen.queryByText("Subscription link", { exact: true })).toBeNull();
     expect(await screen.findByRole("list", { name: "Nodes by group" })).toBeTruthy();
 
     await userEvent.click(within(views).getByRole("button", { name: "Status" }));
     expect(screen.getByText("Providers", { exact: true })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Refresh all" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Sign out all" })).toBeTruthy();
-    expect(screen.getByText("Service", { exact: true })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove all" })).toBeTruthy();
     expect(screen.getByText("Subscription link", { exact: true })).toBeTruthy();
     expect(screen.queryByRole("list", { name: "Nodes by group" })).toBeNull();
   });
@@ -283,7 +382,7 @@ describe("access token and browser session", () => {
     Object.assign(api, { subscriptionURL: vi.fn().mockReturnValue(pendingSubscription.promise) });
     render(<App api={api} />);
 
-    expect(await screen.findByText("Service", { exact: true })).toBeTruthy();
+    expect(await screen.findByText("Providers", { exact: true })).toBeTruthy();
     expect(screen.getByText("Subscription link", { exact: true })).toBeTruthy();
     expect(screen.getByText("Loading link…")).toBeTruthy();
 
@@ -344,16 +443,16 @@ describe("access token and browser session", () => {
     render(<App api={api} />);
     await screen.findByRole("heading", { name: "Service status" });
     await userEvent.click(screen.getByRole("button", { name: "KuaiFan" }));
-    expect(screen.queryByRole("button", { name: "Connect KuaiFan" })).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Refresh provider" }));
+    expect(screen.queryByRole("button", { name: "Add KuaiFan" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(api.refresh).toHaveBeenCalledWith("kuaifan"));
-    await userEvent.click(screen.getByRole("button", { name: "Remove account" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove" }));
     await userEvent.click(screen.getByRole("button", { name: "Confirm removal" }));
     await waitFor(() => expect(api.logoutAccount).toHaveBeenCalledWith("kuaifan"));
     expect(api.lockConsole).not.toHaveBeenCalled();
   });
 
-  it("signs out every linked provider in order without locking the console", async () => {
+  it("removes every linked provider in order without locking the console", async () => {
     const status = readyStatus();
     status.accounts = {
       ...status.accounts,
@@ -363,9 +462,9 @@ describe("access token and browser session", () => {
     render(<App api={api} />);
     await screen.findByRole("heading", { name: "Service status" });
 
-    await userEvent.click(screen.getByRole("button", { name: "Sign out all" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove all" }));
     expect(api.logoutAccount).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole("button", { name: "Confirm sign out" }));
+    await userEvent.click(screen.getByRole("button", { name: "Remove 2 providers" }));
 
     await waitFor(() => expect(api.logoutAccount).toHaveBeenCalledTimes(2));
     expect(api.logoutAccount).toHaveBeenNthCalledWith(1, "kuaifan");
@@ -377,13 +476,13 @@ describe("access token and browser session", () => {
     expect(api.subscriptionURL).toHaveBeenCalledTimes(2);
   });
 
-  it("disables Sign out all with no linked accounts and while refreshing", async () => {
+  it("disables Remove all with no linked accounts and while refreshing", async () => {
     const emptyStatus = readyStatus();
     emptyStatus.accounts = {};
     const emptyApi = makeApi(emptyStatus);
     render(<App api={emptyApi} />);
     await screen.findByRole("heading", { name: "Service status" });
-    expect((screen.getByRole("button", { name: "Sign out all" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Remove all" }) as HTMLButtonElement).disabled).toBe(true);
 
     const pendingRefresh = Promise.withResolvers<void>();
     const api = makeApi(readyStatus());
@@ -392,7 +491,7 @@ describe("access token and browser session", () => {
     const consoles = await screen.findAllByRole("heading", { name: "Service status" });
     const currentConsole = consoles[consoles.length - 1].closest("main") as HTMLElement;
     await userEvent.click(within(currentConsole).getByRole("button", { name: "Refresh all" }));
-    expect((within(currentConsole).getByRole("button", { name: "Sign out all" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((within(currentConsole).getByRole("button", { name: "Remove all" }) as HTMLButtonElement).disabled).toBe(true);
     pendingRefresh.resolve();
   });
 
@@ -443,6 +542,26 @@ describe("access token and browser session", () => {
     expect(screen.queryByText("Connections", { exact: true })).toBeNull();
   });
 
+  it("names the failing provider and its cause when the service needs attention", async () => {
+    const status = readyStatus();
+    status.state = "degraded";
+    status.accounts = {
+      ...status.accounts,
+      kuaifan: { ...status.accounts!.kuaifan, refreshStatus: "refresh_failing", refreshProblem: "network", nextRefreshAt: "2026-07-15T10:30:00Z" },
+      quickfox: { provider: "quickfox", display: "q•••@example.com", tier: "VIP", subscriptionActive: true, refreshStatus: "needs_relogin", refreshProblem: "session_rejected" },
+    };
+    render(<App api={makeApi(status)} />);
+    const problems = await screen.findByRole("list", { name: "Provider problems" });
+    expect(within(problems).getAllByRole("listitem")).toHaveLength(2);
+    expect(problems.textContent).toContain("Can't reach provider");
+    expect(problems.textContent).toContain("Automatic refresh paused.");
+
+    await userEvent.click(within(problems).getByRole("button", { name: /QuickFox/ }));
+    expect(screen.getByText("QuickFox", { selector: "[data-slot='card-title']" })).toBeTruthy();
+    expect(screen.getByText("Provider ended the session.", { selector: "strong" })).toBeTruthy();
+    expect(screen.getByText("Paused", { exact: true })).toBeTruthy();
+  });
+
   it("avoids browser storage while rendering the status console", async () => {
     const setItem = vi.spyOn(Storage.prototype, "setItem");
     const api = makeApi(readyStatus());
@@ -455,18 +574,18 @@ describe("access token and browser session", () => {
   });
 });
 
-describe("sign out all confirmation", () => {
-  it("asks before signing out every provider and can be cancelled", async () => {
+describe("remove all confirmation", () => {
+  it("asks before removing every provider and can be cancelled", async () => {
     const api = makeApi(readyStatus());
     render(<App api={api} />);
     await screen.findByRole("heading", { name: "Service status" });
 
-    await userEvent.click(screen.getByRole("button", { name: "Sign out all" }));
-    expect(screen.queryByRole("button", { name: "Sign out all" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Remove all" }));
+    expect(screen.queryByRole("button", { name: "Remove all" })).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
-    expect(screen.getByRole("button", { name: "Sign out all" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Confirm sign out" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Remove all" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Remove \d+ providers?$/ })).toBeNull();
     expect(api.logoutAccount).not.toHaveBeenCalled();
   });
 });
@@ -479,7 +598,7 @@ describe("console loading and recovery", () => {
       .mockResolvedValue(readyStatus());
     render(<App api={api} />);
     expect(await screen.findByRole("heading", { name: "Service unavailable" })).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Connect account" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Add a provider" })).toBeNull();
     expect(window.location.pathname).toBe("/");
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(await screen.findByRole("heading", { name: "Service status" })).toBeTruthy();
