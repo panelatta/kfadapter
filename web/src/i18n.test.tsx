@@ -6,9 +6,8 @@ import { getLocale, setLocale } from "./i18n";
 import { makeApi, readyStatus } from "./test/fixtures";
 
 describe("language switch", () => {
-  it("switches the console between English and Chinese and remembers the choice", async () => {
-    const setItem = vi.fn();
-    vi.stubGlobal("localStorage", { getItem: () => null, setItem });
+  it("switches the console between English and Chinese without writing browser storage", async () => {
+    const storageWrite = vi.spyOn(Storage.prototype, "setItem");
     render(<App api={makeApi(readyStatus())} />);
     await screen.findByRole("heading", { name: "Service status" });
 
@@ -18,17 +17,17 @@ describe("language switch", () => {
     expect(await screen.findByRole("heading", { name: "服务状态" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "锁定控制台" })).toBeTruthy();
     expect(document.documentElement.lang).toBe("zh-CN");
-    expect(setItem).toHaveBeenCalledWith("chinadapter.locale", "zh");
+
 
     const [chineseSwitcher] = screen.getAllByRole("group", { name: "语言" });
     await userEvent.click(within(chineseSwitcher).getByRole("button", { name: "English" }));
     expect(await screen.findByRole("heading", { name: "Service status" })).toBeTruthy();
     expect(getLocale()).toBe("en");
-    vi.unstubAllGlobals();
+    expect(storageWrite).not.toHaveBeenCalled();
   });
 
   it("translates service error messages into the selected language", async () => {
-    setLocale("zh", { persist: false });
+    setLocale("zh");
     const { describeError } = await import("./lib/errors");
     const { ApiError } = await import("./api");
     expect(describeError(new ApiError({ title: "Rejected", status: 401, code: "invalid_access_token" }))).toBe("访问令牌不正确。");

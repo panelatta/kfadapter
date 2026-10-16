@@ -9,17 +9,7 @@ export type Locale = "en" | "zh";
 export const locales: readonly Locale[] = ["zh", "en"];
 
 const catalogs: Record<Locale, Messages> = { en, zh };
-const storageKey = "chinadapter.locale";
 const listeners = new Set<() => void>();
-
-function storedLocale(): Locale | null {
-    try {
-        const value = window.localStorage.getItem(storageKey);
-        return value === "en" || value === "zh" ? value : null;
-    } catch {
-        return null;
-    }
-}
 
 function preferredLocale(): Locale {
     const languages =
@@ -33,7 +23,9 @@ function preferredLocale(): Locale {
         : "en";
 }
 
-let current: Locale = storedLocale() ?? preferredLocale();
+// The console never writes browser storage, so a switch lasts until the page
+// reloads; each load starts from the browser's language.
+let current: Locale = preferredLocale();
 
 function applyDocumentLanguage(locale: Locale) {
     if (typeof document !== "undefined")
@@ -56,14 +48,7 @@ export function intlLocale(locale: Locale = current): string {
     return locale === "zh" ? "zh-CN" : "en-US";
 }
 
-export function setLocale(locale: Locale, { persist = true } = {}): void {
-    if (persist) {
-        try {
-            window.localStorage.setItem(storageKey, locale);
-        } catch {
-            // Storage can be unavailable; the choice then lasts for this page.
-        }
-    }
+export function setLocale(locale: Locale): void {
     if (locale === current) return;
     current = locale;
     applyDocumentLanguage(locale);

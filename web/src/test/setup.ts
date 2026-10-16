@@ -56,7 +56,7 @@ afterEach(() => {
 
 beforeEach(() => {
   // The suite asserts the English copy whatever the host's language is.
-  setLocale("en", { persist: false });
+  setLocale("en");
   TestEventSource.instances = [];
   vi.stubGlobal("EventSource", TestEventSource);
   Object.defineProperty(navigator, "clipboard", {
