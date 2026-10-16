@@ -9,7 +9,8 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { isSessionProblem } from "@/lib/errors";
 import { compareGroupNames, groupNameCollator } from "@/lib/groups";
-import { applyProbeResult, formatLatency, healthLabel } from "./health";
+import { useI18n } from "@/i18n";
+import { applyProbeResult, formatLatency, healthLabel, probeFailureLabel } from "./health";
 import { NodeDetailsPopover } from "./NodeDetailsPopover";
 import { protocolLabel } from "./protocols";
 
@@ -29,6 +30,7 @@ export function NodeList({
     onAccessLost: () => void;
     onNodesChange: Dispatch<SetStateAction<NodeRecord[]>>;
 }) {
+    const { m } = useI18n();
     const [activeProbe, setActiveProbe] = useState<string | null>(null);
     const [batchScope, setBatchScope] = useState<string | null>(null);
     const probing = batchScope !== null || activeProbe !== null;
@@ -72,7 +74,7 @@ export function NodeList({
     const groupedNodes = useMemo(() => {
         const groups = new Map<string, NodeRecord[]>();
         for (const node of nodes) {
-            const group = node.group.trim() || "Ungrouped";
+            const group = node.group.trim() || m.nodes.ungrouped;
             const members = groups.get(group);
             if (members) members.push(node);
             else groups.set(group, [node]);
@@ -88,7 +90,7 @@ export function NodeList({
                         ),
                     ] as const,
             );
-    }, [nodes]);
+    }, [nodes, m]);
 
     const probeBatch = async (targets: readonly NodeRecord[], scope: string) => {
         if (targets.length === 0) return;
@@ -125,15 +127,15 @@ export function NodeList({
     };
 
     return (
-        <Card className="panel min-w-0">
-            <CardHeader>
-                <CardTitle>Nodes</CardTitle>
-                <CardDescription>{nodes.length} available</CardDescription>
+        <Card className="min-w-0">
+            <CardHeader className="pr-16">
+                <CardTitle>{m.nodes.title}</CardTitle>
+                <CardDescription>{m.nodes.available(nodes.length)}</CardDescription>
                 <CardAction>
                     <Tooltip>
                         <TooltipTrigger asChild>
                             <Button
-                                aria-label="Check TCP reachability for all nodes"
+                                aria-label={m.nodes.checkAll}
                                 disabled={probing || nodes.length === 0}
                                 onClick={() =>
                                     void probeBatch(
@@ -143,8 +145,8 @@ export function NodeList({
                                         allNodesScope,
                                     )
                                 }
-                                size="icon"
-                                variant="ghost"
+                                size="sm"
+                                variant="outline"
                             >
                                 <Gauge
                                     className={
@@ -153,9 +155,12 @@ export function NodeList({
                                             : "size-4"
                                     }
                                 />
+                                <span aria-hidden="true" className="hidden sm:inline">
+                                    {m.nodes.check}
+                                </span>
                             </Button>
                         </TooltipTrigger>
-                        <TooltipContent>Check TCP reachability</TooltipContent>
+                        <TooltipContent>{m.nodes.check}</TooltipContent>
                     </Tooltip>
                 </CardAction>
             </CardHeader>
@@ -163,25 +168,19 @@ export function NodeList({
                 {/* Native lists and disclosure widgets: each group is a named
                     <details> (role "group") that keyboard and screen-reader
                     users can toggle without a custom tree implementation. */}
-                <ul aria-label="Nodes by group" className="grid gap-2.5">
-                    {groupedNodes.map(([group, members], groupIndex) => (
+                <ul aria-label={m.nodes.byGroup} className="grid gap-2">
+                    {groupedNodes.map(([group, members]) => (
                         <li key={group}>
                             <details
-                                aria-label={`${group} group`}
-                                className="node-group overflow-hidden rounded-sm border border-border bg-background/40"
+                                aria-label={m.nodes.groupLabel(group)}
+                                className="node-group overflow-hidden rounded-lg border border-border"
                             >
-                                <summary className="flex cursor-pointer list-none items-center gap-2.5 px-3 py-2.5 text-sm font-medium transition-colors hover:bg-primary/5 [&::-webkit-details-marker]:hidden">
+                                <summary className="flex cursor-pointer list-none items-center gap-2.5 py-1.5 pl-3 pr-1.5 text-sm font-medium transition-colors hover:bg-muted/70 [&::-webkit-details-marker]:hidden">
                                     <ChevronRight
                                         aria-hidden="true"
                                         className="node-group__chevron size-4 text-muted-foreground"
                                     />
-                                    <span
-                                        aria-hidden="true"
-                                        className="font-sans text-xs font-semibold tabular-nums text-primary/80"
-                                    >
-                                        {String(groupIndex + 1).padStart(2, "0")}
-                                    </span>
-                                    <span className="min-w-0 flex-1 truncate">
+                                    <span className="min-w-0 flex-1 truncate py-1">
                                         {group}
                                     </span>
                                     <Badge variant="secondary">
@@ -190,8 +189,8 @@ export function NodeList({
                                     <Tooltip>
                                         <TooltipTrigger asChild>
                                             <Button
-                                                aria-label={`Check TCP reachability for the ${group} group`}
-                                                className="size-7"
+                                                aria-label={m.nodes.checkGroup(group)}
+                                                className="size-8"
                                                 disabled={probing}
                                                 onClick={(event) => {
                                                     // Keep the summary from toggling the group.
@@ -212,25 +211,29 @@ export function NodeList({
                                             </Button>
                                         </TooltipTrigger>
                                         <TooltipContent>
-                                            Check this group
+                                            {m.nodes.checkGroupHint}
                                         </TooltipContent>
                                     </Tooltip>
                                 </summary>
                                 <div className="node-group__content">
-                                    <ul className="node-group__content-inner divide-y divide-border border-t border-border">
+                                    <ul className="node-group__content-inner divide-y divide-border border-t border-border bg-well">
                                         {members.map((node) => (
                                             <li
                                                 aria-label={node.name}
-                                                className="grid gap-3 p-3 transition-colors hover:bg-primary/[0.04] sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center"
+                                                className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 py-2 pl-4 pr-1.5 sm:grid-cols-[minmax(0,1fr)_6rem_auto] sm:pl-9"
                                                 key={node.id}
                                             >
                                                 <div className="flex min-w-0 items-center gap-2">
-                                                    <p className="truncate text-sm font-medium">
+                                                    <span
+                                                        aria-hidden="true"
+                                                        className={`led ${healthLamp[node.health]}`}
+                                                    />
+                                                    <p className="truncate text-sm">
                                                         {node.name}
                                                     </p>
                                                     <Badge
-                                                        className="shrink-0 px-1.5 py-0 text-[0.65rem] font-medium tracking-wide"
-                                                        title={`Upstream protocol: ${node.protocol}`}
+                                                        className="shrink-0 px-1.5 py-0 text-[0.6875rem]"
+                                                        title={m.nodes.protocol(node.protocol)}
                                                         variant="outline"
                                                     >
                                                         {protocolLabel(
@@ -239,7 +242,7 @@ export function NodeList({
                                                     </Badge>
                                                 </div>
                                                 <LatencyReadout node={node} />
-                                                <div className="flex justify-end gap-1">
+                                                <div className="col-start-2 row-start-1 flex justify-end sm:col-start-3">
                                                     <NodeDetailsPopover
                                                         api={api}
                                                         getSessionRevision={
@@ -251,7 +254,7 @@ export function NodeList({
                                                     <Tooltip>
                                                         <TooltipTrigger asChild>
                                                             <Button
-                                                                aria-label={`Check TCP reachability for ${node.name}`}
+                                                                aria-label={m.nodes.checkNode(node.name)}
                                                                 disabled={probing}
                                                                 onClick={() =>
                                                                     void probe(node)
@@ -270,7 +273,7 @@ export function NodeList({
                                                             </Button>
                                                         </TooltipTrigger>
                                                         <TooltipContent>
-                                                            Check TCP reachability
+                                                            {m.nodes.check}
                                                         </TooltipContent>
                                                     </Tooltip>
                                                 </div>
@@ -283,8 +286,8 @@ export function NodeList({
                     ))}
                 </ul>
                 {groupedNodes.length === 0 ? (
-                    <p className="px-1 py-8 text-sm text-muted-foreground">
-                        No nodes available.
+                    <p className="py-8 text-center text-sm text-muted-foreground">
+                        {m.nodes.none}
                     </p>
                 ) : null}
             </CardContent>
@@ -292,18 +295,28 @@ export function NodeList({
     );
 }
 
+const healthLamp: Record<NodeHealth, string> = {
+    healthy: "led--ok",
+    degraded: "led--warn",
+    unhealthy: "led--err",
+    unknown: "",
+};
+
 function LatencyReadout({ node }: { node: NodeRecord }) {
-    const text = node.probeError || formatLatency(node.tcpLatencyMs);
+    const { m } = useI18n();
+    const text = node.probeError
+        ? probeFailureLabel(node.probeError)
+        : formatLatency(node.tcpLatencyMs);
     const tone: Record<NodeHealth, string> = {
-        healthy: "text-led-ok",
-        degraded: "text-led-warn",
-        unhealthy: "text-led-err",
+        healthy: "text-foreground",
+        degraded: "text-warning-foreground",
+        unhealthy: "text-destructive",
         unknown: "text-muted-foreground",
     };
     return (
         <span
-            aria-label={`TCP reachability ${text}, ${healthLabel(node.health)}`}
-            className={`text-xs font-medium tabular-nums sm:text-right ${tone[node.health]}`}
+            aria-label={m.nodes.reachability(text, healthLabel(node.health))}
+            className={`col-span-2 pl-4 text-[0.8125rem] tabular-nums sm:col-span-1 sm:pl-0 sm:text-right ${tone[node.health]}`}
         >
             {text}
         </span>

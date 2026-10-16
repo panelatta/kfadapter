@@ -1,13 +1,14 @@
-import { Copy } from "lucide-react";
+import { Check, Copy } from "lucide-react";
 import { Field, selectClassName } from "@/components/forms";
 import { Button } from "@/components/ui/button";
-import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { providerLabel } from "@/features/accounts/providers";
+import { useI18n } from "@/i18n";
 import type { useSubscriptionLink } from "./useSubscriptionLink";
 
 export function SubscriptionLinkCard({ link }: { link: ReturnType<typeof useSubscriptionLink> }) {
+    const { m } = useI18n();
     const {
         copyMessage,
         copySubscription,
@@ -21,117 +22,101 @@ export function SubscriptionLinkCard({ link }: { link: ReturnType<typeof useSubs
         setFilterName,
         setFilterProvider,
     } = link;
+    // Success shows on the button itself; only a failure needs a visible line.
+    const copied = copyMessage === m.subscription.copied;
 
     return (
-        <Card className="panel">
+        <Card>
             <CardHeader>
-                <CardTitle>Subscription link</CardTitle>
-                <CardAction>
-                    <Tooltip>
-                        <TooltipTrigger asChild>
-                            <Button
-                                aria-label="Copy subscription link"
-                                disabled={
-                                    !filteredSubscriptionURL
-                                }
-                                onClick={() =>
-                                    void copySubscription()
-                                }
-                                size="icon"
-                                variant="ghost"
-                            >
-                                <Copy className="size-4" />
-                            </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>
-                            Copy filtered link
-                        </TooltipContent>
-                    </Tooltip>
-                </CardAction>
+                <CardTitle>{m.subscription.title}</CardTitle>
+                <CardDescription>{m.subscription.description}</CardDescription>
             </CardHeader>
-            <CardContent className="grid gap-3">
+            <CardContent className="grid gap-4">
                 <div className="grid gap-3 sm:grid-cols-3">
                     <Field
-                        label="Provider"
+                        label={m.subscription.provider}
                         name="subscription-provider"
                     >
                         <select
                             className={selectClassName}
                             id="subscription-provider"
                             onChange={(event) =>
-                                setFilterProvider(
-                                    event.currentTarget.value,
-                                )
+                                setFilterProvider(event.currentTarget.value)
                             }
                             value={filterProvider}
                         >
                             <option value="">
-                                All providers
+                                {m.subscription.allProviders}
                             </option>
                             {nodeProviders.map((provider) => (
-                                <option
-                                    key={provider}
-                                    value={provider}
-                                >
+                                <option key={provider} value={provider}>
                                     {providerLabel(provider)}
                                 </option>
                             ))}
                         </select>
                     </Field>
-                    <Field
-                        label="Group"
-                        name="subscription-group"
-                    >
+                    <Field label={m.subscription.group} name="subscription-group">
                         <select
                             className={selectClassName}
                             id="subscription-group"
                             onChange={(event) =>
-                                setFilterGroup(
-                                    event.currentTarget.value,
-                                )
+                                setFilterGroup(event.currentTarget.value)
                             }
                             value={filterGroup}
                         >
-                            <option value="">All groups</option>
+                            <option value="">{m.subscription.allGroups}</option>
                             {filterGroups.map((group) => (
-                                <option
-                                    key={group}
-                                    value={group}
-                                >
+                                <option key={group} value={group}>
                                     {group}
                                 </option>
                             ))}
                         </select>
                     </Field>
-                    <Field
-                        label="Node name"
-                        name="subscription-name"
-                    >
+                    <Field label={m.subscription.name} name="subscription-name">
                         <Input
                             id="subscription-name"
                             onChange={(event) =>
-                                setFilterName(
-                                    event.currentTarget.value,
-                                )
+                                setFilterName(event.currentTarget.value)
                             }
-                            placeholder="Contains…"
+                            placeholder={m.subscription.namePlaceholder}
                             value={filterName}
                         />
                     </Field>
                 </div>
-                <code
-                    aria-busy={!filteredSubscriptionURL}
-                    className="readout block break-all rounded-sm border border-border/70 px-3 py-2.5 text-xs leading-5 text-primary/90"
-                >
-                    {filteredSubscriptionURL || (
-                        <span className="animate-pulse text-muted-foreground">
-                            Loading link…
-                        </span>
-                    )}
-                </code>
+                <div className="flex flex-col rounded-lg bg-ticket text-ticket-foreground sm:flex-row">
+                    <code
+                        aria-busy={!filteredSubscriptionURL}
+                        className="block min-w-0 flex-1 break-all px-4 py-3.5 font-mono text-[0.8125rem] leading-6"
+                    >
+                        {filteredSubscriptionURL || (
+                            <span className="animate-pulse text-ticket-muted">
+                                {m.subscription.loading}
+                            </span>
+                        )}
+                    </code>
+                    <div aria-hidden="true" className="ticket-divider" />
+                    <div className="flex items-center p-3 sm:px-4">
+                        <Button
+                            aria-label={m.subscription.copy}
+                            className="w-full bg-ticket-foreground text-ticket shadow-none hover:bg-ticket-foreground/90 focus-visible:ring-offset-ticket sm:w-auto"
+                            disabled={!filteredSubscriptionURL}
+                            onClick={() => void copySubscription()}
+                            title={m.subscription.copyHint}
+                        >
+                            {copied ? <Check /> : <Copy />}
+                            {copied
+                                ? m.subscription.copiedShort
+                                : m.subscription.copyShort}
+                        </Button>
+                    </div>
+                </div>
                 <p
                     aria-live="polite"
-                    className="min-h-5 text-xs text-muted-foreground"
+                    className={
+                        copyMessage && !copied
+                            ? "-mt-1 text-[0.8125rem] text-destructive"
+                            : "sr-only"
+                    }
                     role="status"
                 >
                     {copyMessage}

@@ -11,6 +11,7 @@ import {
     CardTitle,
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { useI18n } from "@/i18n";
 import { describeError } from "@/lib/errors";
 
 function validTokenLength(token: string): boolean {
@@ -25,6 +26,7 @@ export function ChangeAccessTokenCard({
     onCancel: () => void;
     onSubmit: (current: string, next: string) => Promise<void>;
 }) {
+    const { m } = useI18n();
     const [current, setCurrent] = useState("");
     const [next, setNext] = useState("");
     const [confirmation, setConfirmation] = useState("");
@@ -45,19 +47,19 @@ export function ChangeAccessTokenCard({
         clearFields();
 
         if (!validTokenLength(submittedCurrent)) {
-            setError("Enter the current access token.");
+            setError(m.changeToken.enterCurrent);
             return;
         }
         if (!validTokenLength(submittedNext)) {
-            setError("The new access token must be 16–128 bytes.");
+            setError(m.changeToken.nextInvalid);
             return;
         }
         if (submittedNext !== submittedConfirmation) {
-            setError("The new access tokens do not match.");
+            setError(m.changeToken.mismatch);
             return;
         }
         if (submittedNext === submittedCurrent) {
-            setError("Choose a new access token that differs from the current one.");
+            setError(m.changeToken.unchanged);
             return;
         }
 
@@ -73,20 +75,17 @@ export function ChangeAccessTokenCard({
     };
 
     return (
-        <Card className="panel">
+        <Card>
             <CardHeader>
-                <CardTitle>Change access token</CardTitle>
+                <CardTitle>{m.changeToken.title}</CardTitle>
                 <CardDescription>
-                    This signs out every other browser and changes the
-                    subscription URL, every SOCKS credential and the smart
-                    proxy address. Copy the new subscription URL into each
-                    client afterwards.
+                    {m.changeToken.description}
                 </CardDescription>
             </CardHeader>
             <CardContent>
                 <form className="grid gap-4 sm:max-w-md" noValidate onSubmit={submit}>
                     <FormError message={error} />
-                    <Field label="Current access token" name="current-access-token">
+                    <Field label={m.changeToken.current} name="current-access-token">
                         <Input
                             autoComplete="off"
                             id="current-access-token"
@@ -96,7 +95,7 @@ export function ChangeAccessTokenCard({
                             value={current}
                         />
                     </Field>
-                    <Field label="New access token" name="new-access-token">
+                    <Field label={m.changeToken.next} name="new-access-token">
                         <Input
                             autoComplete="off"
                             id="new-access-token"
@@ -107,7 +106,7 @@ export function ChangeAccessTokenCard({
                         />
                     </Field>
                     <Field
-                        label="Confirm new access token"
+                        label={m.changeToken.confirm}
                         name="new-access-token-confirmation"
                     >
                         <Input
@@ -121,15 +120,15 @@ export function ChangeAccessTokenCard({
                             value={confirmation}
                         />
                     </Field>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 pt-1">
                         <Button disabled={submitting} type="submit">
                             {submitting ? (
                                 <>
                                     <LoaderCircle className="size-4 animate-spin" />
-                                    Changing
+                                    {m.changeToken.saving}
                                 </>
                             ) : (
-                                "Save new token"
+                                m.changeToken.save
                             )}
                         </Button>
                         <Button
@@ -138,7 +137,7 @@ export function ChangeAccessTokenCard({
                             type="button"
                             variant="outline"
                         >
-                            Cancel
+                            {m.changeToken.cancel}
                         </Button>
                     </div>
                 </form>

@@ -1,3 +1,5 @@
+import type { ProbeFailure } from "./features/nodes/health";
+
 export type ServiceState =
   | "signed_out"
   | "authenticating"
@@ -66,7 +68,8 @@ export interface NodeRecord {
   protocol: string;
   health: NodeHealth;
   tcpLatencyMs?: number;
-  probeError?: string;
+  /** Why the last TCP probe failed; a key of the probe failure messages. */
+  probeError?: ProbeFailure;
   udpHealth: "unavailable" | "healthy" | "unhealthy" | string;
   eligible: boolean;
 }

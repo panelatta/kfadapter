@@ -35,12 +35,12 @@ describe("probe failure classifications", () => {
   for (const all of [false, true]) {
     describe(all ? "probe all" : "single probe", () => {
       it.each([
-        ["stale_probe", 409, "Changed"],
-        ["probe_busy", 429, "Busy"],
-        ["node_ineligible", 409, "Ineligible"],
-        ["node_not_found", 404, "Unavailable"],
-        ["node_snapshot_unavailable", 409, "Unavailable"],
-        ["internal_error", 500, "Failed"],
+        ["stale_probe", 409, "changed"],
+        ["probe_busy", 429, "busy"],
+        ["node_ineligible", 409, "ineligible"],
+        ["node_not_found", 404, "unavailable"],
+        ["node_snapshot_unavailable", 409, "unavailable"],
+        ["internal_error", 500, "failed"],
       ])("preserves health and latency for %s", async (code, status, label) => {
         const { latestNode } = renderProbeFailure(new ApiError({ title: "Probe was not applied", status, code }));
         await probeFirstNode(all);
@@ -59,7 +59,7 @@ describe("probe failure classifications", () => {
       it("preserves upstream health when the console request has a network error", async () => {
         const { latestNode } = renderProbeFailure(new TypeError("Failed to fetch"));
         await probeFirstNode(all);
-        await waitFor(() => expect(latestNode().probeError).toBe("Failed"));
+        await waitFor(() => expect(latestNode().probeError).toBe("failed"));
         expect(latestNode().health).toBe("healthy");
         expect(latestNode().tcpLatencyMs).toBe(76);
       });

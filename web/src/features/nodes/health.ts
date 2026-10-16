@@ -1,29 +1,37 @@
 import { ApiError } from "@/api";
 import type { NodeHealth, NodeRecord, ProbeResult } from "@/types";
+import { messages } from "@/i18n";
+import type { Messages } from "@/i18n";
 
 export function formatLatency(value?: number): string {
     return typeof value === "number" ? `${value} ms` : "—";
 }
 
-export function probeFailureLabel(error: unknown): string {
-    if (!(error instanceof ApiError)) return "Failed";
+export type ProbeFailure = keyof Messages["nodes"]["probeFailures"];
+
+export function probeFailure(error: unknown): ProbeFailure {
+    if (!(error instanceof ApiError)) return "failed";
     switch (error.problem.code) {
         case "node_ineligible":
-            return "Ineligible";
+            return "ineligible";
         case "node_not_found":
         case "node_snapshot_unavailable":
-            return "Unavailable";
+            return "unavailable";
         case "probe_busy":
-            return "Busy";
+            return "busy";
         case "stale_probe":
-            return "Changed";
+            return "changed";
         case "tcp_probe_timeout":
-            return "Timeout";
+            return "timeout";
         case "tcp_probe_failed":
-            return "Unreachable";
+            return "unreachable";
         default:
-            return "Failed";
+            return "failed";
     }
+}
+
+export function probeFailureLabel(failure: ProbeFailure): string {
+    return messages().nodes.probeFailures[failure];
 }
 
 /**
@@ -63,11 +71,11 @@ export function applyProbeResult(
             ...node,
             health: unreachable ? "unhealthy" : node.health,
             tcpLatencyMs: unreachable ? undefined : node.tcpLatencyMs,
-            probeError: probeFailureLabel(outcome.error),
+            probeError: probeFailure(outcome.error),
         };
     });
 }
 
 export function healthLabel(health: NodeHealth): string {
-    return health.slice(0, 1).toUpperCase() + health.slice(1);
+    return messages().nodes.healthLabels[health];
 }

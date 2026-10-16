@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
 import type { NodeRecord } from "@/types";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
+import { useI18n } from "@/i18n";
 import { compareGroupNames, groupNameCollator } from "@/lib/groups";
 
 export function useSubscriptionLink(eligibleNodes: NodeRecord[], subscriptionURL: string) {
     // The selections are preferences. They apply only while the current nodes
     // offer them, and come back if a reload makes them available again.
+    const { m } = useI18n();
     const [selectedProvider, setFilterProvider] = useState("");
     const [selectedGroup, setFilterGroup] = useState("");
     const [filterName, setFilterName] = useState("");
@@ -60,7 +62,7 @@ export function useSubscriptionLink(eligibleNodes: NodeRecord[], subscriptionURL
         message: copyMessage,
         copy: copySubscription,
         clear: clearCopyMessage,
-    } = useCopyFeedback(filteredSubscriptionURL, "Link copied.");
+    } = useCopyFeedback(filteredSubscriptionURL, m.subscription.copied);
 
     const resetFilters = () => {
         clearCopyMessage();

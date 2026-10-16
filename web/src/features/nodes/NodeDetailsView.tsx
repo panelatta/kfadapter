@@ -2,13 +2,15 @@ import { Copy } from "lucide-react";
 import type { NodeDetails } from "@/types";
 import { Button } from "@/components/ui/button";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
+import { useI18n } from "@/i18n";
 import { formatLatency, healthLabel } from "./health";
 
 export function NodeDetailsView({ details }: { details: NodeDetails }) {
+    const { m } = useI18n();
     const socksURL = `socks5://${encodeURIComponent(details.socksUsername)}:${encodeURIComponent(details.socksPassword)}@${details.socksAddress}`;
     const { message: copyMessage, copy: copySocksURL } = useCopyFeedback(
         socksURL,
-        "SOCKS5 URL copied.",
+        m.nodes.socksCopied,
     );
 
     return (
@@ -18,17 +20,17 @@ export function NodeDetailsView({ details }: { details: NodeDetails }) {
             <div className="grid gap-2.5 text-sm">
                 <dl>
                     <DetailRow
-                        label="Upstream"
+                        label={m.nodes.upstream}
                         value={`${details.upstreamHost}:${details.upstreamPort}`}
                     />
                 </dl>
-                <dl className="grid grid-cols-3 gap-3 border-t border-dashed border-border pt-3">
+                <dl className="grid grid-cols-2 gap-3 border-t border-border pt-3">
                     <DetailRow
-                        label="Health"
+                        label={m.nodes.health}
                         value={healthLabel(details.health)}
                     />
                     <DetailRow
-                        label="Latency"
+                        label={m.nodes.latency}
                         value={formatLatency(details.tcpLatencyMs)}
                     />
                 </dl>
@@ -40,11 +42,11 @@ export function NodeDetailsView({ details }: { details: NodeDetails }) {
                     variant="outline"
                 >
                     <Copy className="size-4" />
-                    Copy SOCKS5 URL
+                    {m.nodes.copySocks}
                 </Button>
                 <p
                     aria-live="polite"
-                    className="min-h-5 text-xs text-muted-foreground"
+                    className="min-h-5 text-[0.8125rem] text-muted-foreground"
                     role="status"
                 >
                     {copyMessage}
@@ -57,10 +59,10 @@ export function NodeDetailsView({ details }: { details: NodeDetails }) {
 function DetailRow({ label, value }: { label: string; value: string }) {
     return (
         <div className="min-w-0">
-            <dt className="text-[0.625rem] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+            <dt className="text-[0.8125rem] text-muted-foreground">
                 {label}
             </dt>
-            <dd className="mt-1 break-all font-mono text-xs text-primary/90">
+            <dd className="mt-0.5 break-all font-mono text-[0.8125rem] text-foreground">
                 {value}
             </dd>
         </div>

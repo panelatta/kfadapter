@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ApiClient } from "@/api";
 import type { SmartProxyStatus } from "@/types";
+import { messages } from "@/i18n";
 import { copyText } from "@/lib/clipboard";
 import { describeError, isSessionProblem } from "@/lib/errors";
 
@@ -131,7 +132,7 @@ export function useSmartProxy({
             setStatus((previous) =>
                 previous ? { ...previous, running: true } : previous,
             );
-            setMessage("Probe requested.");
+            setMessage(messages().smart.probeRequested);
         });
     };
 
@@ -144,8 +145,8 @@ export function useSmartProxy({
             if (isCurrent())
                 setMessage(
                     copied
-                        ? "Smart SOCKS5 address copied."
-                        : "Could not copy the address. Check clipboard permissions.",
+                        ? messages().smart.copied
+                        : messages().smart.copyFailed,
                 );
         });
     };

@@ -1,69 +1,53 @@
 import type { ServiceState } from "@/types";
 import { Badge } from "@/components/ui/badge";
+import { messages, useI18n } from "@/i18n";
+
+type StatusTone = "ready" | "working" | "warning" | "danger" | "neutral";
 
 interface StatusDetail {
     label: string;
     message: string;
-    tone: "ready" | "working" | "warning" | "danger" | "neutral";
+    tone: StatusTone;
 }
 
-export const stateDetails: Record<ServiceState, StatusDetail> = {
-    signed_out: {
-        label: "No providers",
-        message: "Add a provider to load nodes.",
-        tone: "neutral",
-    },
-    authenticating: {
-        label: "Authenticating",
-        message: "Connecting your account.",
-        tone: "working",
-    },
-    syncing: { label: "Syncing", message: "Updating nodes.", tone: "working" },
-    ready: { label: "Ready", message: "Service is ready.", tone: "ready" },
-    degraded: {
-        label: "Needs attention",
-        message: "The last refresh failed. Existing nodes still work.",
-        tone: "warning",
-    },
-    expired: {
-        label: "Expired",
-        message: "Add the provider again.",
-        tone: "danger",
-    },
-    error: {
-        label: "Service error",
-        message: "No provider session is usable. Refresh or add the provider again.",
-        tone: "danger",
-    },
+const stateTones: Record<ServiceState, StatusTone> = {
+    signed_out: "neutral",
+    authenticating: "working",
+    syncing: "working",
+    ready: "ready",
+    degraded: "warning",
+    expired: "danger",
+    error: "danger",
 };
 
-export function StatusBadge({ detail }: { detail: StatusDetail }) {
-    const tone = {
-        ready: {
-            badge: "border-led-ok/35 bg-led-ok/10 text-led-ok",
-            led: "led--ok",
-        },
-        working: {
-            badge: "border-led-warn/35 bg-led-warn/10 text-led-warn",
-            led: "led--warn led--pulse",
-        },
-        warning: {
-            badge: "border-led-warn/35 bg-led-warn/10 text-led-warn",
-            led: "led--warn",
-        },
-        danger: {
-            badge: "border-destructive/35 bg-destructive/10 text-destructive",
-            led: "led--err",
-        },
-        neutral: {
-            badge: "border-border bg-muted text-muted-foreground",
-            led: "",
-        },
-    }[detail.tone];
+export function stateDetail(state: ServiceState): StatusDetail {
+    return { ...messages().states[state], tone: stateTones[state] };
+}
+
+const toneStyles: Record<StatusTone, { badge: string; led: string }> = {
+    ready: { badge: "bg-success text-success-foreground", led: "led--ok" },
+    working: {
+        badge: "bg-warning text-warning-foreground",
+        led: "led--warn led--pulse",
+    },
+    warning: { badge: "bg-warning text-warning-foreground", led: "led--warn" },
+    danger: {
+        badge: "bg-destructive/10 text-destructive",
+        led: "led--err",
+    },
+    neutral: { badge: "bg-muted text-muted-foreground", led: "" },
+};
+
+export function StatusBadge({ state }: { state: ServiceState }) {
+    const { m } = useI18n();
+    const tone = toneStyles[stateTones[state]];
     return (
-        <Badge className={`h-8 gap-2 px-2.5 ${tone.badge}`} variant="outline">
+        <Badge
+            className={`h-7 gap-2 border-transparent px-3 text-[0.8125rem] ${tone.badge}`}
+            variant="outline"
+        >
             <span aria-hidden="true" className={`led ${tone.led}`} />
-            {detail.label}
+            {m.states[state].label}
         </Badge>
     );
 }

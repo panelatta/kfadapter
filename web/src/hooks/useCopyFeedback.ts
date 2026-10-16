@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { messages } from "@/i18n";
 import { copyText } from "@/lib/clipboard";
 
 const feedbackDurationMs = 2500;
@@ -29,7 +30,7 @@ export function useCopyFeedback(value: string, successMessage: string) {
         const copied = await copyText(value);
         setFeedback({
             value,
-            message: copied ? successMessage : "Copy is unavailable.",
+            message: copied ? successMessage : messages().errors.copyUnavailable,
         });
         resetTimer.current = window.setTimeout(
             () => setFeedback(null),

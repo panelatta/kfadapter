@@ -6,6 +6,7 @@ import { Field, FormError } from "@/components/forms";
 import { Button } from "@/components/ui/button";
 import { CardContent, CardDescription, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { useI18n } from "@/i18n";
 import { describeError } from "@/lib/errors";
 
 export function AccessTokenCard({
@@ -20,6 +21,7 @@ export function AccessTokenCard({
     /** False when this browser is not on the adapter host (setup is loopback-only). */
     setupAllowed?: boolean;
 }) {
+    const { m } = useI18n();
     const [token, setToken] = useState("");
     const [confirmation, setConfirmation] = useState("");
     const [submitting, setSubmitting] = useState(false);
@@ -39,11 +41,11 @@ export function AccessTokenCard({
 
         const tokenBytes = new TextEncoder().encode(submittedToken).byteLength;
         if (tokenBytes < 16 || tokenBytes > 128) {
-            setLocalError("That access token is too short or too long.");
+            setLocalError(m.access.tokenLengthInvalid);
             return;
         }
         if (isSetup && submittedToken !== submittedConfirmation) {
-            setLocalError("The access tokens do not match.");
+            setLocalError(m.access.tokensMismatch);
             return;
         }
 
@@ -62,27 +64,27 @@ export function AccessTokenCard({
     return (
         <AuthCardShell>
             <CardHeader>
-                <h1 className="font-sans text-xl font-semibold uppercase tracking-[0.05em]">
-                    {isSetup ? "Create console access" : "Unlock console"}
+                <h1 className="text-xl font-semibold tracking-[-0.01em]">
+                    {isSetup ? m.access.setupTitle : m.access.loginTitle}
                 </h1>
                 {isSetup ? (
                     <CardDescription>
-                        Choose an access token of 16–128 characters.
+                        {m.access.setupDescription}
                     </CardDescription>
                 ) : null}
             </CardHeader>
             <CardContent>
                 {isSetup && !setupAllowed ? (
-                    <p className="text-sm leading-6" role="alert">
-                        For safety, the first access token can only be created
-                        from the device running chinadapter. Open this console
-                        at http://127.0.0.1 on that device, for example through
-                        an SSH port forward, then return here to unlock it.
+                    <p
+                        className="rounded-md border border-led-warn/30 bg-warning px-3.5 py-3 text-sm leading-6 text-warning-foreground"
+                        role="alert"
+                    >
+                        {m.access.setupLoopbackOnly}
                     </p>
                 ) : (
                     <form className="grid gap-4" noValidate onSubmit={submit}>
                         <FormError message={localError || error} />
-                        <Field label="Access token" name="access-token">
+                        <Field label={m.access.tokenLabel} name="access-token">
                             <Input
                                 autoComplete="off"
                                 id="access-token"
@@ -96,7 +98,7 @@ export function AccessTokenCard({
                         </Field>
                         {isSetup ? (
                             <Field
-                                label="Confirm access token"
+                                label={m.access.confirmTokenLabel}
                                 name="access-token-confirmation"
                             >
                                 <Input
@@ -119,12 +121,12 @@ export function AccessTokenCard({
                             {submitting ? (
                                 <>
                                     <LoaderCircle className="size-4 animate-spin" />
-                                    Checking
+                                    {m.access.checking}
                                 </>
                             ) : isSetup ? (
-                                "Create access"
+                                m.access.createAccess
                             ) : (
-                                "Continue"
+                                m.access.continue
                             )}
                         </Button>
                     </form>

@@ -1,23 +1,26 @@
+import type { ReactNode } from "react";
+
 export function Metric({
     label,
+    note,
     title,
     value,
 }: {
     label: string;
+    note?: ReactNode;
     title?: string;
     value: string;
 }) {
     return (
-        <div className="min-w-0 border-l border-primary/40 pl-3">
-            <p className="text-[0.65rem] font-semibold uppercase tracking-[0.2em] text-muted-foreground">
-                {label}
-            </p>
+        <div className="min-w-0">
+            <p className="text-[0.8125rem] text-muted-foreground">{label}</p>
             <p
-                className="mt-1.5 break-words font-sans text-2xl font-semibold leading-tight tabular-nums"
+                className="mt-1 break-words text-lg font-semibold leading-snug tabular-nums"
                 title={title}
             >
                 {value}
             </p>
+            {note}
         </div>
     );
 }

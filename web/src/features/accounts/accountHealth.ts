@@ -1,4 +1,5 @@
 import type { AccountSummary } from "@/types";
+import { messages } from "@/i18n";
 import { formatCompactTime } from "@/lib/time";
 
 export type LampTone = "ok" | "warn" | "err" | "off";
@@ -18,32 +19,27 @@ export interface AccountIssue {
     action: string;
 }
 
-const causes: Record<string, string> = {
-    network: "Can't reach provider",
-    session_rejected: "Provider ended the session",
-    login_rejected: "Provider rejected the saved sign-in",
-    device_limit: "Too many devices signed in",
-    authority_expired: "Session expired",
-    no_session: "No saved session to renew",
-};
-
 export function accountIssue(account?: AccountSummary): AccountIssue | null {
     if (!account) return null;
-    const cause = causes[account.refreshProblem ?? ""] ?? "Refresh failed";
+    const m = messages().health;
+    const problem = account.refreshProblem ?? "";
+    const cause = Object.hasOwn(m.causes, problem)
+        ? m.causes[problem]
+        : m.refreshFailed;
     switch (account.refreshStatus) {
         case "needs_relogin":
             return {
                 tone: "err",
                 summary: cause,
-                action: "Automatic refresh paused. Refresh to retry, or remove and add it again.",
+                action: m.reloginAction,
             };
         case "refresh_failing":
             return {
                 tone: "warn",
                 summary: cause,
                 action: account.nextRefreshAt
-                    ? `Retrying ${formatCompactTime(account.nextRefreshAt)}.`
-                    : "Retrying automatically.",
+                    ? m.retryingAt(formatCompactTime(account.nextRefreshAt))
+                    : m.retrying,
             };
         default:
             return null;

@@ -1,4 +1,6 @@
 import { ApiError } from "@/api";
+import { messages } from "@/i18n";
+import type { Messages } from "@/i18n";
 
 export function isSessionProblem(error: unknown): boolean {
     return (
@@ -7,48 +9,35 @@ export function isSessionProblem(error: unknown): boolean {
     );
 }
 
-const tooManyAttempts = "Too many attempts. Wait a moment and try again.";
-
 // Keyed by the backend's problem codes. Anything else falls back to the
 // problem's detail or title.
-const problemMessages: Record<string, string> = {
-    session_revocation_pending:
-        "The console is locked now, but an old session could become valid again after the service restarts. Repair persistent storage, then unlock and lock the console again to retry.",
-    setup_requires_loopback:
-        "For safety, the first access token can only be created from the device running chinadapter. Open this console at http://127.0.0.1 on that device, for example through an SSH port forward.",
-    access_rate_limited: tooManyAttempts,
-    login_rate_limited: tooManyAttempts,
-    access_in_progress:
-        "Another attempt is still being checked. Try again in a moment.",
-    login_in_progress:
-        "Another sign-in is still in progress. Try again in a moment.",
-    operation_in_progress:
-        "Another account operation is still running. Try again in a moment.",
-    invalid_access_token: "That access token was not accepted.",
-    invalid_next_access_token:
-        "Use a different access token of 16–128 bytes.",
-    access_initialized:
-        "Console access has already been created. Unlock it with your access token.",
-    login_rejected: "The provider rejected those credentials.",
-    device_limit:
-        "The provider account is signed in on too many devices. Sign out of one in the provider's app, then try again.",
-    login_unavailable: "The provider could not be reached. Try again later.",
-    account_exists:
-        "That provider already has a connected account. Remove it first to switch accounts.",
-    invalid_smart_policy: "Choose a probe interval of 30 or 60 minutes.",
-    smart_config_failed:
-        "The smart proxy settings could not be saved. Try again.",
-    smart_probe_unavailable:
-        "Enable the smart proxy and wait for the current probe to finish.",
-    smart_proxy_unavailable:
-        "The smart proxy address is not available yet. Try again in a moment.",
+const problemMessages: Record<string, keyof Messages["errors"]> = {
+    session_revocation_pending: "sessionRevocationPending",
+    setup_requires_loopback: "setupRequiresLoopback",
+    access_rate_limited: "tooManyAttempts",
+    login_rate_limited: "tooManyAttempts",
+    access_in_progress: "accessInProgress",
+    login_in_progress: "loginInProgress",
+    operation_in_progress: "operationInProgress",
+    invalid_access_token: "invalidAccessToken",
+    invalid_next_access_token: "invalidNextAccessToken",
+    access_initialized: "accessInitialized",
+    login_rejected: "loginRejected",
+    device_limit: "deviceLimit",
+    login_unavailable: "loginUnavailable",
+    account_exists: "accountExists",
+    invalid_smart_policy: "invalidSmartPolicy",
+    smart_config_failed: "smartConfigFailed",
+    smart_probe_unavailable: "smartProbeUnavailable",
+    smart_proxy_unavailable: "smartProxyUnavailable",
 };
 
 export function describeError(error: unknown): string {
     if (error instanceof ApiError) {
         const { code } = error.problem;
-        if (Object.hasOwn(problemMessages, code)) return problemMessages[code];
+        if (Object.hasOwn(problemMessages, code))
+            return messages().errors[problemMessages[code]];
         return error.problem.detail || error.problem.title;
     }
-    return "The local service did not complete that request.";
+    return messages().errors.requestFailed;
 }

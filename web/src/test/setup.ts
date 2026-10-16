@@ -1,5 +1,6 @@
 import { cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, vi } from "vitest";
+import { setLocale } from "@/i18n";
 
 export class TestEventSource {
   static instances: TestEventSource[] = [];
@@ -54,6 +55,8 @@ afterEach(() => {
 });
 
 beforeEach(() => {
+  // The suite asserts the English copy whatever the host's language is.
+  setLocale("en", { persist: false });
   TestEventSource.instances = [];
   vi.stubGlobal("EventSource", TestEventSource);
   Object.defineProperty(navigator, "clipboard", {

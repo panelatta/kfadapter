@@ -1,9 +1,10 @@
-import { LogOut, RefreshCw } from "lucide-react";
+import { ChevronRight, LogOut, RefreshCw } from "lucide-react";
 import type { AccountSummary, NodeRecord, StatusResponse } from "@/types";
 import { FormError } from "@/components/forms";
 import { Metric } from "@/components/Metric";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { useI18n } from "@/i18n";
 import { formatCompactTime, formatTime } from "@/lib/time";
 import { accountIssue, accountTone, lampClass } from "./accountHealth";
 import type { AccountIssue } from "./accountHealth";
@@ -14,7 +15,7 @@ import type { AccountViews } from "./useAccountViews";
 
 const removeAllKey = "\u0000all";
 const footerClassName =
-    "flex-wrap justify-between gap-3 border-t border-dashed border-border/70 pt-4 [&.border-t]:pt-4";
+    "flex-wrap justify-between gap-3 border-t border-border pt-4 [&.border-t]:pt-4";
 
 export function AccountPanel({
     accountView,
@@ -37,6 +38,7 @@ export function AccountPanel({
     refreshing: boolean;
     status: StatusResponse;
 }) {
+    const { m } = useI18n();
     const {
         activeProvider,
         confirmRemoval,
@@ -54,39 +56,51 @@ export function AccountPanel({
 
     if (activeProvider === "all") {
         return (
-            <Card className="panel">
+            <Card className="pb-4">
                 <CardHeader>
-                    <CardTitle>Providers</CardTitle>
+                    <CardTitle>{m.providers.title}</CardTitle>
                 </CardHeader>
-                <CardContent className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    {status.providers.map((provider) => (
-                        <ProviderTile
-                            account={accounts[provider]}
-                            isPublic={isPublic(provider)}
-                            key={provider}
-                            nodeCount={
-                                eligibleNodes.filter(
-                                    (node) => node.provider === provider,
-                                ).length
-                            }
-                            onSelect={() => selectProvider(provider)}
-                            provider={provider}
-                        />
-                    ))}
+                <CardContent className="px-0 sm:px-0">
+                    <ul className="divide-y divide-border border-y border-border">
+                        {status.providers.map((provider) => (
+                            <li key={provider}>
+                                <ProviderRow
+                                    account={accounts[provider]}
+                                    isPublic={isPublic(provider)}
+                                    nodeCount={
+                                        eligibleNodes.filter(
+                                            (node) => node.provider === provider,
+                                        ).length
+                                    }
+                                    onSelect={() => selectProvider(provider)}
+                                    provider={provider}
+                                />
+                            </li>
+                        ))}
+                    </ul>
                 </CardContent>
-                <CardFooter className={footerClassName}>
+                <CardFooter className="flex-wrap justify-between gap-3">
                     <p
-                        className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground"
-                        title={`Updated ${formatTime(status.controlPlane.lastRefreshAt)}`}
+                        className="flex min-w-0 items-center gap-2 text-[0.8125rem] text-muted-foreground"
+                        title={m.providers.updated(
+                            formatTime(status.controlPlane.lastRefreshAt),
+                        )}
                     >
                         <span
                             aria-hidden="true"
                             className={`led ${refreshing ? "led--warn led--pulse" : "led--ok"}`}
                         />
                         <span className="truncate">
-                            {status.nodes.eligible} of {status.nodes.total} nodes
-                            usable · Updated{" "}
-                            {formatCompactTime(status.controlPlane.lastRefreshAt)}
+                            {m.providers.usable(
+                                status.nodes.eligible,
+                                status.nodes.total,
+                            )}{" "}
+                            ·{" "}
+                            {m.providers.updated(
+                                formatCompactTime(
+                                    status.controlPlane.lastRefreshAt,
+                                ),
+                            )}
                         </span>
                     </p>
                     <div className="flex w-full flex-wrap gap-2 sm:ml-auto sm:w-auto sm:justify-end">
@@ -97,7 +111,7 @@ export function AccountPanel({
                                     size="sm"
                                     variant="ghost"
                                 >
-                                    Cancel
+                                    {m.providers.cancel}
                                 </Button>
                                 <Button
                                     disabled={refreshing || providerBusy}
@@ -108,8 +122,7 @@ export function AccountPanel({
                                     variant="destructive"
                                 >
                                     <LogOut />
-                                    Remove {linkedCount}{" "}
-                                    {linkedCount === 1 ? "provider" : "providers"}
+                                    {m.providers.removeCount(linkedCount)}
                                 </Button>
                             </>
                         ) : (
@@ -127,10 +140,10 @@ export function AccountPanel({
                                                 : "size-4"
                                         }
                                     />
-                                    Refresh all
+                                    {m.providers.refreshAll}
                                 </Button>
                                 <Button
-                                    className="border-destructive/60 text-destructive hover:border-destructive hover:bg-destructive/10 hover:text-destructive"
+                                    className="text-destructive hover:bg-destructive/[0.06] hover:text-destructive"
                                     disabled={
                                         refreshing ||
                                         providerBusy ||
@@ -140,17 +153,17 @@ export function AccountPanel({
                                         setConfirmRemoval(removeAllKey)
                                     }
                                     size="sm"
-                                    variant="outline"
+                                    variant="ghost"
                                 >
                                     <LogOut />
-                                    Remove all
+                                    {m.providers.removeAll}
                                 </Button>
                             </>
                         )}
                     </div>
                 </CardFooter>
                 {providerError ? (
-                    <div className="px-6 pb-2">
+                    <div className="px-5 sm:px-6">
                         <FormError message={providerError} />
                     </div>
                 ) : null}
@@ -161,9 +174,11 @@ export function AccountPanel({
     const activeAccount = accounts[activeProvider];
     if (!activeAccount) {
         return (
-            <Card className="panel max-w-xl">
+            <Card className="max-w-xl">
                 <CardHeader>
-                    <CardTitle>Add {providerLabel(activeProvider)}</CardTitle>
+                    <CardTitle>
+                        {m.providers.add(providerLabel(activeProvider))}
+                    </CardTitle>
                 </CardHeader>
                 <CardContent>
                     <ProviderCredentialsForm
@@ -181,20 +196,24 @@ export function AccountPanel({
     const publicProvider = isPublic(activeProvider);
     const issue = accountIssue(activeAccount);
     return (
-        <Card className="panel">
+        <Card>
             <CardHeader>
-                <CardTitle>{providerLabel(activeProvider)}</CardTitle>
+                <CardTitle className="text-lg">
+                    {providerLabel(activeProvider)}
+                </CardTitle>
                 <CardDescription>
-                    {publicProvider ? "Public service" : activeAccount.display}
+                    {publicProvider
+                        ? m.providers.publicService
+                        : activeAccount.display}
                 </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-5">
                 {issue ? <IssueNotice issue={issue} /> : null}
-                <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="grid gap-x-6 gap-y-5 sm:grid-cols-2 xl:grid-cols-4">
                     {publicProvider ? null : (
                         <>
                             <Metric
-                                label="Subscription tier"
+                                label={m.providers.tier}
                                 value={activeAccount.tier}
                             />
                             <SubscriptionMetric
@@ -208,16 +227,16 @@ export function AccountPanel({
                         </>
                     )}
                     <Metric
-                        label="Last refresh"
+                        label={m.providers.lastRefresh}
                         title={formatTime(activeAccount.lastRefreshAt)}
                         value={formatCompactTime(activeAccount.lastRefreshAt)}
                     />
                     <Metric
-                        label="Next refresh"
+                        label={m.providers.nextRefresh}
                         title={formatTime(activeAccount.nextRefreshAt)}
                         value={
                             activeAccount.refreshStatus === "needs_relogin"
-                                ? "Paused"
+                                ? m.providers.paused
                                 : formatCompactTime(activeAccount.nextRefreshAt)
                         }
                     />
@@ -233,7 +252,7 @@ export function AccountPanel({
                                 size="sm"
                                 variant="ghost"
                             >
-                                Cancel
+                                {m.providers.cancel}
                             </Button>
                             <Button
                                 disabled={providerBusy}
@@ -245,7 +264,7 @@ export function AccountPanel({
                                 size="sm"
                                 variant="destructive"
                             >
-                                Confirm removal
+                                {m.providers.confirmRemoval}
                             </Button>
                         </>
                     ) : (
@@ -267,17 +286,18 @@ export function AccountPanel({
                                             : "size-4"
                                     }
                                 />
-                                Refresh
+                                {m.providers.refresh}
                             </Button>
                             <Button
+                                className="text-destructive hover:bg-destructive/[0.06] hover:text-destructive"
                                 disabled={providerBusy || refreshing}
                                 onClick={() =>
                                     setConfirmRemoval(activeProvider)
                                 }
                                 size="sm"
-                                variant="outline"
+                                variant="ghost"
                             >
-                                Remove
+                                {m.providers.remove}
                             </Button>
                         </>
                     )}
@@ -287,7 +307,7 @@ export function AccountPanel({
     );
 }
 
-function ProviderTile({
+function ProviderRow({
     account,
     isPublic,
     nodeCount,
@@ -300,62 +320,74 @@ function ProviderTile({
     onSelect: () => void;
     provider: string;
 }) {
+    const { m } = useI18n();
     const issue = accountIssue(account);
-    const issueText = issue?.tone === "err" ? "text-destructive" : "text-led-warn";
+    const issueText =
+        issue?.tone === "err" ? "text-destructive" : "text-warning-foreground";
     return (
         <button
-            className={`grid content-start gap-1.5 rounded-sm border bg-background/40 p-4 text-left transition-colors hover:border-primary/60 hover:bg-primary/[0.04] ${account ? "border-border" : "border-dashed border-border/80"}`}
+            className="group flex w-full items-center gap-3 px-5 py-3.5 text-left transition-colors hover:bg-muted/70 sm:px-6"
             onClick={onSelect}
             type="button"
         >
-            <span className="flex items-center justify-between gap-3">
+            <span
+                aria-hidden="true"
+                className={`led ${lampClass[accountTone(account)]}`}
+            />
+            <span className="grid min-w-0 flex-1 gap-0.5 sm:grid-cols-[minmax(8rem,14rem)_minmax(0,1fr)] sm:items-baseline sm:gap-4">
                 <strong
-                    className={`font-sans uppercase tracking-[0.06em] ${account ? "" : "text-muted-foreground"}`}
+                    className={`truncate font-medium ${account ? "" : "text-muted-foreground"}`}
                 >
                     {providerLabel(provider)}
                 </strong>
-                <span
-                    aria-hidden="true"
-                    className={`led ${lampClass[accountTone(account)]}`}
-                />
-            </span>
-            <span className="truncate text-xs text-muted-foreground">
-                {!account
-                    ? "Not added"
-                    : isPublic
-                      ? "Public service"
-                      : (account.display ?? "Account connected")}
+                <span className="truncate text-[0.8125rem] text-muted-foreground">
+                    {!account
+                        ? m.providers.notAdded
+                        : isPublic
+                          ? m.providers.publicService
+                          : (account.display ?? m.providers.accountConnected)}
+                </span>
             </span>
             {account ? (
                 issue ? (
-                    <span className={`mt-1 text-xs font-medium ${issueText}`}>
+                    <span
+                        className={`max-w-[40%] truncate text-[0.8125rem] font-medium ${issueText}`}
+                    >
                         {issue.summary}
                     </span>
                 ) : (
-                    <span className="mt-1 font-sans text-sm font-semibold uppercase tracking-[0.08em] text-primary/90">
+                    <span className="shrink-0 text-[0.8125rem] tabular-nums text-muted-foreground">
                         {isPublic ? "" : `${account.tier} · `}
-                        {nodeCount} {nodeCount === 1 ? "node" : "nodes"}
+                        {m.providers.nodeCount(nodeCount)}
                     </span>
                 )
             ) : null}
+            <ChevronRight
+                aria-hidden="true"
+                className="size-4 shrink-0 text-muted-foreground/60 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground"
+            />
         </button>
     );
 }
 
 function IssueNotice({ issue }: { issue: AccountIssue }) {
+    const { m } = useI18n();
     const tone =
         issue.tone === "err"
-            ? "border-destructive/35 bg-destructive/10 text-destructive"
-            : "border-led-warn/35 bg-led-warn/10 text-led-warn";
+            ? "border-destructive/25 bg-destructive/[0.06] text-destructive"
+            : "border-led-warn/30 bg-warning text-warning-foreground";
     return (
         <p
-            className={`flex items-start gap-2.5 rounded-sm border px-3 py-2.5 text-[0.8125rem] leading-5 ${tone}`}
+            className={`flex items-start gap-2.5 rounded-md border px-3 py-2.5 text-sm leading-5 ${tone}`}
             role="status"
         >
             <span aria-hidden="true" className={`led ${lampClass[issue.tone]} mt-1.5`} />
             <span className="min-w-0">
-                <strong className="font-semibold">{issue.summary}.</strong>{" "}
-                <span className="text-foreground/80">{issue.action}</span>
+                <strong className="font-semibold">
+                    {m.health.summary(issue.summary)}
+                </strong>
+                {m.health.gap}
+                <span className="opacity-85">{issue.action}</span>
             </span>
         </p>
     );

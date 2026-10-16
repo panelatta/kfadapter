@@ -5,8 +5,9 @@ import type { StatusResponse } from "@/types";
 import { Field, FormError, selectClassName } from "@/components/forms";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useI18n } from "@/i18n";
 import { describeError } from "@/lib/errors";
-import { providerLabel } from "./providers";
+import { fieldLabel, providerLabel } from "./providers";
 
 export function ProviderCredentialsForm({
     error,
@@ -26,6 +27,7 @@ export function ProviderCredentialsForm({
     providers?: string[];
     providerAuth: StatusResponse["providerAuth"];
 }) {
+    const { m } = useI18n();
     const [values, setValues] = useState<Record<string, string>>({});
     const [provider, setProvider] = useState(fixedProvider ?? "");
     const [submitting, setSubmitting] = useState(false);
@@ -52,11 +54,11 @@ export function ProviderCredentialsForm({
             ),
         );
         if (!selectedProvider || !authSpec) {
-            setLocalError("Choose a provider to add.");
+            setLocalError(m.providers.form.chooseError);
             return;
         }
         if (fields.some(({ key }) => !submittedFields[key])) {
-            setLocalError("Fill in every field.");
+            setLocalError(m.providers.form.fillAll);
             return;
         }
         setSubmitting(true);
@@ -83,7 +85,7 @@ export function ProviderCredentialsForm({
         <form className="grid gap-4" noValidate onSubmit={submit}>
             <FormError message={localError || error || ""} />
             {fixedProvider ? null : (
-                <Field label="Provider" name={providerID}>
+                <Field label={m.providers.form.provider} name={providerID}>
                     <select
                         className={selectClassName}
                         id={providerID}
@@ -95,7 +97,7 @@ export function ProviderCredentialsForm({
                         }}
                         value={provider}
                     >
-                        <option value="">Choose provider…</option>
+                        <option value="">{m.providers.form.choose}</option>
                         {providers.map((id) => (
                             <option key={id} value={id}>
                                 {providerLabel(id)}
@@ -107,7 +109,11 @@ export function ProviderCredentialsForm({
             {fields.map((field) => {
                 const fieldID = `${idPrefix}-${field.key}`;
                 return (
-                    <Field key={field.key} label={field.label} name={fieldID}>
+                    <Field
+                        key={field.key}
+                        label={fieldLabel(field.label)}
+                        name={fieldID}
+                    >
                         <Input
                             autoComplete="off"
                             id={fieldID}
@@ -126,19 +132,19 @@ export function ProviderCredentialsForm({
             })}
             {authSpec && fields.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
-                    Public service. No sign-in needed.
+                    {m.providers.form.noSignIn}
                 </p>
             ) : null}
             <Button className="mt-2 w-full" disabled={submitting} type="submit">
                 {submitting ? (
                     <>
                         <LoaderCircle className="size-4 animate-spin" />
-                        Adding
+                        {m.providers.form.adding}
                     </>
                 ) : fixedProvider ? (
-                    `Add ${providerLabel(fixedProvider)}`
+                    m.providers.add(providerLabel(fixedProvider))
                 ) : (
-                    "Add provider"
+                    m.providers.form.submit
                 )}
             </Button>
         </form>

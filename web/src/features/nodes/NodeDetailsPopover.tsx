@@ -6,6 +6,8 @@ import { FormError } from "@/components/forms";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { providerLabel } from "@/features/accounts/providers";
+import { useI18n } from "@/i18n";
 import { describeError, isSessionProblem } from "@/lib/errors";
 import { NodeDetailsView } from "./NodeDetailsView";
 
@@ -20,6 +22,7 @@ export function NodeDetailsPopover({
     node: NodeRecord;
     onAccessLost: () => void;
 }) {
+    const { m } = useI18n();
     const [open, setOpen] = useState(false);
     const [details, setDetails] = useState<NodeDetails | null>(null);
     const [error, setError] = useState("");
@@ -79,7 +82,7 @@ export function NodeDetailsPopover({
                 <TooltipTrigger asChild>
                     <PopoverTrigger asChild>
                         <Button
-                            aria-label={`Details for ${node.name}`}
+                            aria-label={m.nodes.detailsFor(node.name)}
                             size="icon"
                             variant="ghost"
                         >
@@ -87,26 +90,26 @@ export function NodeDetailsPopover({
                         </Button>
                     </PopoverTrigger>
                 </TooltipTrigger>
-                <TooltipContent>Details</TooltipContent>
+                <TooltipContent>{m.nodes.details}</TooltipContent>
             </Tooltip>
             <PopoverContent
                 align="end"
-                className="panel w-[min(25rem,calc(100vw-2rem))] p-0"
+                className="w-[min(25rem,calc(100vw-2rem))] p-0"
             >
                 <div className="flex flex-col gap-4 py-4">
                     <div className="grid gap-1 px-4">
-                        <h2 className="font-sans text-sm font-semibold uppercase tracking-[0.1em]">
+                        <h2 className="text-[0.9375rem] font-semibold">
                             {node.name}
                         </h2>
-                        <p className="text-xs text-muted-foreground">
-                            {node.group} · {node.provider}
+                        <p className="text-[0.8125rem] text-muted-foreground">
+                            {node.group} · {providerLabel(node.provider)}
                         </p>
                     </div>
                     <div className="px-4">
                         {loading ? (
                             <p className="flex items-center gap-2 text-sm text-muted-foreground">
                                 <LoaderCircle className="size-4 animate-spin" />
-                                Loading details
+                                {m.nodes.loadingDetails}
                             </p>
                         ) : null}
                         {error ? <FormError message={error} /> : null}

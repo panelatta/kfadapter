@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { ApiError } from "./api";
 import { currentConsumerURL, makeApi, nodes, readyStatus, signedOutStatus } from "./test/fixtures";
-import { StatusBadge, stateDetails } from "./features/accounts/StatusBadge";
+import { StatusBadge, stateDetail } from "./features/accounts/StatusBadge";
 
 const accessToken = "console-token-12345";
 
@@ -226,9 +226,9 @@ describe("access token and browser session", () => {
     ["signed_out", "No providers", "Add a provider to load nodes."],
     ["expired", "Expired", "Add the provider again."],
   ] as const)("uses provider-oriented status wording for %s", (state, label, message) => {
-    render(<StatusBadge detail={stateDetails[state]} />);
+    render(<StatusBadge state={state} />);
     expect(screen.getByText(label)).toBeTruthy();
-    expect(stateDetails[state].message).toBe(message);
+    expect(stateDetail(state).message).toBe(message);
   });
 
 

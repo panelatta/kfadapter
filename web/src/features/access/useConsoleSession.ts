@@ -4,15 +4,10 @@ import type { NodeRecord, StatusResponse } from "@/types";
 import { providerLoginStates } from "@/features/accounts/providers";
 import { useProviderActions } from "@/features/accounts/useProviderActions";
 import { useConsoleEvents } from "@/features/events/useConsoleEvents";
+import { messages } from "@/i18n";
 import { describeError, isSessionProblem } from "@/lib/errors";
 import { replaceRoute, routeFromLocation } from "./session";
 import type { Route, SessionState } from "./session";
-
-const tokenChangedSessionLostMessage =
-    "The access token was changed, but this browser could not start a new session. Unlock the console with the new access token.";
-
-const unconfirmedLockMessage =
-    "The console could not confirm the lock with the service. If this browser is shared, reload and lock again.";
 
 export function useConsoleSession(providedApi?: ApiClient) {
     const [api] = useState<ApiClient>(() => providedApi ?? new ApiClient());
@@ -238,7 +233,7 @@ export function useConsoleSession(providedApi?: ApiClient) {
                 } else if (code === "session_unavailable") {
                     // The token changed but the replacement session failed.
                     loseAccessSession();
-                    setLoadError(tokenChangedSessionLostMessage);
+                    setLoadError(messages().access.tokenChangedSessionLost);
                 }
             }
             throw error;
@@ -269,7 +264,7 @@ export function useConsoleSession(providedApi?: ApiClient) {
                     error instanceof ApiError &&
                         error.problem.code === "session_revocation_pending"
                         ? describeError(error)
-                        : unconfirmedLockMessage,
+                        : messages().access.unconfirmedLock,
                 );
         } finally {
             lockPending.current = false;

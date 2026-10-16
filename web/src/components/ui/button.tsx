@@ -5,25 +5,25 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-sm text-[0.8125rem] font-semibold uppercase tracking-[0.08em] transition-[color,background-color,border-color,box-shadow,transform] duration-150 outline-none disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-[color,background-color,border-color,box-shadow] duration-150 outline-none disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
   {
     variants: {
       variant: {
         default:
-          "bg-primary text-primary-foreground shadow-sm hover:bg-primary/90 hover:shadow-[0_0_18px_-4px_var(--primary)] active:translate-y-px",
+          "bg-primary text-primary-foreground shadow-xs hover:bg-primary/90",
         destructive:
-          "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90 hover:shadow-[0_0_18px_-4px_var(--destructive)] active:translate-y-px",
+          "bg-destructive text-destructive-foreground shadow-xs hover:bg-destructive/90",
         outline:
-          "border border-border bg-transparent hover:border-primary/60 hover:bg-primary/10 hover:text-primary active:translate-y-px",
+          "border border-input bg-card text-foreground shadow-xs hover:bg-muted",
         secondary:
-          "bg-secondary text-secondary-foreground shadow-sm hover:bg-accent",
-        ghost: "text-muted-foreground hover:bg-primary/10 hover:text-primary",
-        link: "h-auto p-0 normal-case tracking-normal text-primary underline-offset-4 hover:underline",
+          "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        ghost: "text-muted-foreground hover:bg-muted hover:text-foreground",
+        link: "h-auto p-0 text-primary underline-offset-4 hover:underline",
       },
       size: {
         default: "h-9 px-4 py-2",
-        sm: "h-8 rounded-sm px-3 text-xs",
-        lg: "h-10 rounded-sm px-5",
+        sm: "h-8 px-3 text-[0.8125rem]",
+        lg: "h-10 px-5",
         icon: "size-9",
         "icon-sm": "size-8",
         "icon-lg": "size-10",

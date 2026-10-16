@@ -1,10 +1,13 @@
-import { Copy, RefreshCw } from "lucide-react";
+import { ChevronRight, Copy, RefreshCw } from "lucide-react";
 import type { ApiClient } from "@/api";
 import type { SmartProxyMeasurement, SmartProxyStatus } from "@/types";
 import { selectClassName } from "@/components/forms";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { providerLabel } from "@/features/accounts/providers";
+import { messages, useI18n } from "@/i18n";
 import { formatTime } from "@/lib/time";
+import { cn } from "@/lib/utils";
 import { useSmartProxy } from "./useSmartProxy";
 
 export function SmartProxyCard({
@@ -16,6 +19,7 @@ export function SmartProxyCard({
     getSessionRevision: () => number;
     onAccessLost: () => void;
 }) {
+    const { m } = useI18n();
     const {
         busy,
         configure,
@@ -27,22 +31,26 @@ export function SmartProxyCard({
         status,
     } = useSmartProxy({ api, getSessionRevision, onAccessLost });
     const alert = error || loadError;
+    const lineTone = !status?.enabled
+        ? ""
+        : status.selectedName
+          ? "led--ok"
+          : "led--warn";
 
     return (
-        <Card className="panel">
-            <CardHeader>
-                <CardTitle>Smart SOCKS5 proxy</CardTitle>
-                <CardDescription>
-                    One stable address, automatically routed through the best
-                    measured domestic line.
-                </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-                <div className="flex flex-wrap items-center gap-4">
-                    <label className="flex items-center gap-2 text-sm">
+        <Card>
+            <CardHeader className="pr-24">
+                <CardTitle>{m.smart.title}</CardTitle>
+                <CardDescription>{m.smart.description}</CardDescription>
+                <CardAction className="top-0.5">
+                    <label className="relative inline-flex cursor-pointer items-center gap-2 text-sm has-disabled:cursor-not-allowed has-disabled:opacity-50">
+                        <span className="sr-only sm:not-sr-only sm:text-muted-foreground">
+                            {m.smart.enable}
+                        </span>
                         <input
-                            aria-label="Enable smart SOCKS5 proxy"
+                            aria-label={m.smart.enableLabel}
                             checked={status?.enabled ?? false}
+                            className="peer sr-only"
                             disabled={!status || busy}
                             onChange={(event) =>
                                 configure(
@@ -53,13 +61,33 @@ export function SmartProxyCard({
                             role="switch"
                             type="checkbox"
                         />
-                        Enable smart proxy
+                        <span
+                            aria-hidden="true"
+                            className="relative h-6 w-10 shrink-0 rounded-full bg-input transition-colors after:absolute after:left-0.5 after:top-0.5 after:size-5 after:rounded-full after:bg-card after:shadow-sm after:transition-transform peer-checked:bg-primary peer-checked:after:translate-x-4 peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-ring"
+                        />
                     </label>
-                    <label className="flex items-center gap-2 text-sm">
-                        Probe interval
+                </CardAction>
+            </CardHeader>
+            <CardContent className="grid gap-4">
+                <div className="flex items-start gap-2.5 rounded-lg bg-muted px-4 py-3">
+                    <span
+                        aria-hidden="true"
+                        className={cn(
+                            "led mt-2",
+                            lineTone,
+                            status?.running && "led--warn led--pulse",
+                        )}
+                    />
+                    <p aria-live="polite" className="min-w-0 font-medium">
+                        {selectionSummary(status, Boolean(loadError))}
+                    </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                    <label className="mr-auto flex items-center gap-2 text-sm text-muted-foreground">
+                        {m.smart.interval}
                         <select
-                            aria-label="Smart proxy probe interval"
-                            className={selectClassName}
+                            aria-label={m.smart.intervalLabel}
+                            className={cn(selectClassName, "w-auto text-foreground")}
                             disabled={!status || busy}
                             onChange={(event) =>
                                 configure(
@@ -69,52 +97,45 @@ export function SmartProxyCard({
                             }
                             value={status?.intervalMinutes ?? 30}
                         >
-                            <option value={30}>30 minutes</option>
-                            <option value={60}>60 minutes</option>
+                            <option value={30}>{m.smart.minutes(30)}</option>
+                            <option value={60}>{m.smart.minutes(60)}</option>
                         </select>
                     </label>
                     <Button
                         disabled={!status?.enabled || status.running || busy}
                         onClick={probe}
+                        size="sm"
                         variant="outline"
                     >
                         <RefreshCw
                             className={status?.running ? "animate-spin" : ""}
                         />
-                        {status?.running ? "Probing…" : "Probe now"}
+                        {status?.running ? m.smart.probing : m.smart.probe}
                     </Button>
                     <Button
                         disabled={!status?.enabled || busy}
                         onClick={copyAddress}
+                        size="sm"
                         variant="outline"
                     >
                         <Copy />
-                        Copy smart SOCKS5 address
+                        {m.smart.copyAddress}
                     </Button>
                 </div>
-                <p aria-live="polite" className="text-sm">
-                    {selectionSummary(status, Boolean(loadError))}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                    Tests Bilibili, Xiaohongshu, WeChat and QQ through each
-                    proxy. Ranks by successful sites, then average HTTPS
-                    response time. This measures website responsiveness, not
-                    download bandwidth or in-app call quality. New connections
-                    use the selected line; existing connections keep their
-                    line.
-                </p>
                 {status?.enabled ? (
-                    <p className="text-xs text-muted-foreground">
-                        Last probe: {formatTime(status.lastRunAt)} · Next
-                        probe: {formatTime(status.nextRunAt)}
+                    <p className="text-[0.8125rem] text-muted-foreground">
+                        {m.smart.schedule(
+                            formatTime(status.lastRunAt),
+                            formatTime(status.nextRunAt),
+                        )}
                     </p>
                 ) : null}
                 {status?.enabled && status.incomplete ? (
-                    <p className="text-xs text-muted-foreground">
-                        Only {status.results.length} of {status.candidateCount}{" "}
-                        lines completed this round. Results can be partial
-                        after the 10 minute limit or an account refresh; the
-                        next round rotates through the remaining lines.
+                    <p className="text-[0.8125rem] text-muted-foreground">
+                        {m.smart.incomplete(
+                            status.results.length,
+                            status.candidateCount ?? status.results.length,
+                        )}
                     </p>
                 ) : null}
                 {status && status.results.length > 0 ? (
@@ -125,9 +146,17 @@ export function SmartProxyCard({
                         {alert}
                     </p>
                 ) : null}
-                <p className="text-xs text-muted-foreground" role="status">
+                <p
+                    className="text-[0.8125rem] text-muted-foreground empty:hidden"
+                    role="status"
+                >
                     {message}
                 </p>
+                <div className="border-t border-border pt-4">
+                    <p className="max-w-prose text-[0.8125rem] leading-5 text-muted-foreground">
+                        {m.smart.method}
+                    </p>
+                </div>
             </CardContent>
         </Card>
     );
@@ -137,69 +166,86 @@ function selectionSummary(
     status: SmartProxyStatus | null,
     unavailable: boolean,
 ): string {
-    if (!status)
-        return unavailable
-            ? "Smart proxy status is unavailable. Retrying…"
-            : "Loading smart proxy…";
-    if (!status.enabled) return "Disabled";
-    if (status.selectedName) return `Current line: ${status.selectedName}`;
-    return "Waiting for a usable measured line. New connections are unavailable until a line passes.";
+    const m = messages().smart;
+    if (!status) return unavailable ? m.unavailable : m.loading;
+    if (!status.enabled) return m.disabled;
+    if (status.selectedName) return m.currentLine(status.selectedName);
+    return m.waiting;
 }
 
 function measurementLabel(measurement: SmartProxyMeasurement): string {
+    const m = messages().smart;
     if (measurement.ok) return `${measurement.latencyMs} ms`;
-    if (measurement.error === "timeout") return "Timed out";
-    if (measurement.error === "http_rejected") return "Site rejected request";
-    return "Failed";
+    if (measurement.error === "timeout") return m.timedOut;
+    if (measurement.error === "http_rejected") return m.rejected;
+    return m.failed;
 }
 
 function MeasurementTable({ status }: { status: SmartProxyStatus }) {
+    const { m } = useI18n();
     return (
-        <details>
-            <summary className="cursor-pointer text-sm">
-                Line measurements ({status.results.length})
+        <details className="node-group group rounded-lg border border-border">
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2.5 text-sm font-medium [&::-webkit-details-marker]:hidden">
+                <ChevronRight
+                    aria-hidden="true"
+                    className="node-group__chevron size-4 text-muted-foreground"
+                />
+                {m.smart.measurements(status.results.length)}
             </summary>
-            <div className="mt-3 overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                    <thead>
+            <div className="overflow-x-auto border-t border-border">
+                <table className="w-full text-left text-[0.8125rem] tabular-nums">
+                    <thead className="bg-muted text-muted-foreground">
                         <tr>
-                            <th className="p-2">Line</th>
-                            <th className="p-2">Sites reached</th>
-                            <th className="p-2">Average</th>
+                            <th className="px-3 py-2 font-medium">{m.smart.line}</th>
+                            <th className="px-3 py-2 font-medium">
+                                {m.smart.sitesReached}
+                            </th>
+                            <th className="px-3 py-2 font-medium">{m.smart.average}</th>
                             {status.targets.map((target) => (
-                                <th className="p-2" key={target.name}>
+                                <th className="px-3 py-2 font-medium" key={target.name}>
                                     {target.name}
                                 </th>
                             ))}
                         </tr>
                     </thead>
                     <tbody>
-                        {status.results.map((result) => (
-                            <tr
-                                className="border-t border-border/60"
-                                key={result.nodeId}
-                            >
-                                <td className="p-2">
-                                    {result.nodeId === status.selectedNodeId
-                                        ? "✓ "
-                                        : ""}
-                                    {result.name} ({result.provider})
-                                </td>
-                                <td className="p-2">
-                                    {result.successes}/{status.targets.length}
-                                </td>
-                                <td className="p-2">
-                                    {result.successes
-                                        ? `${result.latencyMs} ms`
-                                        : "Unavailable"}
-                                </td>
-                                {result.measurements.map((measurement) => (
-                                    <td className="p-2" key={measurement.target}>
-                                        {measurementLabel(measurement)}
+                        {status.results.map((result) => {
+                            const selected =
+                                result.nodeId === status.selectedNodeId;
+                            return (
+                                <tr
+                                    className={cn(
+                                        "border-t border-border",
+                                        selected && "bg-success/60",
+                                    )}
+                                    key={result.nodeId}
+                                >
+                                    <td className="px-3 py-2">
+                                        {selected ? "✓ " : ""}
+                                        {result.name}{" "}
+                                        <span className="text-muted-foreground">
+                                            ({providerLabel(result.provider)})
+                                        </span>
                                     </td>
-                                ))}
-                            </tr>
-                        ))}
+                                    <td className="px-3 py-2">
+                                        {result.successes}/{status.targets.length}
+                                    </td>
+                                    <td className="px-3 py-2">
+                                        {result.successes
+                                            ? `${result.latencyMs} ms`
+                                            : m.smart.averageUnavailable}
+                                    </td>
+                                    {result.measurements.map((measurement) => (
+                                        <td
+                                            className="px-3 py-2"
+                                            key={measurement.target}
+                                        >
+                                            {measurementLabel(measurement)}
+                                        </td>
+                                    ))}
+                                </tr>
+                            );
+                        })}
                     </tbody>
                 </table>
             </div>
