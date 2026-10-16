@@ -139,6 +139,10 @@ describe("browser boundary", () => {
       ...[...assetContent.matchAll(/url\(["']?([^"')\s]+)/gi)].map((match) => match[1]),
     ];
     expect(resourceURLs.every((url) => !/^https?:/i.test(url))).toBe(true);
-    expect(`${index}\n${assetContent}`).not.toMatch(/localStorage|sessionStorage/);
+    // The language preference is the one allowed browser storage access;
+    // anything else (secrets above all) must stay out of storage.
+    const allowedStorage = /localStorage\.(?:getItem\("chinadapter\.locale"\)|setItem\("chinadapter\.locale",)/g;
+    expect(assetContent.match(allowedStorage)).toHaveLength(2);
+    expect(`${index}\n${assetContent}`.replace(allowedStorage, "")).not.toMatch(/localStorage|sessionStorage|indexedDB/);
   });
 });

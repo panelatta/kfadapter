@@ -23,9 +23,30 @@ function preferredLocale(): Locale {
         : "en";
 }
 
-// The console never writes browser storage, so a switch lasts until the page
-// reloads; each load starts from the browser's language.
-let current: Locale = preferredLocale();
+/*
+ * The language preference is the only thing the console keeps in browser
+ * storage: it is not a secret and grants nothing. The key stays a literal at
+ * both call sites so the security test can allow exactly these two accesses
+ * in the production bundle and reject any other storage use.
+ */
+function savedLocale(): Locale | null {
+    try {
+        const value = window.localStorage.getItem("chinadapter.locale");
+        return value === "zh" || value === "en" ? value : null;
+    } catch {
+        return null;
+    }
+}
+
+function saveLocale(locale: Locale): void {
+    try {
+        window.localStorage.setItem("chinadapter.locale", locale);
+    } catch {
+        // Without storage the choice lasts until the page reloads.
+    }
+}
+
+let current: Locale = savedLocale() ?? preferredLocale();
 
 function applyDocumentLanguage(locale: Locale) {
     if (typeof document !== "undefined")
@@ -48,11 +69,18 @@ export function intlLocale(locale: Locale = current): string {
     return locale === "zh" ? "zh-CN" : "en-US";
 }
 
+/** Switches the language for this page without remembering it. */
 export function setLocale(locale: Locale): void {
     if (locale === current) return;
     current = locale;
     applyDocumentLanguage(locale);
     for (const listener of listeners) listener();
+}
+
+/** The operator's explicit choice: switches and remembers it. */
+export function chooseLocale(locale: Locale): void {
+    saveLocale(locale);
+    setLocale(locale);
 }
 
 function subscribe(listener: () => void): () => void {
@@ -62,5 +90,5 @@ function subscribe(listener: () => void): () => void {
 
 export function useI18n() {
     const locale = useSyncExternalStore(subscribe, getLocale, getLocale);
-    return { locale, m: catalogs[locale], setLocale };
+    return { locale, m: catalogs[locale], setLocale: chooseLocale };
 }

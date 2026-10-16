@@ -6,8 +6,9 @@ import { getLocale, setLocale } from "./i18n";
 import { makeApi, readyStatus } from "./test/fixtures";
 
 describe("language switch", () => {
-  it("switches the console between English and Chinese without writing browser storage", async () => {
-    const storageWrite = vi.spyOn(Storage.prototype, "setItem");
+  it("switches the console between English and Chinese and remembers only the language", async () => {
+    const setItem = vi.fn();
+    vi.stubGlobal("localStorage", { getItem: () => null, setItem });
     render(<App api={makeApi(readyStatus())} />);
     await screen.findByRole("heading", { name: "Service status" });
 
@@ -17,13 +18,17 @@ describe("language switch", () => {
     expect(await screen.findByRole("heading", { name: "服务状态" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "锁定控制台" })).toBeTruthy();
     expect(document.documentElement.lang).toBe("zh-CN");
-
+    expect(setItem).toHaveBeenLastCalledWith("chinadapter.locale", "zh");
 
     const [chineseSwitcher] = screen.getAllByRole("group", { name: "语言" });
     await userEvent.click(within(chineseSwitcher).getByRole("button", { name: "English" }));
     expect(await screen.findByRole("heading", { name: "Service status" })).toBeTruthy();
     expect(getLocale()).toBe("en");
-    expect(storageWrite).not.toHaveBeenCalled();
+    expect(setItem.mock.calls).toEqual([
+      ["chinadapter.locale", "zh"],
+      ["chinadapter.locale", "en"],
+    ]);
+    vi.unstubAllGlobals();
   });
 
   it("translates service error messages into the selected language", async () => {
