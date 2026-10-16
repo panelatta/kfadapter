@@ -196,7 +196,7 @@ function StatusConsole({
 
     return (
         <main className="min-h-screen bg-background px-4 py-6 text-foreground sm:px-6 lg:px-10">
-            <div className="boot mx-auto grid w-full max-w-6xl gap-6">
+            <div className="boot mx-auto grid w-full max-w-6xl grid-cols-[minmax(0,1fr)] gap-6">
                 <header className="border-b border-dashed border-border pb-5">
                     <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
                         <p className="glow font-sans text-sm font-bold uppercase tracking-[0.34em] text-primary">
