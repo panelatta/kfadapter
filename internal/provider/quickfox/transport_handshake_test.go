@@ -202,7 +202,7 @@ func TestResolveTargetWithoutIPv4ReturnsAddressUnsupported(t *testing.T) {
 				}
 				return test.addresses, test.err
 			}
-			address, err := transport.resolveTarget(context.Background(), "target.example", time.Second)
+			address, err := transport.resolveTarget(context.Background(), "target.example", "", time.Second)
 			if address.IsValid() || !errors.Is(err, provider.ErrAddressUnsupported) {
 				t.Fatalf("IPv4 resolution = %v, %v", address, err)
 			}
@@ -222,15 +222,15 @@ func TestResolveTargetSkipsNonPublicAnswers(t *testing.T) {
 	}
 	transport := NewTransport()
 	transport.lookup = func(context.Context, string, string) ([]netip.Addr, error) { return answers, nil }
-	address, err := transport.resolveTarget(context.Background(), "target.example", time.Second)
+	address, err := transport.resolveTarget(context.Background(), "target.example", "", time.Second)
 	if err != nil || address != netip.MustParseAddr("34.160.111.145") {
 		t.Fatalf("resolved %v, %v", address, err)
 	}
 	answers = answers[:len(answers)-1]
-	if address, err := transport.resolveTarget(context.Background(), "target.example", time.Second); address.IsValid() || !errors.Is(err, provider.ErrAddressUnsupported) {
+	if address, err := transport.resolveTarget(context.Background(), "target.example", "", time.Second); address.IsValid() || !errors.Is(err, provider.ErrAddressUnsupported) {
 		t.Fatalf("non-public answers resolved to %v, %v", address, err)
 	}
-	if address, err := transport.resolveTarget(context.Background(), "192.168.1.1", time.Second); err != nil || address.String() != "192.168.1.1" {
+	if address, err := transport.resolveTarget(context.Background(), "192.168.1.1", "", time.Second); err != nil || address.String() != "192.168.1.1" {
 		t.Fatalf("explicit literal target = %v, %v", address, err)
 	}
 }

@@ -7,8 +7,10 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -78,6 +80,9 @@ type Proxy struct {
 type Provider struct {
 	RequestTimeout  Duration `yaml:"requestTimeout"`
 	RefreshInterval Duration `yaml:"refreshInterval"`
+	// QuickFoxDoH is an optional RFC 8484 resolver URL for QuickFox domain
+	// targets; empty keeps the system resolver.
+	QuickFoxDoH string `yaml:"quickfoxDoH,omitempty"`
 }
 
 type Config struct {
@@ -214,6 +219,11 @@ func (c Config) Validate() error {
 	if err := validateDurationRange("provider.refreshInterval", c.Provider.RefreshInterval.Value(), minRefreshInterval, maxRefreshInterval); err != nil {
 		return err
 	}
+	if c.Provider.QuickFoxDoH != "" {
+		if err := validateHTTPSURL("provider.quickfoxDoH", c.Provider.QuickFoxDoH); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -287,6 +297,15 @@ func isCanonicalPort(port string) bool {
 	}
 	parsedPort, err := strconv.ParseUint(port, 10, 16)
 	return err == nil && parsedPort > 0
+}
+
+func validateHTTPSURL(name, value string) error {
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.Opaque != "" || u.User != nil ||
+		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(value, "#") {
+		return fmt.Errorf("%s must be an HTTPS URL without credentials, query, or fragment", name)
+	}
+	return nil
 }
 
 func validateDurationRange(name string, value, minimum, maximum time.Duration) error {

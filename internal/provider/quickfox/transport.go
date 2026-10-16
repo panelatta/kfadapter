@@ -29,9 +29,12 @@ type lookupNetIPFunc func(context.Context, string, string) ([]netip.Addr, error)
 // Transport implements the observed QuickFox native framed TCP relay for IPv4
 // destinations, and its TCP-carried datagram relay (datagram.go). Streams read
 // the 14-byte control acknowledgement before opening the data connection.
+// Domain targets use the optional node-scoped DoH resolver (doh.go) when
+// configured, and the system resolver otherwise.
 type Transport struct {
 	clock  func() time.Time
 	lookup lookupNetIPFunc
+	doh    *dohResolver
 }
 
 func NewTransport() *Transport {
@@ -57,7 +60,7 @@ func (transport *Transport) RelayStream(ctx context.Context, request provider.Re
 	if err != nil {
 		return err
 	}
-	target, err := transport.resolveTarget(ctx, request.Target.Host, request.HandshakeTimeout)
+	target, err := transport.resolveTarget(ctx, request.Target.Host, request.NodeHost, request.HandshakeTimeout)
 	if err != nil {
 		return err
 	}
@@ -124,7 +127,7 @@ func (transport *Transport) RelayStream(ctx context.Context, request provider.Re
 	return relayXOR(ctx, request.Client, upstream)
 }
 
-func (transport *Transport) resolveTarget(ctx context.Context, host string, timeout time.Duration) (netip.Addr, error) {
+func (transport *Transport) resolveTarget(ctx context.Context, host, node string, timeout time.Duration) (netip.Addr, error) {
 	if address, err := netip.ParseAddr(host); err == nil {
 		if address.Is4() {
 			return address, nil
@@ -136,10 +139,10 @@ func (transport *Transport) resolveTarget(ctx context.Context, host string, time
 	// skipped: forwarding them to the provider relay can never be intended.
 	resolveContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	addresses, err := transport.lookup(resolveContext, "ip4", host)
+	addresses, err := transport.lookupTarget(resolveContext, host, node, timeout)
 	if err != nil {
 		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		if errors.Is(err, errDoHNoAddress) || errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 			return netip.Addr{}, fmt.Errorf("quickfox: target has no IPv4 address: %w: %w", provider.ErrAddressUnsupported, err)
 		}
 		return netip.Addr{}, fmt.Errorf("quickfox: resolve target: %w", err)
@@ -151,6 +154,24 @@ func (transport *Transport) resolveTarget(ctx context.Context, host string, time
 		}
 	}
 	return netip.Addr{}, fmt.Errorf("quickfox: target has no public IPv4 address: %w", provider.ErrAddressUnsupported)
+}
+
+// lookupTarget prefers the DoH resolver scoped to the node's network. Its
+// authoritative answers are final; when it is unavailable the system resolver
+// answers instead, which only loses the node-scoped edge selection.
+func (transport *Transport) lookupTarget(ctx context.Context, host, node string, timeout time.Duration) ([]netip.Addr, error) {
+	if transport.doh != nil {
+		if nodeAddress, err := netip.ParseAddr(node); err == nil && nodeAddress.Unmap().Is4() {
+			addresses, err := transport.doh.lookup(ctx, host, nodeAddress.Unmap(), min(timeout/2, maxDoHBudget))
+			if err == nil || errors.Is(err, errDoHNoAddress) {
+				return addresses, err
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+		}
+	}
+	return transport.lookup(ctx, "ip4", host)
 }
 
 func publicUnicast(address netip.Addr) bool {

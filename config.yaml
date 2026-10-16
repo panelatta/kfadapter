@@ -37,3 +37,7 @@ provider:
   requestTimeout: 15s
   # Background refresh cadence (valid range: 15m through 24h).
   refreshInterval: 2h
+  # Optional RFC 8484 resolver for QuickFox domain targets. Queries carry the
+  # selected node's /24 as EDNS Client Subnet so CDNs answer for the node's
+  # network instead of this host's; failures fall back to the system resolver.
+  # quickfoxDoH: https://223.5.5.5/dns-query

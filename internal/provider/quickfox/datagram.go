@@ -96,7 +96,7 @@ func (transport *Transport) RelayDatagrams(ctx context.Context, request provider
 	}
 	stopCancellation := context.AfterFunc(ctx, closeAll)
 	defer stopCancellation()
-	writer := &datagramWriter{transport: transport, ctx: ctx, upstream: upstream, timeout: request.HandshakeTimeout}
+	writer := &datagramWriter{transport: transport, ctx: ctx, upstream: upstream, node: request.NodeHost, timeout: request.HandshakeTimeout}
 	go func() { results <- watchControl(request.Control) }()
 	go func() { results <- writer.pump(request.Packets) }()
 	go func() { results <- readDatagrams(upstream, request.Packets) }()
@@ -120,6 +120,7 @@ type datagramWriter struct {
 	transport *Transport
 	ctx       context.Context
 	upstream  net.Conn
+	node      string
 	timeout   time.Duration
 	sequence  uint16
 	resolved  map[string]netip.Addr
@@ -216,7 +217,7 @@ func (writer *datagramWriter) resolve(host string) (netip.Addr, bool) {
 	if address, ok := writer.resolved[host]; ok {
 		return address, true
 	}
-	address, err := writer.transport.resolveTarget(writer.ctx, host, writer.timeout)
+	address, err := writer.transport.resolveTarget(writer.ctx, host, writer.node, writer.timeout)
 	if err != nil {
 		return netip.Addr{}, false
 	}

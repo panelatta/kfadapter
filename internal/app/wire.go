@@ -111,10 +111,16 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 		return nil, err
 	}
 	transocksSS, transocksTrojan := transocks.NewTransports(transocksClient)
+	quickfoxTransport := quickfox.NewTransport()
+	if cfg.Provider.QuickFoxDoH != "" {
+		if quickfoxTransport, err = quickfox.NewTransportWithDoH(cfg.Provider.QuickFoxDoH); err != nil {
+			return nil, err
+		}
+	}
 	providers, err := provider.NewRegistry(
 		[]provider.Driver{kuaifanDriver, quickfoxDriver, transocksDriver, baidu.NewDriver(baidu.DriverConfig{})},
 		[]provider.Transport{
-			kuaifan.NewTransport(), kuaifan.NewSPEEDINTransport(), quickfox.NewTransport(),
+			kuaifan.NewTransport(), kuaifan.NewSPEEDINTransport(), quickfoxTransport,
 			transocksSS, transocksTrojan, baidu.NewTransport(),
 		},
 	)
