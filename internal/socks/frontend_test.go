@@ -25,10 +25,12 @@ type frontendSnapshots struct {
 	pin      state.TunnelPin
 	calls    atomic.Int32
 	signedIn bool
+	selector atomic.Pointer[string]
 }
 
-func (source *frontendSnapshots) CompactPin(string, time.Time) (state.TunnelPin, error) {
+func (source *frontendSnapshots) CompactPin(selector string, _ time.Time) (state.TunnelPin, error) {
 	source.calls.Add(1)
+	source.selector.Store(&selector)
 	source.mu.Lock()
 	defer source.mu.Unlock()
 	if !source.signedIn {
@@ -134,6 +136,12 @@ func newFrontendFixture(t *testing.T, transport provider.Transport, maxConnectio
 // newConfiguredFrontendFixture lets configure adjust the server before Serve.
 func newConfiguredFrontendFixture(t *testing.T, transport provider.Transport, maxConnections int, peerIP net.IP, configure func(*Server)) *frontendFixture {
 	t.Helper()
+	return newProtocolFixture(t, transport, maxConnections, peerIP, configure, FrontendSOCKS)
+}
+
+// newProtocolFixture serves frontend on the fixture listener.
+func newProtocolFixture(t *testing.T, transport provider.Transport, maxConnections int, peerIP net.IP, configure func(*Server), frontend Frontend) *frontendFixture {
+	t.Helper()
 	authority, err := credentials.New(bytes.Repeat([]byte{0x42}, 32), "00112233445566778899aabbccddeeff")
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +187,7 @@ func newConfiguredFrontendFixture(t *testing.T, transport provider.Transport, ma
 		serveDone: make(chan error, 1),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { fixture.serveDone <- server.Serve(ctx, listener) }()
+	go func() { fixture.serveDone <- server.ServeFrontend(ctx, listener, frontend) }()
 	t.Cleanup(func() {
 		cancel()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), frontendTestTimeout)

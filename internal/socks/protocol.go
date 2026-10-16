@@ -1,4 +1,5 @@
-// Package socks provides the local SOCKS5 frontend for provider-dispatched transports.
+// Package socks provides the local proxy frontends (SOCKS5, SOCKS5 over TLS,
+// Snell v6 and Shadowsocks 2022) for provider-dispatched transports.
 package socks
 
 import (

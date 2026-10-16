@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { ChevronRight, Copy, RefreshCw } from "lucide-react";
 import type { ApiClient } from "@/api";
 import type { SmartProxyMeasurement, SmartProxyStatus } from "@/types";
@@ -14,16 +15,22 @@ export function SmartProxyCard({
     api,
     getSessionRevision,
     onAccessLost,
+    protocols = ["socks5"],
 }: {
     api: ApiClient;
     getSessionRevision: () => number;
     onAccessLost: () => void;
+    /** Enabled inbound protocols whose Surge line can be copied. */
+    protocols?: readonly string[];
 }) {
     const { m } = useI18n();
+    const [selectedProtocol, setSurgeProtocol] = useState("socks5");
+    const surgeProtocol = protocols.includes(selectedProtocol) ? selectedProtocol : "socks5";
     const {
         busy,
         configure,
         copyAddress,
+        copySurge,
         error,
         loadError,
         message,
@@ -120,6 +127,30 @@ export function SmartProxyCard({
                     >
                         <Copy />
                         {m.smart.copyAddress}
+                    </Button>
+                </div>
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                    <select
+                        aria-label={m.smart.surgeProtocol}
+                        className={cn(selectClassName, "w-auto text-foreground")}
+                        disabled={!status?.enabled || busy}
+                        onChange={(event) => setSurgeProtocol(event.target.value)}
+                        value={surgeProtocol}
+                    >
+                        {protocols.map((protocol) => (
+                            <option key={protocol} value={protocol}>
+                                {m.inbounds.names[protocol] ?? protocol}
+                            </option>
+                        ))}
+                    </select>
+                    <Button
+                        disabled={!status?.enabled || busy}
+                        onClick={() => copySurge(surgeProtocol)}
+                        size="sm"
+                        variant="outline"
+                    >
+                        <Copy />
+                        {m.smart.copySurge}
                     </Button>
                 </div>
                 {status?.enabled ? (

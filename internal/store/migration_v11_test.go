@@ -97,6 +97,9 @@ func TestForkV9AndUpstreamV9MigrateToCurrentSchema(t *testing.T) {
 		rows       []string
 	}{
 		{"upstream-v9", 9, sqliteSchemaV9Statements, nil},
+		{"merged-v11", 11, sqliteSchemaV11Statements, []string{
+			"INSERT INTO smart_proxy_preferences (id,enabled,interval_minutes) VALUES (1,1,30)",
+		}},
 		{"fork-v9", 9, sqliteSchemaForkV9Statements, []string{
 			"INSERT INTO subscription_authority (id,selector_key,proxy_auth_key,account_binding,activated_at_ns) VALUES (1,zeroblob(32),zeroblob(32),zeroblob(32),1)",
 			"INSERT INTO last_good (id,created_at_ns,rendered_subscription) VALUES (1,NULL,'')",
@@ -149,10 +152,11 @@ func TestForkV9AndUpstreamV9MigrateToCurrentSchema(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := domain.SmartProxyPreferences{}
-			if fixture.version == 10 {
+			if fixture.version >= 10 {
 				want = domain.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}
 			}
-			if !loaded.Preferences.RevealEndpoints || loaded.Preferences.SmartProxy != want {
+			// Migrations never enable an inbound protocol by themselves.
+			if !loaded.Preferences.RevealEndpoints || loaded.Preferences.SmartProxy != want || loaded.Preferences.Inbounds != (domain.InboundPreferences{}) {
 				t.Fatalf("migration changed durable preferences: %+v", loaded.Preferences)
 			}
 			if err := validateSQLiteSchema(t.Context(), store.db); err != nil {
@@ -182,5 +186,23 @@ func TestSmartProxyPreferencesRoundTrip(t *testing.T) {
 	}
 	if loaded.Preferences.SmartProxy != (domain.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}) {
 		t.Fatalf("smart proxy preferences not persisted: %+v", loaded.Preferences.SmartProxy)
+	}
+}
+
+func TestInboundPreferencesRoundTrip(t *testing.T) {
+	store, _ := newClockedStore(t)
+	want := domain.InboundPreferences{Snell: true, SocksTLS: true}
+	if _, err := store.Update(t.Context(), func(state *domain.PersistentState) error {
+		state.Preferences.Inbounds = want
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Preferences.Inbounds != want {
+		t.Fatalf("inbound preferences not persisted: %+v", loaded.Preferences.Inbounds)
 	}
 }

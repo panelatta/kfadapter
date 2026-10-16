@@ -34,6 +34,10 @@ func replacePersistentStateTx(ctx context.Context, tx *sql.Tx, state domain.Pers
 	if _, err := tx.ExecContext(ctx, "INSERT INTO smart_proxy_preferences (id, enabled, interval_minutes) VALUES (1, ?, ?)", boolInt(state.Preferences.SmartProxy.Enabled), state.Preferences.SmartProxy.IntervalMinutes); err != nil {
 		return corruptDatabase(err)
 	}
+	inbounds := state.Preferences.Inbounds
+	if _, err := tx.ExecContext(ctx, "INSERT INTO inbound_preferences (id, snell, shadowsocks, socks_tls) VALUES (1, ?, ?, ?)", boolInt(inbounds.Snell), boolInt(inbounds.Shadowsocks), boolInt(inbounds.SocksTLS)); err != nil {
+		return corruptDatabase(err)
+	}
 	excluded := make([]string, 0, len(state.Preferences.ExcludedNodeIDs))
 	for nodeID := range state.Preferences.ExcludedNodeIDs {
 		excluded = append(excluded, nodeID)
@@ -143,6 +147,18 @@ func loadPersistentStateTx(ctx context.Context, tx *sql.Tx) (domain.PersistentSt
 	}
 	if state.Preferences.SmartProxy.Enabled, err = intBool(smartEnabled); err != nil {
 		return domain.PersistentState{}, corruptDatabase(err)
+	}
+	var snell, shadowsocks, socksTLS int64
+	if err := tx.QueryRowContext(ctx, "SELECT snell, shadowsocks, socks_tls FROM inbound_preferences WHERE id = 1").Scan(&snell, &shadowsocks, &socksTLS); err != nil {
+		return domain.PersistentState{}, corruptDatabase(err)
+	}
+	for _, field := range []struct {
+		stored int64
+		value  *bool
+	}{{snell, &state.Preferences.Inbounds.Snell}, {shadowsocks, &state.Preferences.Inbounds.Shadowsocks}, {socksTLS, &state.Preferences.Inbounds.SocksTLS}} {
+		if *field.value, err = intBool(field.stored); err != nil {
+			return domain.PersistentState{}, corruptDatabase(err)
+		}
 	}
 	state.Preferences.ExcludedNodeIDs = make(map[string]bool)
 	excludedRows, err := tx.QueryContext(ctx, "SELECT node_id FROM excluded_node_ids WHERE preference_id = 1")

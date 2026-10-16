@@ -76,10 +76,15 @@ func (a *API) smartProxyDetails(w http.ResponseWriter, r *http.Request) {
 	}
 	address := a.socksAddress(r)
 	link := (&url.URL{Scheme: "socks5", Host: address, User: url.UserPassword(username, password), Fragment: "Smart domestic route"}).String()
+	var profiles []ProxyProfile
+	if a.inbounds != nil {
+		profiles, _ = a.inbounds.SmartProfiles(a.advertisedHost(r))
+	}
 	a.writeJSON(w, http.StatusOK, struct {
-		Address  string `json:"socksAddress"`
-		Username string `json:"socksUsername"`
-		Password string `json:"socksPassword"`
-		URL      string `json:"url"`
-	}{address, username, password, link})
+		Address  string         `json:"socksAddress"`
+		Username string         `json:"socksUsername"`
+		Password string         `json:"socksPassword"`
+		URL      string         `json:"url"`
+		Profiles []ProxyProfile `json:"profiles,omitempty"`
+	}{address, username, password, link, profiles})
 }

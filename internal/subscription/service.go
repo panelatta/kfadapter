@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"unicode/utf8"
 
+	"github.com/oshinop/chinadapter/internal/clientconfig"
 	"github.com/oshinop/chinadapter/internal/credentials"
 	"github.com/oshinop/chinadapter/internal/provider"
 	"github.com/oshinop/chinadapter/internal/state"
@@ -26,6 +27,12 @@ const (
 type ServiceConfig struct {
 	Store        *store.SQLiteStore
 	SocksAddress string
+	// Ports are the inbound listener ports; Ports.SOCKS5 follows SocksAddress.
+	Ports clientconfig.Ports
+	// Inbounds and SmartEnabled report the live console choices; nil means
+	// only SOCKS5 and no automatic route.
+	Inbounds     func() state.InboundPreferences
+	SmartEnabled func() bool
 }
 
 // Service publishes an immutable credential authority and node catalog. No
@@ -33,6 +40,9 @@ type ServiceConfig struct {
 // the control-plane mutation lock.
 type Service struct {
 	socksAddress  string
+	ports         clientconfig.Ports
+	inbounds      func() state.InboundPreferences
+	smartEnabled  func() bool
 	current       atomic.Pointer[catalog]
 	responseSlots chan struct{}
 }
@@ -52,7 +62,10 @@ func NewService(config ServiceConfig) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	service := &Service{socksAddress: config.SocksAddress, responseSlots: make(chan struct{}, subscriptionResponseConcurrency)}
+	service := &Service{
+		socksAddress: config.SocksAddress, ports: config.Ports, inbounds: config.Inbounds, smartEnabled: config.SmartEnabled,
+		responseSlots: make(chan struct{}, subscriptionResponseConcurrency),
+	}
 	if err := service.Update(persistent); err != nil {
 		return nil, err
 	}
@@ -132,7 +145,13 @@ func (service *Service) HandleSubscription(w http.ResponseWriter, r *http.Reques
 	if socksAddress == "" {
 		socksAddress = service.socksAddress
 	}
-	body, _, err := Render(current.nodes, filter, socksAddress, current.identity)
+	var body string
+	var err error
+	if filter.Format == "" && (filter.Protocol == "" || filter.Protocol == clientconfig.SOCKS5) {
+		body, _, err = Render(current.nodes, filter, socksAddress, current.identity)
+	} else {
+		body, _, err = service.renderProfiles(current, filter, socksAddress)
+	}
 	if errors.Is(err, ErrNoEligibleLinks) {
 		writeNotFound(w)
 		return
@@ -147,6 +166,26 @@ func (service *Service) HandleSubscription(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = writeSubscriptionBody(w, body)
+}
+
+func (service *Service) renderProfiles(current *catalog, filter Filter, socksAddress string) (string, int, error) {
+	var inbounds state.InboundPreferences
+	if service.inbounds != nil {
+		inbounds = service.inbounds()
+	}
+	if filter.Protocol != "" && !clientconfig.Enabled(filter.Protocol, inbounds) {
+		return "", 0, ErrNoEligibleLinks
+	}
+	host, port, err := parseAddress(socksAddress)
+	if err != nil {
+		return "", 0, err
+	}
+	ports := service.ports
+	socksPort, _ := strconv.ParseUint(port, 10, 16)
+	ports.SOCKS5 = uint16(socksPort)
+	// The automatic route joins an unfiltered Surge list while it is enabled.
+	smart := filter.Format == FormatSurge && !filter.selectsRows() && service.smartEnabled != nil && service.smartEnabled()
+	return RenderProfiles(current.nodes, filter, Options{Host: host, Ports: ports, Smart: smart}, current.identity)
 }
 
 func writeResponseBusy(w http.ResponseWriter) {
@@ -169,7 +208,7 @@ func parseSubscriptionFilter(rawQuery string) (Filter, bool) {
 		return Filter{}, false
 	}
 	for key := range values {
-		if key != "provider" && key != "group" && key != "name" {
+		if key != "provider" && key != "group" && key != "name" && key != "format" && key != "protocol" {
 			return Filter{}, false
 		}
 	}
@@ -187,7 +226,19 @@ func parseSubscriptionFilter(rawQuery string) (Filter, bool) {
 	if !ok {
 		return Filter{}, false
 	}
-	filter := Filter{Provider: provider.ID(providerValue), Group: group, Name: name}
+	format, ok := singleFilterValue(values, "format", 16)
+	if !ok || format != "" && format != FormatSurge {
+		return Filter{}, false
+	}
+	protocolValue, ok := singleFilterValue(values, "protocol", 16)
+	if !ok {
+		return Filter{}, false
+	}
+	protocol, known := clientconfig.ParseProtocol(protocolValue)
+	if protocolValue != "" && !known {
+		return Filter{}, false
+	}
+	filter := Filter{Provider: provider.ID(providerValue), Group: group, Name: name, Format: format, Protocol: protocol}
 	if providerValue != "" && !filter.Provider.Valid() {
 		return Filter{}, false
 	}

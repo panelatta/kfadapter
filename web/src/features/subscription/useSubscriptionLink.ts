@@ -4,13 +4,31 @@ import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useI18n } from "@/i18n";
 import { compareGroupNames, groupNameCollator } from "@/lib/groups";
 
-export function useSubscriptionLink(eligibleNodes: NodeRecord[], subscriptionURL: string) {
+/** Protocols with a standard URI, the only ones the Base64 format can list. */
+const uriProtocols = new Set(["socks5", "shadowsocks"]);
+
+export function useSubscriptionLink(
+    eligibleNodes: NodeRecord[],
+    subscriptionURL: string,
+    enabledProtocols: readonly string[] = ["socks5"],
+) {
     // The selections are preferences. They apply only while the current nodes
-    // offer them, and come back if a reload makes them available again.
+    // and enabled protocols offer them, and come back if a reload makes them
+    // available again.
     const { m } = useI18n();
     const [selectedProvider, setFilterProvider] = useState("");
     const [selectedGroup, setFilterGroup] = useState("");
     const [filterName, setFilterName] = useState("");
+    const [format, setFormat] = useState<"" | "surge">("");
+    const [selectedProtocol, setProtocol] = useState("socks5");
+    const protocols = useMemo(
+        () =>
+            enabledProtocols.filter(
+                (protocol) => format === "surge" || uriProtocols.has(protocol),
+            ),
+        [enabledProtocols, format],
+    );
+    const protocol = protocols.includes(selectedProtocol) ? selectedProtocol : "socks5";
 
     const nodeProviders = useMemo(
         () =>
@@ -51,11 +69,13 @@ export function useSubscriptionLink(eligibleNodes: NodeRecord[], subscriptionURL
             if (filterGroup) next.searchParams.set("group", filterGroup);
             if (filterName.trim())
                 next.searchParams.set("name", filterName.trim());
+            if (format) next.searchParams.set("format", format);
+            if (protocol !== "socks5") next.searchParams.set("protocol", protocol);
             return next.toString();
         } catch {
             return subscriptionURL;
         }
-    }, [filterGroup, filterName, filterProvider, subscriptionURL]);
+    }, [filterGroup, filterName, filterProvider, format, protocol, subscriptionURL]);
 
     // The copy message belongs to the copied URL and hides once it changes.
     const {
@@ -79,10 +99,15 @@ export function useSubscriptionLink(eligibleNodes: NodeRecord[], subscriptionURL
         filterName,
         filterProvider,
         filteredSubscriptionURL,
+        format,
         nodeProviders,
+        protocol,
+        protocols,
         resetFilters,
         setFilterGroup,
         setFilterName,
         setFilterProvider,
+        setFormat,
+        setProtocol,
     };
 }

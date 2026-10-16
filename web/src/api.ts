@@ -3,6 +3,8 @@ import type {
   AccessStatusResponse,
   AccessTokenChangeInput,
   EventMessage,
+  InboundChoices,
+  InboundsStatus,
   LoginResponse,
   NodeDetails,
   NodeHealth,
@@ -188,6 +190,14 @@ export class ApiClient {
 
   async smartProxyDetails(): Promise<SmartProxyDetails> {
     return this.request<SmartProxyDetails>("/smart-proxy/details");
+  }
+
+  async inbounds(): Promise<InboundsStatus> {
+    return this.request<InboundsStatus>("/inbounds");
+  }
+
+  async configureInbounds(choices: InboundChoices): Promise<InboundsStatus> {
+    return this.request<InboundsStatus>("/inbounds/config", { method: "PUT", body: choices });
   }
 
   /** Downloads the redacted diagnostics report as a JSON blob. */

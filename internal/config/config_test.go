@@ -229,3 +229,31 @@ func TestLoadRejectsMultipleDocumentsAndOversize(t *testing.T) {
 		t.Fatal("expected oversized configuration rejection")
 	}
 }
+
+func TestInboundPortsDefaultAndMustBeDistinct(t *testing.T) {
+	cfg, err := Load(writeConfig(t, validConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Proxy.SnellPort != 10810 || cfg.Proxy.ShadowsocksPort != 10811 || cfg.Proxy.SocksTLSPort != 10812 ||
+		cfg.InboundAddress(cfg.Proxy.SnellPort) != "127.0.0.1:10810" {
+		t.Fatalf("default inbound ports = %+v", cfg.Proxy)
+	}
+	custom := strings.Replace(validConfig, "proxy:\n", "proxy:\n  snellPort: 20000\n  shadowsocksPort: 20001\n  socksTLSPort: 20002\n", 1)
+	if cfg, err := Load(writeConfig(t, custom)); err != nil || cfg.Proxy.SnellPort != 20000 || cfg.Proxy.ShadowsocksPort != 20001 || cfg.Proxy.SocksTLSPort != 20002 {
+		t.Fatalf("custom inbound ports = %+v, %v", cfg.Proxy, err)
+	}
+	for name, line := range map[string]string{
+		"snell on proxy":         "  snellPort: 10808\n",
+		"shadowsocks on console": "  shadowsocksPort: 10809\n",
+		"tls on snell default":   "  socksTLSPort: 10810\n",
+		"invalid inbound port":   "  snellPort: 0\n",
+		"quoted inbound port":    "  socksTLSPort: \"10812\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(writeConfig(t, strings.Replace(validConfig, "proxy:\n", "proxy:\n"+line, 1))); err == nil {
+				t.Fatal("Load accepted conflicting or invalid inbound port")
+			}
+		})
+	}
+}

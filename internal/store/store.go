@@ -22,7 +22,7 @@ import (
 
 const (
 	sqliteStateFileName     = "state.db"
-	sqliteSchemaVersion     = 11
+	sqliteSchemaVersion     = 12
 	MaxPersistentStateBytes = 10 << 20
 	maxSQLiteStateBytes     = MaxPersistentStateBytes + 8<<20
 	maxBrowserSessions      = 4096

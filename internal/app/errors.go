@@ -59,6 +59,8 @@ func (e *problemError) Error() string {
 		return "node snapshot unavailable"
 	case "tcp_probe_timeout":
 		return "TCP reachability check timed out"
+	case "inbound_listen_failed":
+		return "inbound listener could not bind its port"
 	default:
 		return "TCP reachability check failed"
 	}

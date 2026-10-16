@@ -70,7 +70,12 @@ type Management struct {
 }
 
 type Proxy struct {
-	Port             Port     `yaml:"port"`
+	Port Port `yaml:"port"`
+	// The optional inbound protocols each listen on their own fixed port
+	// once enabled in the console.
+	SnellPort        Port     `yaml:"snellPort"`
+	ShadowsocksPort  Port     `yaml:"shadowsocksPort"`
+	SocksTLSPort     Port     `yaml:"socksTLSPort"`
 	DialTimeout      Duration `yaml:"dialTimeout"`
 	HandshakeTimeout Duration `yaml:"handshakeTimeout"`
 }
@@ -142,7 +147,8 @@ func Default() Config {
 			Port: 10809, SessionTTL: Duration(30 * time.Minute),
 		},
 		Proxy: Proxy{
-			Port: 10808, DialTimeout: Duration(10 * time.Second), HandshakeTimeout: Duration(15 * time.Second),
+			Port: 10808, SnellPort: 10810, ShadowsocksPort: 10811, SocksTLSPort: 10812,
+			DialTimeout: Duration(10 * time.Second), HandshakeTimeout: Duration(15 * time.Second),
 		},
 		Provider: Provider{
 			RequestTimeout: Duration(15 * time.Second), RefreshInterval: Duration(2 * time.Hour),
@@ -155,6 +161,11 @@ func (c Config) ManagementAddress() string {
 }
 
 func (c Config) ProxyAddress() string { return net.JoinHostPort(c.ListenAddr, c.Proxy.Port.String()) }
+
+// InboundAddress is the listener address of an optional inbound port.
+func (c Config) InboundAddress(port Port) string {
+	return net.JoinHostPort(c.ListenAddr, port.String())
+}
 
 func (c *Config) applyDefaults() {
 	defaults := Default()
@@ -169,6 +180,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Proxy.Port == 0 {
 		c.Proxy.Port = defaults.Proxy.Port
+	}
+	if c.Proxy.SnellPort == 0 {
+		c.Proxy.SnellPort = defaults.Proxy.SnellPort
+	}
+	if c.Proxy.ShadowsocksPort == 0 {
+		c.Proxy.ShadowsocksPort = defaults.Proxy.ShadowsocksPort
+	}
+	if c.Proxy.SocksTLSPort == 0 {
+		c.Proxy.SocksTLSPort = defaults.Proxy.SocksTLSPort
 	}
 	if c.Proxy.DialTimeout == 0 {
 		c.Proxy.DialTimeout = defaults.Proxy.DialTimeout
@@ -198,6 +218,20 @@ func (c Config) Validate() error {
 	}
 	if c.Management.Port == c.Proxy.Port {
 		return errors.New("management.port and proxy.port must be different")
+	}
+	ports := []struct {
+		name string
+		port Port
+	}{
+		{"management.port", c.Management.Port}, {"proxy.port", c.Proxy.Port}, {"proxy.snellPort", c.Proxy.SnellPort},
+		{"proxy.shadowsocksPort", c.Proxy.ShadowsocksPort}, {"proxy.socksTLSPort", c.Proxy.SocksTLSPort},
+	}
+	for index, first := range ports {
+		for _, second := range ports[index+1:] {
+			if first.port == second.port {
+				return fmt.Errorf("%s and %s must be different", first.name, second.name)
+			}
+		}
 	}
 	if err := validateDurationRange("management.sessionTTL", c.Management.SessionTTL.Value(), minSessionTTL, maxSessionTTL); err != nil {
 		return err

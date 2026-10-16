@@ -1,14 +1,16 @@
-// Package credentials derives installation-scoped subscription and SOCKS credentials.
+// Package credentials derives installation-scoped subscription and proxy credentials.
 package credentials
 
 import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"strings"
+	"sync"
 
 	"github.com/oshinop/chinadapter/internal/provider"
 )
@@ -22,6 +24,11 @@ type Identity struct {
 	initialized    bool
 	subscriptionID string
 	password       string
+
+	certificateOnce sync.Once
+	certificate     *tls.Certificate
+	fingerprint     string
+	certificateErr  error
 }
 
 func New(derivedHash []byte, installationID string) (*Identity, error) {
@@ -79,6 +86,72 @@ func (identity *Identity) SmartCredentials() (Credentials, bool) {
 	}
 	digest := mac(identity.key[:], "chinadapter/smart-user/v1")
 	return Credentials{Username: "a_" + base64.RawURLEncoding.EncodeToString(digest[:12]), Password: identity.password}, true
+}
+
+// ShadowsocksKeySize is the key length of 2022-blake3-aes-128-gcm.
+const ShadowsocksKeySize = 16
+
+// SnellPSK is the route's Snell pre-shared key. Snell feeds the text itself
+// to its key derivation, so the URL-safe Base64 form is the key.
+func (identity *Identity) SnellPSK(route provider.Route) (string, bool) {
+	key, available := identity.routeDigest("chinadapter/snell-psk/v1\x00", route)
+	if !available {
+		return "", false
+	}
+	return base64.RawURLEncoding.EncodeToString(key[:18]), true
+}
+
+// SmartSnellPSK is the Snell pre-shared key of the automatic route.
+func (identity *Identity) SmartSnellPSK() (string, bool) {
+	if identity == nil || !identity.initialized {
+		return "", false
+	}
+	digest := mac(identity.key[:], "chinadapter/snell-smart-psk/v1")
+	return base64.RawURLEncoding.EncodeToString(digest[:18]), true
+}
+
+// ShadowsocksServerKey is the identity PSK shared by every Shadowsocks 2022
+// route; each route adds its own user key.
+func (identity *Identity) ShadowsocksServerKey() ([]byte, bool) {
+	if identity == nil || !identity.initialized {
+		return nil, false
+	}
+	digest := mac(identity.key[:], "chinadapter/ss2022-server/v1")
+	return digest[:ShadowsocksKeySize], true
+}
+
+// ShadowsocksUserKey is the route's Shadowsocks 2022 user PSK.
+func (identity *Identity) ShadowsocksUserKey(route provider.Route) ([]byte, bool) {
+	digest, available := identity.routeDigest("chinadapter/ss2022-user/v1\x00", route)
+	if !available {
+		return nil, false
+	}
+	return digest[:ShadowsocksKeySize], true
+}
+
+// SmartShadowsocksUserKey is the automatic route's Shadowsocks 2022 user PSK.
+func (identity *Identity) SmartShadowsocksUserKey() ([]byte, bool) {
+	if identity == nil || !identity.initialized {
+		return nil, false
+	}
+	digest := mac(identity.key[:], "chinadapter/ss2022-smart-user/v1")
+	return digest[:ShadowsocksKeySize], true
+}
+
+// ShadowsocksPassword renders the multi-user password "serverKey:userKey".
+func ShadowsocksPassword(serverKey, userKey []byte) string {
+	return base64.StdEncoding.EncodeToString(serverKey) + ":" + base64.StdEncoding.EncodeToString(userKey)
+}
+
+func (identity *Identity) routeDigest(label string, route provider.Route) ([sha256.Size]byte, bool) {
+	if identity == nil || !identity.initialized {
+		return [sha256.Size]byte{}, false
+	}
+	key, err := provider.NodeKey(route)
+	if err != nil {
+		return [sha256.Size]byte{}, false
+	}
+	return mac(identity.key[:], label+key), true
 }
 
 func (identity *Identity) AuthenticatePassword(password string) bool {

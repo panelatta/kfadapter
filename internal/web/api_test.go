@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -829,7 +830,7 @@ func TestNodeDetailsReturnsOnlyLocalCredentials(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &details); err != nil {
 		t.Fatal(err)
 	}
-	if details != expected {
+	if !reflect.DeepEqual(details, expected) {
 		t.Fatalf("node details response = %#v", details)
 	}
 	var raw map[string]json.RawMessage

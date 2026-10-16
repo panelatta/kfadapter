@@ -151,10 +151,29 @@ export function useSmartProxy({
         });
     };
 
+    /** Copies the automatic route's Surge line for one enabled protocol. */
+    const copySurge = (protocol: string) => {
+        void run(async (isCurrent) => {
+            const details = await api.smartProxyDetails();
+            if (!isCurrent()) return;
+            const line = details.profiles?.find(
+                (profile) => profile.protocol === protocol,
+            )?.surge;
+            const copied = line ? await copyText(line, isCurrent) : false;
+            if (isCurrent())
+                setMessage(
+                    copied
+                        ? messages().smart.surgeCopied
+                        : messages().smart.copyFailed,
+                );
+        });
+    };
+
     return {
         busy,
         configure,
         copyAddress,
+        copySurge,
         error,
         loadError,
         message,

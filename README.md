@@ -5,18 +5,19 @@ chinadapter 让你借助已经付费的国内 VPN 服务（快帆 KuaiFan、Quic
 - 一个 SOCKS5 入口：每条线路对应一个用户名，所有线路共用一个密码，流量按用户名转发到对应的 provider 节点；
 - 一个 Web 管理控制台：登录 provider 账号、查看节点、探测延迟、复制订阅链接；
 - 一个订阅链接：`/sub/<uuid>`，返回 Base64 编码的 `socks5://` 链接列表，供代理客户端或路由器导入；
-- 一个智能 SOCKS5 入口：定时测速，自动把新连接交给访问国内网站最快的线路。
+- 一个智能 SOCKS5 入口：定时测速，自动把新连接交给访问国内网站最快的线路；
+- 可选的 Snell v6、Shadowsocks 2022 和 SOCKS5-TLS 入口：在控制台按需开启，每种协议占用一个固定端口，同样按线路区分凭据，可直接生成 Surge 配置。
 
 本仓库是 [oshinop/chinadapter](https://github.com/oshinop/chinadapter) 的分支（原名 kfadapter），在上游基础上保留了智能代理、TLS 反向代理、按 digest 固定的镜像以及升级、备份、恢复脚本。镜像发布在 `ghcr.io/panelatta/chinadapter`。
 
-状态（访问令牌校验值、provider 会话、智能代理设置）保存在单个 SQLite 文件 `data/state.db` 中，provider 会话在后台自动续期，重启或重建容器后无需重新登录。
+状态（访问令牌校验值、provider 会话、智能代理设置、入站协议开关）保存在单个 SQLite 文件 `data/state.db` 中，provider 会话在后台自动续期，重启或重建容器后无需重新登录。
 
 ## 订阅链接与凭据
 
 订阅链接和 SOCKS 凭据由安装 ID 与访问令牌派生：
 
 - 登录、登出、更换 provider 账号、增减 provider 或重启，都**不会**改变订阅链接和 SOCKS 凭据；
-- 只有更换访问令牌才会轮换它们：在控制台右上角点击钥匙图标（**Change access token**），输入当前令牌和两次新令牌（16–128 字节）。更换后其他浏览器会被登出，订阅链接、全部 SOCKS 凭据和智能代理地址都会变化，需要把新链接重新导入各个客户端；也可以直接调用 `POST /api/v1/access/token`；
+- 只有更换访问令牌才会轮换它们：在控制台右上角点击钥匙图标（**Change access token**），输入当前令牌和两次新令牌（16–128 字节）。更换后其他浏览器会被登出，订阅链接、全部 SOCKS 凭据、Snell PSK、Shadowsocks 密钥、SOCKS5-TLS 证书指纹和智能代理地址都会变化，需要把新链接重新导入各个客户端；也可以直接调用 `POST /api/v1/access/token`；
 - 节点从目录中消失时其用户名失效，同一线路重新出现后原用户名恢复可用。
 
 ## 智能 SOCKS5 代理
@@ -31,6 +32,37 @@ chinadapter 让你借助已经付费的国内 VPN 服务（快帆 KuaiFan、Quic
 - 自动切换只影响新连接，已建立的连接保留原线路。关闭功能后立即拒绝新的智能连接，已建立的智能连接在最长约 30 秒的复查周期内结束。普通逐节点代理不受开关影响。UDP 能力沿用所选 provider 的支持情况。
 
 智能代理 API 使用现有控制台会话，写操作与其他接口一样受同源保护（`Origin`/`Sec-Fetch-Site`）：`GET /api/v1/smart-proxy`、`PUT /api/v1/smart-proxy/config`、`POST /api/v1/smart-proxy/probe`；SOCKS 凭据仅由按需调用的 `GET /api/v1/smart-proxy/details` 返回。
+
+## 多协议入站：Snell v6、Shadowsocks 2022、SOCKS5-TLS
+
+SOCKS5 始终开启。控制台总览页的 **入站协议** 卡片可以单独开启下面三种协议，开关保存在 SQLite 中，重启后继续生效，默认全部关闭；升级不会自动打开任何新端口。开启时先绑定端口再保存设置，端口被占用会直接报错而不会保存；关闭后立即停止监听，并断开该协议上已建立的连接。
+
+| 协议 | 默认端口（`config.yaml`） | Surge 参数 | 线路如何区分 |
+| --- | --- | --- | --- |
+| SOCKS5 | `proxy.port` = `10808` | `socks5` | 用户名 |
+| Snell v6 | `proxy.snellPort` = `10810` | `snell, version=6, mode=unshaped, reuse=true` | 每条线路一个 PSK |
+| Shadowsocks 2022 | `proxy.shadowsocksPort` = `10811` | `ss, encrypt-method=2022-blake3-aes-128-gcm, password=服务端密钥:用户密钥` | 多用户身份头（EIH），每条线路一个用户密钥 |
+| SOCKS5-TLS | `proxy.socksTLSPort` = `10812` | `socks5-tls` + `server-cert-fingerprint-sha256` | 与 SOCKS5 相同的用户名和密码 |
+
+五个端口（含管理端口）必须互不相同。每个协议都只用 TCP：服务器防火墙需要放行对应的 TCP 端口，例如 `ufw allow 10810/tcp`。
+
+- **Snell v6**：实现 Surge 的 v6 `unshaped` 模式（AES-128-GCM 记录层，不做流量整形，比默认模式吞吐约高 10%），支持 `reuse=true` 的连接复用和 UDP over TCP，不需要开放 UDP 端口。v6 的默认（`default`，PSK 派生的流量整形）模式和 v5 及更早版本不受支持，客户端必须写 `version=6, mode=unshaped`。线路由 PSK 区分，服务端用 Argon2id 逐个尝试已知 PSK；最近用过的 PSK 优先尝试，配合连接复用，常用线路通常只需一次派生。
+- **Shadowsocks 2022**：`2022-blake3-aes-128-gcm`，用 SIP023 扩展身份头实现单端口多用户，带重放保护（时间戳 ±30 秒、60 秒盐值缓存）。只支持 TCP，Surge 中保持 `udp-relay` 关闭；需要 UDP 时用 Snell。
+- **SOCKS5-TLS**：TLS 上的 SOCKS5。证书是由安装身份确定性派生的自签 ECDSA 证书，重启不变，只有更换访问令牌时才会变化；客户端用 `server-cert-fingerprint-sha256` 固定指纹，控制台卡片会显示该指纹。
+
+### 在 Surge 中使用
+
+- **订阅**：订阅卡片新增 **格式** 和 **协议** 选择。`/sub/<uuid>?format=surge&protocol=snell` 返回纯文本的 Surge `[Proxy]` 配置行（每条线路一行，名称自动去重），可以作为策略组的 `policy-path`，也可以导入 Sub-Store；`protocol` 取 `socks5`、`snell`、`shadowsocks`、`socks5-tls`，未开启的协议返回空 404。智能代理开启且未加筛选条件时，列表第一行是"智能线路"。默认的 Base64 格式只列 `socks5://`（以及 `protocol=shadowsocks` 时的 `ss://`），原有订阅链接的内容不变。
+- **单条线路**：节点详情里可以按协议复制 Surge 配置行，Shadowsocks 还可以复制 `ss://` 链接；智能代理卡片可以按协议复制智能线路的 Surge 配置行。
+
+生成的配置行针对回国场景做了以下取舍：
+
+- `block-quic=on`：B 站等视频播放器和浏览器会立即改用 TCP 上的 HTTP/2，而不是在 TCP 隧道里跑 QUIC（UDP 包被塞进 TCP 后会叠加重传，丢包时卡顿更明显，还要先等 QUIC 超时再回退）；
+- `test-url=http://connectivitycheck.platform.hicloud.com/generate_204`：延迟测试走国内地址，测的是线路到国内一侧的连通性，`url-test` 策略组因此能选出真正快的线路；
+- Snell 使用 `reuse=true`，新请求复用已建立的连接，省掉 TCP 握手和密钥派生；记录最大 16 KiB，丢包时不会有过大的记录阻塞后续数据；
+- 所有入站连接开启 TCP keepalive（30 秒空闲后探测），手机切换网络后残留的连接会被及时清理。
+
+入站 API 使用现有控制台会话：`GET /api/v1/inbounds` 返回各协议的端口、开关、监听状态和 TLS 证书指纹，`PUT /api/v1/inbounds/config` 接收 `{snell, shadowsocks, socksTLS}`（端口无法绑定时返回 `409 inbound_listen_failed`）。节点详情和智能代理详情的 `profiles` 字段按已开启的协议返回 Surge 配置行。
 
 ## 部署
 
@@ -48,6 +80,9 @@ chinadapter 让你借助已经付费的国内 VPN 服务（快帆 KuaiFan、Quic
 | `management.publicOrigin` | 无 | TLS 反代的外部 HTTPS origin，例如 `https://console.example.com`；配置后订阅链接使用此地址 |
 | `management.sessionTTL` | `30m` | 浏览器会话时长（1m–24h） |
 | `proxy.port` | `10808` | SOCKS5 端口 |
+| `proxy.snellPort` | `10810` | Snell v6 端口，在控制台开启后才监听 |
+| `proxy.shadowsocksPort` | `10811` | Shadowsocks 2022 端口，在控制台开启后才监听 |
+| `proxy.socksTLSPort` | `10812` | SOCKS5-TLS 端口，在控制台开启后才监听 |
 | `proxy.dialTimeout` | `10s` | 连接上游节点的超时（1s–10s） |
 | `proxy.handshakeTimeout` | `15s` | 上游协议握手超时（1s–1m） |
 | `provider.requestTimeout` | `15s` | 单次 provider API 请求超时（1s–15s） |
@@ -136,7 +171,7 @@ sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY,CHINADAPTER_IMAGE_DIGEST script
 
 脚本会停止旧的 kfadapter 容器，把 `kfadapter_db_data` 做成离线备份（`backups/pre-chinadapter-*.tar.gz`），用新镜像校验后恢复到由 Compose 创建的 `chinadapter_db_data`，再启动新服务并等待健康检查通过。旧卷只读不写；任何一步失败都会停止新服务并重新启动旧容器。成功后脚本会打印清理旧容器和旧卷的命令，确认新服务工作正常后再执行。
 
-迁移会把 kfadapter 的 schema v10 状态升级为 v11：
+迁移会把 kfadapter 的 schema v10 状态升级为 v11（随后在启动时再升级到 v12）：
 
 - **保留**：访问令牌、安装 ID、快帆和 QuickFox 的账号会话与节点（无需重新登录）、排除的节点、智能代理的开关和周期；快帆设备标识保持不变。
 - **变化**：订阅链接和 SOCKS 凭据会轮换一次（凭据派生方式变了），迁移后请把新的订阅链接和智能 SOCKS 地址重新导入客户端；会话 Cookie 改名，每个浏览器需要重新解锁一次控制台。
@@ -160,7 +195,7 @@ sudo scripts/backup-state.sh --offline
 sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY CHINADAPTER_IMAGE_DIGEST=sha256:<当前 digest> scripts/restore-state.sh backups/state-<时间戳>.tar.gz
 ```
 
-当前状态库为 schema v11。恢复时也接受旧版本的归档：kfadapter 的 v9/v10、上游 chinadapter 的 v9 以及更早的 v4–v8。恢复脚本在无网络、只读的容器里用目标镜像的 `validate-state` 校验归档（旧版本会在临时副本上完整迁移一遍），服务启动后再正式迁移到 v11。
+当前状态库为 schema v12（v11 加上入站协议开关，迁移时全部关闭）。恢复时也接受旧版本的归档：v11、kfadapter 的 v9/v10、上游 chinadapter 的 v9 以及更早的 v4–v8。恢复脚本在无网络、只读的容器里用目标镜像的 `validate-state` 校验归档（旧版本会在临时副本上完整迁移一遍），服务启动后再正式迁移到 v12。
 
 在线备份通过 `docker exec` 在服务容器里运行 `./chinadapter backup`：它在一个 SQLite 读事务内完成与 `validate-state` 相同的校验，再把同一事务看到的数据库页原样输出到标准输出，所以得到的一定是某一次已提交的完整状态；持有读锁的时间通常只有几毫秒，期间服务的写入会等待（上限 5 秒）而不是失败。宿主机脚本再核对页数和日志模式，写成与离线备份相同格式的 `tar.gz`，可以直接用 `restore-state.sh` 恢复。容器文件系统保持只读，也不需要额外的挂载。
 
@@ -185,7 +220,7 @@ rootless Docker 或启用 userns-remap 时，用 `CHINADAPTER_HOST_UID` 和 `CHI
 - 进程日志是结构化文本，用 `docker compose logs chinadapter` 查看。启动成功时输出一行 `msg=ready`；启动失败时会输出具体原因，例如配置错误、监听地址不在任何已启用的接口上、状态目录权限不对等。
 - 每次 provider 刷新的成功或失败（只记录错误类别）也会记录到日志。日志不包含密码、令牌、SOCKS 凭据、订阅链接或访问目标。
 - 控制台右上角的下载按钮会导出一份脱敏的诊断报告。
-- 健康检查：`./chinadapter healthcheck` 会同时检查管理端口的 `/healthz` 和 SOCKS 端口，失败时打印原因。
+- 健康检查：`./chinadapter healthcheck` 会同时检查管理端口的 `/healthz` 和 SOCKS 端口，失败时打印原因。可选入站协议的监听状态在控制台的入站协议卡片里查看，开启的协议在日志中输出 `msg="inbound listening"`。
 
 ## 已知限制
 
@@ -193,7 +228,8 @@ rootless Docker 或启用 userns-remap 时，用 `CHINADAPTER_HOST_UID` 和 `CHI
 - **QuickFox 会在本地解析域名。** QuickFox 的隧道协议只能携带 IPv4 地址，所以 SOCKS 客户端请求的域名由 chinadapter 所在主机的 DNS 解析，本地 DNS 服务器能看到这些域名。解析到回环、私有或运营商 NAT 地址的结果会被丢弃。快帆节点不受此限制。
 - **QuickFox 不支持 UDP 和 IPv6 目标**，对应请求会返回 SOCKS 应答码 `0x07` 和 `0x08`。
 - 已建立的 SOCKS 连接每 30 秒复查一次凭据和线路：更换访问令牌、provider 登出或线路下线后，连接会被关闭；provider 正常刷新不会中断连接。
-- 同一客户端 IP 最多同时保持 32 个尚未完成认证的 SOCKS 连接。
+- 同一客户端 IP 最多同时保持 32 个尚未完成认证的连接（所有入站协议合计）。
+- Snell 只支持 v6 的 `unshaped` 模式；Shadowsocks 2022 只支持 TCP。Snell 握手需要用 Argon2id 逐个尝试线路的 PSK，同时进行的尝试数量受 CPU 核数限制；线路很多且客户端不复用连接时，新连接的握手会多出几十毫秒。
 
 ## 开发
 
@@ -219,9 +255,12 @@ govulncheck ./...
 | `internal/accounts` | 多 provider 协调器与独立刷新调度 |
 | `internal/provider` | provider 无关的账号、节点、线路与传输接口 |
 | `internal/provider/kuaifan`、`internal/provider/quickfox` | 两个 provider 的控制面客户端与数据面传输 |
-| `internal/credentials` | 由安装 ID 与访问令牌派生订阅、SOCKS 与智能入口凭据 |
+| `internal/credentials` | 由安装 ID 与访问令牌派生订阅、SOCKS、Snell、Shadowsocks、TLS 证书与智能入口凭据 |
 | `internal/smart` | 智能代理的测速、排名与选线 |
-| `internal/socks` | SOCKS5 / RFC 1929 入口 |
+| `internal/socks` | 入站前端：SOCKS5 / RFC 1929、SOCKS5-TLS、Snell、Shadowsocks 2022，以及共用的线路分发 |
+| `internal/snell` | Snell v6 unshaped 记录层、请求与 UDP over TCP 编解码 |
+| `internal/shadowsocks` | Shadowsocks 2022（多用户身份头）TCP 服务端编解码 |
+| `internal/clientconfig` | 各协议的 Surge 配置行与 URI 渲染 |
 | `internal/state` | 领域类型、聚合校验与运行时快照 |
 | `internal/store` | SQLite 持久化、迁移、浏览器会话、热备份与恢复校验 |
 | `internal/subscription` | 订阅渲染与 `/sub/` 服务 |
