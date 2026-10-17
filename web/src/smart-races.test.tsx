@@ -115,7 +115,7 @@ describe("smart proxy asynchronous state", () => {
     vi.mocked(navigator.clipboard.writeText).mockReturnValueOnce(pending.promise);
     const legacyCopy = vi.fn().mockReturnValue(true);
     Object.defineProperty(document, "execCommand", { configurable: true, value: legacyCopy });
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy smart SOCKS5 address" })));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy smart route SOCKS5 URL" })));
     expect(navigator.clipboard.writeText).toHaveBeenCalledOnce();
     expire();
     await act(async () => pending.reject(new Error("Permission denied")));
@@ -128,9 +128,9 @@ describe("smart proxy asynchronous state", () => {
     vi.mocked(navigator.clipboard.writeText).mockRejectedValueOnce(new Error("Permission denied"));
     const legacyCopy = vi.fn().mockReturnValue(true);
     Object.defineProperty(document, "execCommand", { configurable: true, value: legacyCopy });
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy smart SOCKS5 address" })));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy smart route SOCKS5 URL" })));
     expect(legacyCopy).toHaveBeenCalledWith("copy");
-    expect(screen.getByRole("status").textContent).toBe("Smart SOCKS5 address copied.");
+    expect(screen.getByRole("status").textContent).toBe("Smart route SOCKS5 URL copied.");
     expect(document.querySelector("textarea")).toBeNull();
   });
 
@@ -140,7 +140,7 @@ describe("smart proxy asynchronous state", () => {
     vi.mocked(navigator.clipboard.writeText).mockReturnValueOnce(pending.promise);
     const legacyCopy = vi.fn().mockReturnValue(true);
     Object.defineProperty(document, "execCommand", { configurable: true, value: legacyCopy });
-    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy smart SOCKS5 address" })));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy smart route SOCKS5 URL" })));
     unmount();
     await act(async () => pending.reject(new Error("Permission denied")));
     await act(async () => vi.advanceTimersByTimeAsync(15000));

@@ -104,19 +104,45 @@ describe("inbound protocols", () => {
         expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith("ss://2022-blake3-aes-128-gcm:a%3Ab@127.0.0.1:10811");
     });
 
-    it("copies the smart route's Surge line for the chosen protocol", async () => {
+    it("offers smart route copy buttons for each enabled protocol", async () => {
         const api = makeApi();
         vi.mocked(api.smartProxy).mockResolvedValue({ enabled: true, intervalMinutes: 30, running: false, targets: [], results: [] });
         vi.mocked(api.smartProxyDetails).mockResolvedValue({
             url: "socks5://a:b@127.0.0.1:10808", socksAddress: "127.0.0.1:10808", socksUsername: "a", socksPassword: "b",
-            profiles: [{ protocol: "snell", port: 10810, surge: "智能线路 = snell, 127.0.0.1, 10810, psk=s" }],
+            profiles: [
+                { protocol: "socks5", port: 10808, surge: "智能线路 = socks5, 127.0.0.1, 10808, a, b", uri: "socks5://a:b@127.0.0.1:10808" },
+                { protocol: "snell", port: 10810, surge: "智能线路 = snell, 127.0.0.1, 10810, psk=s" },
+                { protocol: "shadowsocks", port: 10811, surge: "智能线路 = ss, 127.0.0.1, 10811", uri: "ss://2022-blake3-aes-128-gcm:a%3Ab@127.0.0.1:10811" },
+            ],
         });
-        render(<SmartProxyCard api={api} getSessionRevision={() => 0} onAccessLost={() => {}} protocols={["socks5", "snell"]} />);
-        const select = await screen.findByLabelText("Surge protocol");
-        await waitFor(() => expect((select as HTMLSelectElement).disabled).toBe(false));
-        await userEvent.selectOptions(select, "snell");
-        await userEvent.click(screen.getByRole("button", { name: "Copy Surge line" }));
+        const { rerender } = render(<SmartProxyCard api={api} getSessionRevision={() => 0} onAccessLost={() => {}} />);
+        const socks = await screen.findByRole("button", { name: "Copy smart route SOCKS5 URL" });
+        await waitFor(() => expect((socks as HTMLButtonElement).disabled).toBe(false));
+        expect(screen.getByRole("button", { name: "Copy smart route Surge line for SOCKS5" })).toBeTruthy();
+        expect(screen.queryByRole("button", { name: "Copy smart route Surge line for Snell v6" })).toBeNull();
+        expect(screen.queryByRole("button", { name: "Copy smart route ss:// URL" })).toBeNull();
+
+        rerender(<SmartProxyCard api={api} getSessionRevision={() => 0} onAccessLost={() => {}} protocols={["socks5", "snell", "shadowsocks"]} />);
+        await userEvent.click(screen.getByRole("button", { name: "Copy smart route Surge line for Snell v6" }));
         expect(navigator.clipboard.writeText).toHaveBeenCalledWith("智能线路 = snell, 127.0.0.1, 10810, psk=s");
-        expect(await screen.findByText("Smart route Surge line copied.")).toBeTruthy();
+        expect(await screen.findByText("Smart route Surge line for Snell v6 copied.")).toBeTruthy();
+        await userEvent.click(screen.getByRole("button", { name: "Copy smart route ss:// URL" }));
+        expect(navigator.clipboard.writeText).toHaveBeenLastCalledWith("ss://2022-blake3-aes-128-gcm:a%3Ab@127.0.0.1:10811");
+        expect(await screen.findByText("Smart route ss:// URL copied.")).toBeTruthy();
+    });
+
+    it("reports a smart route protocol that the server no longer offers", async () => {
+        const api = makeApi();
+        vi.mocked(api.smartProxy).mockResolvedValue({ enabled: true, intervalMinutes: 30, running: false, targets: [], results: [] });
+        vi.mocked(api.smartProxyDetails).mockResolvedValue({
+            url: "socks5://a:b@127.0.0.1:10808", socksAddress: "127.0.0.1:10808", socksUsername: "a", socksPassword: "b",
+            profiles: [{ protocol: "socks5", port: 10808, surge: "智能线路 = socks5, 127.0.0.1, 10808, a, b" }],
+        });
+        render(<SmartProxyCard api={api} getSessionRevision={() => 0} onAccessLost={() => {}} protocols={["socks5", "socks5-tls"]} />);
+        const tls = await screen.findByRole("button", { name: "Copy smart route Surge line for SOCKS5-TLS" });
+        await waitFor(() => expect((tls as HTMLButtonElement).disabled).toBe(false));
+        await userEvent.click(tls);
+        expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
+        expect((await screen.findByRole("alert")).textContent).toBe("SOCKS5-TLS is not enabled any more. Reload the page and try again.");
     });
 });

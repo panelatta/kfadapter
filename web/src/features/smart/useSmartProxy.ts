@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import type { ApiClient } from "@/api";
-import type { SmartProxyStatus } from "@/types";
+import type { SmartProxyDetails, SmartProxyStatus } from "@/types";
 import { messages } from "@/i18n";
 import { copyText } from "@/lib/clipboard";
 import { describeError, isSessionProblem } from "@/lib/errors";
 
 const pollIntervalMs = 5000;
+
+function profileFor(details: SmartProxyDetails, protocol: string) {
+    return details.profiles?.find((profile) => profile.protocol === protocol);
+}
+
+function protocolName(protocol: string): string {
+    return messages().inbounds.names[protocol] ?? protocol;
+}
 
 /**
  * Polls the smart proxy status and runs one user action at a time. Responses
@@ -136,43 +144,53 @@ export function useSmartProxy({
         });
     };
 
-    /** Fetches the credentials only on demand and never keeps them in state. */
-    const copyAddress = () => {
+    /**
+     * Fetches the credentials only on demand and never keeps them in state.
+     * `pick` returns nothing when the server no longer offers the protocol,
+     * for example after another browser disabled it.
+     */
+    const copyDetail = (
+        pick: (details: SmartProxyDetails) => string | undefined,
+        protocol: string,
+        copiedMessage: string,
+    ) => {
         void run(async (isCurrent) => {
             const details = await api.smartProxyDetails();
             if (!isCurrent()) return;
-            const copied = await copyText(details.url, isCurrent);
+            const value = pick(details);
+            if (!value) {
+                setError(messages().smart.profileUnavailable(protocolName(protocol)));
+                return;
+            }
+            const copied = await copyText(value, isCurrent);
             if (isCurrent())
-                setMessage(
-                    copied
-                        ? messages().smart.copied
-                        : messages().smart.copyFailed,
-                );
+                setMessage(copied ? copiedMessage : messages().smart.copyFailed);
         });
     };
 
+    const copyAddress = () =>
+        copyDetail((details) => details.url, "socks5", messages().smart.socksCopied);
+
+    const copyShadowsocks = () =>
+        copyDetail(
+            (details) => profileFor(details, "shadowsocks")?.uri,
+            "shadowsocks",
+            messages().smart.shadowsocksCopied,
+        );
+
     /** Copies the automatic route's Surge line for one enabled protocol. */
-    const copySurge = (protocol: string) => {
-        void run(async (isCurrent) => {
-            const details = await api.smartProxyDetails();
-            if (!isCurrent()) return;
-            const line = details.profiles?.find(
-                (profile) => profile.protocol === protocol,
-            )?.surge;
-            const copied = line ? await copyText(line, isCurrent) : false;
-            if (isCurrent())
-                setMessage(
-                    copied
-                        ? messages().smart.surgeCopied
-                        : messages().smart.copyFailed,
-                );
-        });
-    };
+    const copySurge = (protocol: string) =>
+        copyDetail(
+            (details) => profileFor(details, protocol)?.surge,
+            protocol,
+            messages().smart.surgeCopied(protocolName(protocol)),
+        );
 
     return {
         busy,
         configure,
         copyAddress,
+        copyShadowsocks,
         copySurge,
         error,
         loadError,

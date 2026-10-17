@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { ChevronRight, Copy, RefreshCw } from "lucide-react";
 import type { ApiClient } from "@/api";
 import type { SmartProxyMeasurement, SmartProxyStatus } from "@/types";
@@ -20,16 +19,15 @@ export function SmartProxyCard({
     api: ApiClient;
     getSessionRevision: () => number;
     onAccessLost: () => void;
-    /** Enabled inbound protocols whose Surge line can be copied. */
+    /** Enabled inbound protocols, in console order; each gets copy buttons. */
     protocols?: readonly string[];
 }) {
     const { m } = useI18n();
-    const [selectedProtocol, setSurgeProtocol] = useState("socks5");
-    const surgeProtocol = protocols.includes(selectedProtocol) ? selectedProtocol : "socks5";
     const {
         busy,
         configure,
         copyAddress,
+        copyShadowsocks,
         copySurge,
         error,
         loadError,
@@ -38,6 +36,7 @@ export function SmartProxyCard({
         status,
     } = useSmartProxy({ api, getSessionRevision, onAccessLost });
     const alert = error || loadError;
+    const copyDisabled = !status?.enabled || busy;
     const lineTone = !status?.enabled
         ? ""
         : status.selectedName
@@ -119,39 +118,42 @@ export function SmartProxyCard({
                         />
                         {status?.running ? m.smart.probing : m.smart.probe}
                     </Button>
-                    <Button
-                        disabled={!status?.enabled || busy}
-                        onClick={copyAddress}
-                        size="sm"
-                        variant="outline"
-                    >
-                        <Copy />
-                        {m.smart.copyAddress}
-                    </Button>
                 </div>
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                    <select
-                        aria-label={m.smart.surgeProtocol}
-                        className={cn(selectClassName, "w-auto text-foreground")}
-                        disabled={!status?.enabled || busy}
-                        onChange={(event) => setSurgeProtocol(event.target.value)}
-                        value={surgeProtocol}
-                    >
-                        {protocols.map((protocol) => (
-                            <option key={protocol} value={protocol}>
-                                {m.inbounds.names[protocol] ?? protocol}
-                            </option>
-                        ))}
-                    </select>
-                    <Button
-                        disabled={!status?.enabled || busy}
-                        onClick={() => copySurge(surgeProtocol)}
-                        size="sm"
-                        variant="outline"
-                    >
-                        <Copy />
-                        {m.smart.copySurge}
-                    </Button>
+                <div className="grid gap-2">
+                    <p className="text-[0.8125rem] text-muted-foreground">
+                        {m.smart.clientLines}
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                        <CopyButton
+                            disabled={copyDisabled}
+                            label={m.smart.copySocksLabel}
+                            onClick={copyAddress}
+                        >
+                            {m.smart.copySocks}
+                        </CopyButton>
+                        {protocols.includes("shadowsocks") ? (
+                            <CopyButton
+                                disabled={copyDisabled}
+                                label={m.smart.copyShadowsocksLabel}
+                                onClick={copyShadowsocks}
+                            >
+                                {m.smart.copyShadowsocks}
+                            </CopyButton>
+                        ) : null}
+                        {protocols.map((protocol) => {
+                            const name = m.inbounds.names[protocol] ?? protocol;
+                            return (
+                                <CopyButton
+                                    disabled={copyDisabled}
+                                    key={protocol}
+                                    label={m.smart.copySurgeLabel(name)}
+                                    onClick={() => copySurge(protocol)}
+                                >
+                                    {m.smart.copySurge(name)}
+                                </CopyButton>
+                            );
+                        })}
+                    </div>
                 </div>
                 {status?.enabled ? (
                     <p className="text-[0.8125rem] text-muted-foreground">
@@ -190,6 +192,31 @@ export function SmartProxyCard({
                 </div>
             </CardContent>
         </Card>
+    );
+}
+
+function CopyButton({
+    children,
+    disabled,
+    label,
+    onClick,
+}: {
+    children: string;
+    disabled: boolean;
+    label: string;
+    onClick: () => void;
+}) {
+    return (
+        <Button
+            aria-label={label}
+            disabled={disabled}
+            onClick={onClick}
+            size="sm"
+            variant="outline"
+        >
+            <Copy />
+            {children}
+        </Button>
     );
 }
 
