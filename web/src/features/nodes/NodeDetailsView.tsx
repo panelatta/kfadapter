@@ -10,6 +10,8 @@ export function NodeDetailsView({ details }: { details: NodeDetails }) {
     const socksURL = `socks5://${encodeURIComponent(details.socksUsername)}:${encodeURIComponent(details.socksPassword)}@${details.socksAddress}`;
     const { message: copyMessage, copy } = useCopyStatus();
     const profiles = details.profiles ?? [];
+    // Profiles list the enabled protocols; a server without them serves SOCKS5.
+    const socks5 = !details.profiles || profiles.some((profile) => profile.protocol === "socks5");
     const shadowsocks = profiles.find((profile) => profile.protocol === "shadowsocks" && profile.uri);
 
     return (
@@ -34,15 +36,17 @@ export function NodeDetailsView({ details }: { details: NodeDetails }) {
                     />
                 </dl>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
-                <Button
-                    onClick={() => void copy(socksURL, m.nodes.socksCopied)}
-                    size="sm"
-                    variant="outline"
-                >
-                    <Copy className="size-4" />
-                    {m.nodes.copySocks}
-                </Button>
+            <div className="flex flex-wrap items-center gap-3 empty:hidden">
+                {socks5 ? (
+                    <Button
+                        onClick={() => void copy(socksURL, m.nodes.socksCopied)}
+                        size="sm"
+                        variant="outline"
+                    >
+                        <Copy className="size-4" />
+                        {m.nodes.copySocks}
+                    </Button>
+                ) : null}
                 {shadowsocks?.uri ? (
                     <Button
                         aria-label={m.nodes.copyShadowsocksLabel}

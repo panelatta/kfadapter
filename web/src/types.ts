@@ -117,6 +117,7 @@ export interface InboundsStatus {
 }
 
 export interface InboundChoices {
+  socks5: boolean;
   snell: boolean;
   shadowsocks: boolean;
   socksTLS: boolean;

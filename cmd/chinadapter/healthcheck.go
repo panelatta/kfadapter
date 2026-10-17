@@ -3,18 +3,19 @@ package main
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"time"
 )
 
+// healthcheck asks the management endpoint's /healthz. It does not dial the
+// SOCKS5 port, which the console can turn off; a failed SOCKS5 accept loop
+// ends the daemon instead.
 func healthcheck(arguments []string) error {
 	cfg, err := loadConfig(arguments)
 	if err != nil {
 		return err
 	}
 	managementURL := "http://" + cfg.ManagementAddress() + "/healthz"
-	proxyAddress := cfg.ProxyAddress()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, managementURL, nil)
@@ -30,9 +31,5 @@ func healthcheck(arguments []string) error {
 	if response.StatusCode != http.StatusOK {
 		return errors.New("management endpoint not live")
 	}
-	connection, err := (&net.Dialer{}).DialContext(ctx, "tcp", proxyAddress)
-	if err != nil {
-		return err
-	}
-	return connection.Close()
+	return nil
 }

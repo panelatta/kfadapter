@@ -124,13 +124,15 @@ export function SmartProxyCard({
                         {m.smart.clientLines}
                     </p>
                     <div className="flex flex-wrap gap-2">
-                        <CopyButton
-                            disabled={copyDisabled}
-                            label={m.smart.copySocksLabel}
-                            onClick={copyAddress}
-                        >
-                            {m.smart.copySocks}
-                        </CopyButton>
+                        {protocols.includes("socks5") ? (
+                            <CopyButton
+                                disabled={copyDisabled}
+                                label={m.smart.copySocksLabel}
+                                onClick={copyAddress}
+                            >
+                                {m.smart.copySocks}
+                            </CopyButton>
+                        ) : null}
                         {protocols.includes("shadowsocks") ? (
                             <CopyButton
                                 disabled={copyDisabled}

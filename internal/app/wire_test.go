@@ -180,7 +180,9 @@ func TestPersistedProviderSessionRestoresAcrossAdapterRestart(t *testing.T) {
 	defer func() {
 		adapter.runtime.Stop()
 		_ = adapter.httpListener.Close()
-		_ = adapter.socksListener.Close()
+		for _, listener := range adapter.inbounds.bound {
+			_ = listener.Close()
+		}
 		_ = adapter.store.Close(context.Background())
 	}()
 	if adapter.manager.State() == state.StateSignedOut {

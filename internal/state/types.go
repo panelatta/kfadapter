@@ -337,12 +337,14 @@ func (p SmartProxyPreferences) Valid() bool {
 	return p.IntervalMinutes == 30 || p.IntervalMinutes == 60 || (!p.Enabled && p.IntervalMinutes == 0)
 }
 
-// InboundPreferences enable the optional inbound protocols. SOCKS5 is always
-// served; every other protocol is off until the console enables it.
+// InboundPreferences choose the served inbound protocols. SOCKS5 is on until
+// the console turns it off, so the zero value keeps it served; every other
+// protocol is off until the console enables it.
 type InboundPreferences struct {
-	Snell       bool `json:"snell"`
-	Shadowsocks bool `json:"shadowsocks"`
-	SocksTLS    bool `json:"socksTLS"`
+	SOCKS5Disabled bool `json:"socks5Disabled"`
+	Snell          bool `json:"snell"`
+	Shadowsocks    bool `json:"shadowsocks"`
+	SocksTLS       bool `json:"socksTLS"`
 }
 
 // Preferences are durable, non-secret user choices. ExcludedNodeIDs does not

@@ -85,7 +85,7 @@ func newTestInboundManager(t *testing.T, initial state.InboundPreferences, block
 		Server: server, Store: store, Initial: initial,
 		Ports: clientconfig.Ports{SOCKS5: 10808, Snell: 10810, Shadowsocks: 10811, SOCKS5TLS: 10812},
 		Addresses: map[clientconfig.Protocol]string{
-			clientconfig.Snell: "snell", clientconfig.Shadowsocks: "shadowsocks", clientconfig.SOCKS5TLS: "tls",
+			clientconfig.SOCKS5: "socks5", clientconfig.Snell: "snell", clientconfig.Shadowsocks: "shadowsocks", clientconfig.SOCKS5TLS: "tls",
 		},
 		Listen: func(_, address string) (net.Listener, error) {
 			if blocked[address] {
@@ -100,12 +100,13 @@ func newTestInboundManager(t *testing.T, initial state.InboundPreferences, block
 	return manager, server, store
 }
 
-func runInbounds(t *testing.T, manager *InboundManager) {
+func runInbounds(t *testing.T, manager *InboundManager) <-chan error {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
 	done := make(chan struct{})
 	go func() {
-		_ = manager.Run(ctx)
+		result <- manager.Run(ctx)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -118,7 +119,7 @@ func runInbounds(t *testing.T, manager *InboundManager) {
 		started := manager.ctx != nil
 		manager.mu.Unlock()
 		if started {
-			return
+			return result
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("inbound manager did not start")
@@ -151,9 +152,9 @@ func waitForFrontends(t *testing.T, server *fakeInboundServer, want map[socks.Fr
 func TestInboundManagerStartsEnabledProtocolsAndReportsBindFailures(t *testing.T) {
 	manager, server, _ := newTestInboundManager(t, state.InboundPreferences{Snell: true, SocksTLS: true}, map[string]bool{"tls": true})
 	runInbounds(t, manager)
-	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSnell: true})
+	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSOCKS: true, socks.FrontendSnell: true})
 	statuses := manager.Status()
-	if len(statuses) != 4 || statuses[0].Protocol != "socks5" || !statuses[0].Listening {
+	if len(statuses) != 4 || statuses[0].Protocol != "socks5" || !statuses[0].Enabled || !statuses[0].Listening || statuses[0].Port != 10808 {
 		t.Fatalf("statuses = %+v", statuses)
 	}
 	for _, status := range statuses[1:] {
@@ -180,7 +181,7 @@ func TestInboundManagerConfigureBindsBeforePersisting(t *testing.T) {
 	if err := manager.Configure(t.Context(), state.InboundPreferences{Snell: true, SocksTLS: true}); err != nil {
 		t.Fatal(err)
 	}
-	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSnell: true, socks.FrontendSOCKSTLS: true})
+	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSOCKS: true, socks.FrontendSnell: true, socks.FrontendSOCKSTLS: true})
 	if store.saved.Preferences.Inbounds != (state.InboundPreferences{Snell: true, SocksTLS: true}) || manager.Preferences() != store.saved.Preferences.Inbounds {
 		t.Fatalf("persisted = %+v, live = %+v", store.saved.Preferences.Inbounds, manager.Preferences())
 	}
@@ -215,7 +216,7 @@ func TestInboundManagerConfigureBindsBeforePersisting(t *testing.T) {
 	if err := manager.Configure(t.Context(), state.InboundPreferences{}); err != nil {
 		t.Fatal(err)
 	}
-	waitForFrontends(t, server, map[socks.Frontend]bool{})
+	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSOCKS: true})
 	for _, status := range manager.Status()[1:] {
 		if status.Enabled || status.Listening {
 			t.Fatalf("disabled protocol still served: %+v", status)
@@ -232,5 +233,107 @@ func TestInboundManagerConfigureBeforeRunOnlyPersists(t *testing.T) {
 		t.Fatal("configure before Run bound a listener")
 	}
 	runInbounds(t, manager)
-	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendShadowsocks: true})
+	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSOCKS: true, socks.FrontendShadowsocks: true})
+}
+
+func TestInboundManagerTurnsSOCKS5OffAndOn(t *testing.T) {
+	manager, server, store := newTestInboundManager(t, state.InboundPreferences{}, nil)
+	runInbounds(t, manager)
+	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSOCKS: true})
+	if err := manager.Configure(t.Context(), state.InboundPreferences{SOCKS5Disabled: true, Snell: true}); err != nil {
+		t.Fatal(err)
+	}
+	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSnell: true})
+	if status := manager.Status()[0]; status.Protocol != "socks5" || status.Enabled || status.Listening || status.Problem != "" {
+		t.Fatalf("disabled socks5 = %+v", status)
+	}
+	if !store.saved.Preferences.Inbounds.SOCKS5Disabled {
+		t.Fatal("disabled socks5 was not persisted")
+	}
+	if err := manager.Configure(t.Context(), state.InboundPreferences{Snell: true}); err != nil {
+		t.Fatal(err)
+	}
+	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSOCKS: true, socks.FrontendSnell: true})
+}
+
+func TestInboundManagerServesTheListenerBoundAtStartup(t *testing.T) {
+	blocked := map[string]bool{}
+	manager, server, _ := newTestInboundManager(t, state.InboundPreferences{}, blocked)
+	if err := manager.Bind(clientconfig.SOCKS5); err != nil {
+		t.Fatal(err)
+	}
+	bound := manager.bound[clientconfig.SOCKS5]
+	// Run must serve the bound listener instead of binding again.
+	blocked["socks5"] = true
+	runInbounds(t, manager)
+	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSOCKS: true})
+	manager.mu.Lock()
+	served := manager.running[clientconfig.SOCKS5].listener
+	manager.mu.Unlock()
+	if served != bound {
+		t.Fatal("Run bound SOCKS5 again instead of serving the startup listener")
+	}
+
+	// A listener bound for a protocol that was turned off before Run closes.
+	off, _, _ := newTestInboundManager(t, state.InboundPreferences{}, nil)
+	if err := off.Bind(clientconfig.SOCKS5); err != nil {
+		t.Fatal(err)
+	}
+	unused := off.bound[clientconfig.SOCKS5]
+	if err := off.Configure(t.Context(), state.InboundPreferences{SOCKS5Disabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if connection, err := net.Dial("tcp", unused.Addr().String()); err == nil {
+		_ = connection.Close()
+		t.Fatal("unused SOCKS5 listener still accepts")
+	}
+}
+
+func TestInboundManagerEndsRunWhenSOCKS5StopsAccepting(t *testing.T) {
+	manager, server, _ := newTestInboundManager(t, state.InboundPreferences{Snell: true}, nil)
+	result := runInbounds(t, manager)
+	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSOCKS: true, socks.FrontendSnell: true})
+	listener := func(protocol clientconfig.Protocol) net.Listener {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return manager.running[protocol].listener
+	}
+
+	// Another protocol's broken accept loop leaves the daemon running.
+	_ = listener(clientconfig.Snell).Close()
+	select {
+	case err := <-result:
+		t.Fatalf("Run ended after the Snell accept loop: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	_ = listener(clientconfig.SOCKS5).Close()
+	select {
+	case err := <-result:
+		if err == nil || errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want an accept loop failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run kept going after the SOCKS5 accept loop stopped")
+	}
+}
+
+func TestInboundManagerLeavesFlowsToShutdownDrain(t *testing.T) {
+	manager, server, _ := newTestInboundManager(t, state.InboundPreferences{Snell: true}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	waitForFrontends(t, server, map[socks.Frontend]bool{socks.FrontendSOCKS: true, socks.FrontendSnell: true})
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v", err)
+	}
+	waitForFrontends(t, server, map[socks.Frontend]bool{})
+	server.mu.Lock()
+	forced := server.closed
+	server.mu.Unlock()
+	// CloseListener also ends a listener's flows; stopping Run must not.
+	if forced != 0 {
+		t.Fatalf("Run closed %d listeners with their flows", forced)
+	}
 }

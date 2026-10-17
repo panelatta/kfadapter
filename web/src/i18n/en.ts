@@ -160,6 +160,10 @@ export const en = {
             surge: "Surge lines",
         },
         protocol: "Protocol",
+        noProtocol:
+            "No inbound protocol is enabled. Turn one on in the Inbound protocols card.",
+        noBase64Protocol:
+            "Base64 links list only SOCKS5 or Shadowsocks 2022. Turn one of them on, or choose Surge lines.",
         surgeHint:
             "In Surge, use the link as a policy group's policy-path, or import it into Sub-Store.",
     },
@@ -174,14 +178,13 @@ export const en = {
             "socks5-tls": "SOCKS5-TLS",
         } as Record<string, string>,
         details: {
-            socks5: "Always on · username and password",
+            socks5: "Username and password · the default subscription link",
             snell: "unshaped · connection reuse · UDP over TCP",
             shadowsocks: "2022-blake3-aes-128-gcm · multi-user keys",
             "socks5-tls": "SOCKS5 over TLS · pinned certificate",
         } as Record<string, string>,
         port: (port: number) => `TCP ${port}`,
         enableLabel: (name: string) => `Enable ${name}`,
-        alwaysOn: "Always on",
         listening: "Listening",
         off: "Off",
         listenFailed: "Port unavailable",

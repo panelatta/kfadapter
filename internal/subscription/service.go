@@ -147,7 +147,9 @@ func (service *Service) HandleSubscription(w http.ResponseWriter, r *http.Reques
 	}
 	var body string
 	var err error
-	if filter.Format == "" && (filter.Protocol == "" || filter.Protocol == clientconfig.SOCKS5) {
+	if !clientconfig.Enabled(filter.protocol(), service.inboundPreferences()) {
+		err = ErrNoEligibleLinks
+	} else if filter.Format == "" && filter.protocol() == clientconfig.SOCKS5 {
 		body, _, err = Render(current.nodes, filter, socksAddress, current.identity)
 	} else {
 		body, _, err = service.renderProfiles(current, filter, socksAddress)
@@ -168,14 +170,16 @@ func (service *Service) HandleSubscription(w http.ResponseWriter, r *http.Reques
 	_, _ = writeSubscriptionBody(w, body)
 }
 
+// inboundPreferences returns the live console choices; without them only
+// SOCKS5 is served.
+func (service *Service) inboundPreferences() state.InboundPreferences {
+	if service.inbounds == nil {
+		return state.InboundPreferences{}
+	}
+	return service.inbounds()
+}
+
 func (service *Service) renderProfiles(current *catalog, filter Filter, socksAddress string) (string, int, error) {
-	var inbounds state.InboundPreferences
-	if service.inbounds != nil {
-		inbounds = service.inbounds()
-	}
-	if filter.Protocol != "" && !clientconfig.Enabled(filter.Protocol, inbounds) {
-		return "", 0, ErrNoEligibleLinks
-	}
 	host, port, err := parseAddress(socksAddress)
 	if err != nil {
 		return "", 0, err

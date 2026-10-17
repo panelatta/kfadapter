@@ -2,7 +2,7 @@
 
 chinadapter 让你借助已经付费的国内 VPN 服务（快帆 KuaiFan、QuickFox）从海外访问国内网络。它把这些账号变成一个可以放在家里运行的 SOCKS5 代理：
 
-- 一个 SOCKS5 入口：每条线路对应一个用户名，所有线路共用一个密码，流量按用户名转发到对应的 provider 节点；
+- 一个 SOCKS5 入口（默认开启，可在控制台关闭）：每条线路对应一个用户名，所有线路共用一个密码，流量按用户名转发到对应的 provider 节点；
 - 一个 Web 管理控制台：登录 provider 账号、查看节点、探测延迟、复制订阅链接；
 - 一个订阅链接：`/sub/<uuid>`，返回 Base64 编码的 `socks5://` 链接列表，供代理客户端或路由器导入；
 - 一个智能入口：定时测速，自动把新连接交给访问国内网站最快的线路，每种已开启的入站协议都可以使用；
@@ -35,7 +35,9 @@ chinadapter 让你借助已经付费的国内 VPN 服务（快帆 KuaiFan、Quic
 
 ## 多协议入站：Snell v6、Shadowsocks 2022、SOCKS5-TLS
 
-SOCKS5 始终开启。控制台总览页的 **入站协议** 卡片可以单独开启下面三种协议，开关保存在 SQLite 中，重启后继续生效，默认全部关闭；升级不会自动打开任何新端口。开启时先绑定端口再保存设置，端口被占用会直接报错而不会保存；关闭后立即停止监听，并断开该协议上已建立的连接。
+控制台总览页的 **入站协议** 卡片可以单独开关下面四种协议，开关保存在 SQLite 中，重启后继续生效。SOCKS5 默认开启，其余三种默认关闭；升级不会自动打开任何新端口，也不会关闭 SOCKS5。开启时先绑定端口再保存设置，端口被占用会直接报错而不会保存；关闭后立即停止监听，并断开该协议上已建立的连接。
+
+关闭 SOCKS5 后，默认的订阅链接（Base64 `socks5://` 列表）和所有 `protocol=socks5` 的订阅都返回空 404，控制台也不再显示 SOCKS5 链接；路由器等只认 SOCKS5 订阅的客户端会因此失效，需要改用其他协议的订阅。SOCKS5-TLS 有自己的开关，不受影响。SOCKS5 开启时，端口在启动阶段就绑定，被占用会让服务启动失败，这和以前一样。
 
 | 协议 | 默认端口（`config.yaml`） | Surge 参数 | 线路如何区分 |
 | --- | --- | --- | --- |
@@ -52,7 +54,7 @@ SOCKS5 始终开启。控制台总览页的 **入站协议** 卡片可以单独�
 
 ### 在 Surge 中使用
 
-- **订阅**：订阅卡片新增 **格式** 和 **协议** 选择。`/sub/<uuid>?format=surge&protocol=snell` 返回纯文本的 Surge `[Proxy]` 配置行（每条线路一行，名称自动去重），可以作为策略组的 `policy-path`，也可以导入 Sub-Store；`protocol` 取 `socks5`、`snell`、`shadowsocks`、`socks5-tls`，未开启的协议返回空 404。智能代理开启且未加筛选条件时，列表第一行是"智能线路"。默认的 Base64 格式只列 `socks5://`（以及 `protocol=shadowsocks` 时的 `ss://`），原有订阅链接的内容不变。
+- **订阅**：订阅卡片新增 **格式** 和 **协议** 选择。`/sub/<uuid>?format=surge&protocol=snell` 返回纯文本的 Surge `[Proxy]` 配置行（每条线路一行，名称自动去重），可以作为策略组的 `policy-path`，也可以导入 Sub-Store；`protocol` 取 `socks5`、`snell`、`shadowsocks`、`socks5-tls`，未开启的协议返回空 404。智能代理开启且未加筛选条件时，列表第一行是"智能线路"。默认的 Base64 格式只列 `socks5://`（以及 `protocol=shadowsocks` 时的 `ss://`），原有订阅链接的内容不变；关闭 SOCKS5 后，订阅卡片会改用已开启的其他协议生成链接。
 - **单条线路**：节点详情里可以按协议复制 Surge 配置行，Shadowsocks 还可以复制 `ss://` 链接；智能代理卡片同样按已开启的协议列出 Surge 配置行和 `ss://` 链接的复制按钮。
 
 生成的配置行针对回国场景做了以下取舍：
@@ -62,7 +64,7 @@ SOCKS5 始终开启。控制台总览页的 **入站协议** 卡片可以单独�
 - Snell 使用 `reuse=true`，新请求复用已建立的连接，省掉 TCP 握手和密钥派生；记录最大 16 KiB，丢包时不会有过大的记录阻塞后续数据；
 - 所有入站连接开启 TCP keepalive（30 秒空闲后探测），手机切换网络后残留的连接会被及时清理。
 
-入站 API 使用现有控制台会话：`GET /api/v1/inbounds` 返回各协议的端口、开关、监听状态和 TLS 证书指纹，`PUT /api/v1/inbounds/config` 接收 `{snell, shadowsocks, socksTLS}`（端口无法绑定时返回 `409 inbound_listen_failed`）。节点详情和智能代理详情的 `profiles` 字段按已开启的协议返回 Surge 配置行。
+入站 API 使用现有控制台会话：`GET /api/v1/inbounds` 返回各协议的端口、开关、监听状态和 TLS 证书指纹，`PUT /api/v1/inbounds/config` 接收 `{socks5, snell, shadowsocks, socksTLS}`（`socks5` 可省略，省略时保持原状；端口无法绑定时返回 `409 inbound_listen_failed`）。节点详情和智能代理详情的 `profiles` 字段按已开启的协议返回 Surge 配置行。
 
 ## 部署
 
@@ -172,7 +174,7 @@ sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY,CHINADAPTER_IMAGE_DIGEST script
 
 脚本会停止旧的 kfadapter 容器，把 `kfadapter_db_data` 做成离线备份（`backups/pre-chinadapter-*.tar.gz`），用新镜像校验后恢复到由 Compose 创建的 `chinadapter_db_data`，再启动新服务并等待健康检查通过。旧卷只读不写；任何一步失败都会停止新服务并重新启动旧容器。成功后脚本会打印清理旧容器和旧卷的命令，确认新服务工作正常后再执行。
 
-迁移会把 kfadapter 的 schema v10 状态升级为 v11（随后在启动时再升级到 v12）：
+迁移会把 kfadapter 的 schema v10 状态升级为 v11（随后在启动时再升级到 v13）：
 
 - **保留**：访问令牌、安装 ID、快帆和 QuickFox 的账号会话与节点（无需重新登录）、排除的节点、智能代理的开关和周期；快帆设备标识保持不变。
 - **变化**：订阅链接和 SOCKS 凭据会轮换一次（凭据派生方式变了），迁移后请把新的订阅链接和智能 SOCKS 地址重新导入客户端；会话 Cookie 改名，每个浏览器需要重新解锁一次控制台。
@@ -196,7 +198,7 @@ sudo scripts/backup-state.sh --offline
 sudo --preserve-env=CHINADAPTER_IMAGE_REPOSITORY CHINADAPTER_IMAGE_DIGEST=sha256:<当前 digest> scripts/restore-state.sh backups/state-<时间戳>.tar.gz
 ```
 
-当前状态库为 schema v12（v11 加上入站协议开关，迁移时全部关闭）。恢复时也接受旧版本的归档：v11、kfadapter 的 v9/v10、上游 chinadapter 的 v9 以及更早的 v4–v8。恢复脚本在无网络、只读的容器里用目标镜像的 `validate-state` 校验归档（旧版本会在临时副本上完整迁移一遍），服务启动后再正式迁移到 v12。
+当前状态库为 schema v13（v12 的入站协议开关加上 SOCKS5 开关；迁移时 SOCKS5 保持开启，其余协议保持原样，从 v11 及更早版本迁移时全部关闭）。恢复时也接受旧版本的归档：v12、v11、kfadapter 的 v9/v10、上游 chinadapter 的 v9 以及更早的 v4–v8。恢复脚本在无网络、只读的容器里用目标镜像的 `validate-state` 校验归档（旧版本会在临时副本上完整迁移一遍），服务启动后再正式迁移到 v13。
 
 在线备份通过 `docker exec` 在服务容器里运行 `./chinadapter backup`：它在一个 SQLite 读事务内完成与 `validate-state` 相同的校验，再把同一事务看到的数据库页原样输出到标准输出，所以得到的一定是某一次已提交的完整状态；持有读锁的时间通常只有几毫秒，期间服务的写入会等待（上限 5 秒）而不是失败。宿主机脚本再核对页数和日志模式，写成与离线备份相同格式的 `tar.gz`，可以直接用 `restore-state.sh` 恢复。容器文件系统保持只读，也不需要额外的挂载。
 
@@ -221,7 +223,7 @@ rootless Docker 或启用 userns-remap 时，用 `CHINADAPTER_HOST_UID` 和 `CHI
 - 进程日志是结构化文本，用 `docker compose logs chinadapter` 查看。启动成功时输出一行 `msg=ready`；启动失败时会输出具体原因，例如配置错误、监听地址不在任何已启用的接口上、状态目录权限不对等。
 - 每次 provider 刷新的成功或失败（只记录错误类别）也会记录到日志。日志不包含密码、令牌、SOCKS 凭据、订阅链接或访问目标。
 - 控制台右上角的下载按钮会导出一份脱敏的诊断报告。
-- 健康检查：`./chinadapter healthcheck` 会同时检查管理端口的 `/healthz` 和 SOCKS 端口，失败时打印原因。可选入站协议的监听状态在控制台的入站协议卡片里查看，开启的协议在日志中输出 `msg="inbound listening"`。
+- 健康检查：`./chinadapter healthcheck` 检查管理端口的 `/healthz`，失败时打印原因。SOCKS5 可以在控制台关闭，所以健康检查不再连 SOCKS 端口；SOCKS5 开启时其监听循环出错会让服务退出并由 Compose 重启。各入站协议的监听状态在控制台的入站协议卡片里查看，开启的协议在日志中输出 `msg="inbound listening"`。
 
 ## 已知限制
 

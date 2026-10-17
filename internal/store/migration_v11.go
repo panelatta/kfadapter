@@ -81,7 +81,7 @@ func migrateSQLiteV11ToV12(ctx context.Context, db *sql.DB) error {
 	}
 	defer tx.Rollback()
 	for _, query := range []string{
-		sqliteSchemaStatements[sqliteSchemaTables["inbound_preferences"]],
+		sqliteSchemaV12Statements[sqliteSchemaTables["inbound_preferences"]],
 		"INSERT INTO inbound_preferences (id, snell, shadowsocks, socks_tls) VALUES (1, 0, 0, 0)",
 		"UPDATE schema_version SET version = 12 WHERE id = 1",
 	} {
@@ -90,4 +90,35 @@ func migrateSQLiteV11ToV12(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return corruptDatabase(tx.Commit())
+}
+
+// migrateSQLiteV12ToV13 adds the SOCKS5 switch, on, so an upgrade keeps
+// serving SOCKS5. SQLite stores the extended table definition, which is the
+// current one.
+func migrateSQLiteV12ToV13(ctx context.Context, db *sql.DB) error {
+	if err := validateSQLiteSchemaDefinition(ctx, db, 12, sqliteSchemaTables, sqliteSchemaV12Statements); err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return corruptDatabase(err)
+	}
+	defer tx.Rollback()
+	for _, query := range []string{
+		"ALTER TABLE inbound_preferences ADD COLUMN socks5 INTEGER NOT NULL DEFAULT 1",
+		"UPDATE schema_version SET version = 13 WHERE id = 1",
+	} {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return corruptDatabase(err)
+		}
+	}
+	return corruptDatabase(tx.Commit())
+}
+
+// migrateSQLiteV11ToCurrent finishes every migration path that reached v11.
+func migrateSQLiteV11ToCurrent(ctx context.Context, db *sql.DB) error {
+	if err := migrateSQLiteV11ToV12(ctx, db); err != nil {
+		return err
+	}
+	return migrateSQLiteV12ToV13(ctx, db)
 }

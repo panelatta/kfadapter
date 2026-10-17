@@ -18,6 +18,8 @@ func (inboundProblem) HTTPStatus() int { return http.StatusConflict }
 type fakeInbounds struct {
 	mu        sync.Mutex
 	choices   InboundChoices
+	socks5Off bool
+	noneOn    bool
 	configErr error
 	hosts     []string
 }
@@ -26,7 +28,7 @@ func (f *fakeInbounds) Status() InboundsStatus {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return InboundsStatus{TLSFingerprint: "ab", Inbounds: []InboundStatus{
-		{Protocol: "socks5", Port: 10808, Enabled: true, Listening: true},
+		{Protocol: "socks5", Port: 10808, Enabled: !f.socks5Off, Listening: !f.socks5Off},
 		{Protocol: "snell", Port: 10810, Enabled: f.choices.Snell, Listening: f.choices.Snell},
 	}}
 }
@@ -38,6 +40,7 @@ func (f *fakeInbounds) Configure(_ context.Context, choices InboundChoices) erro
 		return f.configErr
 	}
 	f.choices = choices
+	f.socks5Off = !choices.SOCKS5
 	return nil
 }
 
@@ -45,10 +48,18 @@ func (f *fakeInbounds) NodeProfiles(nodeID, host string) ([]ProxyProfile, error)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.hosts = append(f.hosts, host)
+	if f.noneOn {
+		return []ProxyProfile{}, nil
+	}
 	return []ProxyProfile{{Protocol: "snell", Port: 10810, Surge: nodeID + " = snell, " + host + ", 10810, psk=x"}}, nil
 }
 
 func (f *fakeInbounds) SmartProfiles(host string) ([]ProxyProfile, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.noneOn {
+		return []ProxyProfile{}, nil
+	}
 	return []ProxyProfile{{Protocol: "snell", Port: 10810, Surge: "智能线路 = snell, " + host + ", 10810, psk=y"}}, nil
 }
 
@@ -76,8 +87,16 @@ func TestInboundsAPIRequiresSessionAndConfiguresChoices(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil || len(status.Inbounds) != 2 || !status.Inbounds[1].Enabled {
 		t.Fatalf("configure status = %+v, %v", status, err)
 	}
-	if inbounds.choices != (InboundChoices{Snell: true, SocksTLS: true}) {
+	// A body without socks5, from a console that predates the SOCKS5
+	// switch, keeps SOCKS5 as it is.
+	if inbounds.choices != (InboundChoices{SOCKS5: true, Snell: true, SocksTLS: true}) {
 		t.Fatalf("choices = %+v", inbounds.choices)
+	}
+	if response := request(api, http.MethodPut, "/api/v1/inbounds/config", `{"socks5":false,"snell":true,"shadowsocks":false,"socksTLS":false}`, cookie, testOrigin); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `{"protocol":"socks5","port":10808,"enabled":false,"listening":false}`) {
+		t.Fatalf("disable socks5 = %d %s", response.Code, response.Body.String())
+	}
+	if response := request(api, http.MethodPut, "/api/v1/inbounds/config", `{"snell":true,"shadowsocks":false,"socksTLS":false}`, cookie, testOrigin); response.Code != http.StatusOK || inbounds.choices.SOCKS5 {
+		t.Fatalf("configure without socks5 turned it back on: %+v", inbounds.choices)
 	}
 	inbounds.configErr = inboundProblem{}
 	if response := request(api, http.MethodPut, "/api/v1/inbounds/config", `{"snell":false,"shadowsocks":true,"socksTLS":false}`, cookie, testOrigin); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "inbound_listen_failed") {
@@ -99,11 +118,29 @@ func TestDetailsCarryInboundProfilesForAdvertisedHost(t *testing.T) {
 	cookie := establish(t, api)
 	response := request(api, http.MethodGet, "/api/v1/nodes/node-alpha/details", "", cookie, "")
 	var details NodeDetails
-	if err := json.Unmarshal(response.Body.Bytes(), &details); err != nil || len(details.Profiles) != 1 || details.Profiles[0].Surge != "node-alpha = snell, 127.0.0.1, 10810, psk=x" {
+	if err := json.Unmarshal(response.Body.Bytes(), &details); err != nil || details.Profiles == nil || len(*details.Profiles) != 1 || (*details.Profiles)[0].Surge != "node-alpha = snell, 127.0.0.1, 10810, psk=x" {
 		t.Fatalf("node details = %d %s", response.Code, response.Body.String())
 	}
 	smartResponse := request(api, http.MethodGet, "/api/v1/smart-proxy/details", "", cookie, "")
 	if smartResponse.Code != http.StatusOK || !strings.Contains(smartResponse.Body.String(), "智能线路 = snell, 127.0.0.1, 10810") {
 		t.Fatalf("smart details = %d %s", smartResponse.Code, smartResponse.Body.String())
+	}
+}
+
+// With every protocol off, details say so with an empty list, which the
+// console tells apart from a server without inbound status.
+func TestDetailsListNoProfilesWhenEveryProtocolIsOff(t *testing.T) {
+	inbounds := &fakeInbounds{noneOn: true}
+	backend := &fakeBackend{nodeDetails: NodeDetails{ID: "node-alpha", Name: "Alpha", SocksUsername: "u", SocksPassword: "p"}}
+	smart := &fakeSmartProxy{enabled: true, interval: 30}
+	api, err := NewAPI(testConfig(), Dependencies{Backend: backend, Subscriptions: newFakeSubscriptions(), Inbounds: inbounds, Smart: smart})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := establish(t, api)
+	for _, path := range []string{"/api/v1/nodes/node-alpha/details", "/api/v1/smart-proxy/details"} {
+		if response := request(api, http.MethodGet, path, "", cookie, ""); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"profiles":[]`) {
+			t.Errorf("%s = %d %s", path, response.Code, response.Body.String())
+		}
 	}
 }

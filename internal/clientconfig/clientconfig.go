@@ -43,7 +43,7 @@ func ParseProtocol(value string) (Protocol, bool) {
 func Enabled(protocol Protocol, preferences state.InboundPreferences) bool {
 	switch protocol {
 	case SOCKS5:
-		return true
+		return !preferences.SOCKS5Disabled
 	case Snell:
 		return preferences.Snell
 	case Shadowsocks:

@@ -95,21 +95,27 @@ func TestForkV9AndUpstreamV9MigrateToCurrentSchema(t *testing.T) {
 		version    int
 		statements []string
 		rows       []string
+		inbounds   domain.InboundPreferences
 	}{
-		{"upstream-v9", 9, sqliteSchemaV9Statements, nil},
+		{"upstream-v9", 9, sqliteSchemaV9Statements, nil, domain.InboundPreferences{}},
 		{"merged-v11", 11, sqliteSchemaV11Statements, []string{
 			"INSERT INTO smart_proxy_preferences (id,enabled,interval_minutes) VALUES (1,1,30)",
-		}},
+		}, domain.InboundPreferences{}},
+		// v13 keeps the v12 switches and adds SOCKS5, on.
+		{"fork-v12", 12, sqliteSchemaV12Statements, []string{
+			"INSERT INTO smart_proxy_preferences (id,enabled,interval_minutes) VALUES (1,1,30)",
+			"INSERT INTO inbound_preferences (id,snell,shadowsocks,socks_tls) VALUES (1,1,0,1)",
+		}, domain.InboundPreferences{Snell: true, SocksTLS: true}},
 		{"fork-v9", 9, sqliteSchemaForkV9Statements, []string{
 			"INSERT INTO subscription_authority (id,selector_key,proxy_auth_key,account_binding,activated_at_ns) VALUES (1,zeroblob(32),zeroblob(32),zeroblob(32),1)",
 			"INSERT INTO last_good (id,created_at_ns,rendered_subscription) VALUES (1,NULL,'')",
 			"INSERT INTO subscription_account_roster (provider_id,authority_id,account_digest) VALUES ('kuaifan',1,zeroblob(32))",
-		}},
+		}, domain.InboundPreferences{}},
 		{"fork-v10", 10, sqliteSchemaForkV10Statements, []string{
 			"INSERT INTO subscription_authority (id,selector_key,proxy_auth_key,account_binding,activated_at_ns) VALUES (1,zeroblob(32),zeroblob(32),NULL,1)",
 			"INSERT INTO last_good (id,created_at_ns,rendered_subscription) VALUES (1,NULL,'')",
 			"INSERT INTO smart_proxy_preferences (id,enabled,interval_minutes) VALUES (1,1,30)",
-		}},
+		}, domain.InboundPreferences{}},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
 			directory := t.TempDir()
@@ -142,6 +148,10 @@ func TestForkV9AndUpstreamV9MigrateToCurrentSchema(t *testing.T) {
 			if err := os.Chmod(path, 0600); err != nil {
 				t.Fatal(err)
 			}
+			// Restore validation migrates a private copy of the archive.
+			if err := ValidateSQLiteFile(t.Context(), path); err != nil {
+				t.Fatalf("restore validation rejected v%d: %v", fixture.version, err)
+			}
 			store, err := NewSQLiteStore(directory)
 			if err != nil {
 				t.Fatal(err)
@@ -155,8 +165,9 @@ func TestForkV9AndUpstreamV9MigrateToCurrentSchema(t *testing.T) {
 			if fixture.version >= 10 {
 				want = domain.SmartProxyPreferences{Enabled: true, IntervalMinutes: 30}
 			}
-			// Migrations never enable an inbound protocol by themselves.
-			if !loaded.Preferences.RevealEndpoints || loaded.Preferences.SmartProxy != want || loaded.Preferences.Inbounds != (domain.InboundPreferences{}) {
+			// Migrations keep SOCKS5 on and never enable another inbound
+			// protocol by themselves.
+			if !loaded.Preferences.RevealEndpoints || loaded.Preferences.SmartProxy != want || loaded.Preferences.Inbounds != fixture.inbounds {
 				t.Fatalf("migration changed durable preferences: %+v", loaded.Preferences)
 			}
 			if err := validateSQLiteSchema(t.Context(), store.db); err != nil {
@@ -191,7 +202,7 @@ func TestSmartProxyPreferencesRoundTrip(t *testing.T) {
 
 func TestInboundPreferencesRoundTrip(t *testing.T) {
 	store, _ := newClockedStore(t)
-	want := domain.InboundPreferences{Snell: true, SocksTLS: true}
+	want := domain.InboundPreferences{SOCKS5Disabled: true, Snell: true, SocksTLS: true}
 	if _, err := store.Update(t.Context(), func(state *domain.PersistentState) error {
 		state.Preferences.Inbounds = want
 		return nil

@@ -26,8 +26,10 @@ var sqliteSchemaStatements = func() []string {
 	// The kfadapter fork's v10 definition, kept byte-identical so its
 	// databases migrate without rebuilding this table.
 	statements = append(statements, `CREATE TABLE smart_proxy_preferences (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES preferences(id) ON DELETE CASCADE, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL)`)
-	// Schema v12 (fork only): which optional inbound protocols are enabled.
-	statements = append(statements, `CREATE TABLE inbound_preferences (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES preferences(id) ON DELETE CASCADE, snell INTEGER NOT NULL, shadowsocks INTEGER NOT NULL, socks_tls INTEGER NOT NULL)`)
+	// Fork only: which inbound protocols are served. Schema v12 added the
+	// table; v13 appended socks5, and this is byte-identical to the
+	// definition SQLite stores after that ALTER TABLE ADD COLUMN.
+	statements = append(statements, `CREATE TABLE inbound_preferences (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES preferences(id) ON DELETE CASCADE, snell INTEGER NOT NULL, shadowsocks INTEGER NOT NULL, socks_tls INTEGER NOT NULL, socks5 INTEGER NOT NULL DEFAULT 1)`)
 	return statements
 }()
 

@@ -42,7 +42,6 @@ type Daemon struct {
 	httpServer         *http.Server
 	httpListener       net.Listener
 	socksServer        *socks.Server
-	socksListener      net.Listener
 	inbounds           *InboundManager
 	startupLog         io.Writer
 	version            string
@@ -164,6 +163,7 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 	inboundManager, err := NewInboundManager(InboundConfig{
 		Server: socksServer, Store: store, Ports: inboundPorts, Initial: persistent.Preferences.Inbounds,
 		Addresses: map[clientconfig.Protocol]string{
+			clientconfig.SOCKS5:      proxyAddress,
 			clientconfig.Snell:       cfg.InboundAddress(cfg.Proxy.SnellPort),
 			clientconfig.Shadowsocks: cfg.InboundAddress(cfg.Proxy.ShadowsocksPort),
 			clientconfig.SOCKS5TLS:   cfg.InboundAddress(cfg.Proxy.SocksTLSPort),
@@ -226,12 +226,14 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 	if err != nil {
 		return nil, err
 	}
-	socksListener, err := net.Listen("tcp", proxyAddress)
-	if err != nil {
-		_ = httpListener.Close()
-		return nil, err
+	// An enabled SOCKS5 port is bound now, so a busy port fails the start.
+	if clientconfig.Enabled(clientconfig.SOCKS5, inboundManager.Preferences()) {
+		if err := inboundManager.Bind(clientconfig.SOCKS5); err != nil {
+			_ = httpListener.Close()
+			return nil, err
+		}
 	}
-	return &Daemon{runtime: runtimeFacade, smart: smartService, manager: manager, store: store, httpServer: server, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, inbounds: inboundManager, startupLog: os.Stdout, version: version, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
+	return &Daemon{runtime: runtimeFacade, smart: smartService, manager: manager, store: store, httpServer: server, httpListener: httpListener, socksServer: socksServer, inbounds: inboundManager, startupLog: os.Stdout, version: version, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
 }
 
 func validateListenInterface(listen string) error {
@@ -312,11 +314,10 @@ func (d *Daemon) Run(ctx context.Context) (result error) {
 		}
 	}()
 	supervisor, err := newAdapterSupervisor([]lifecycle.Worker{
-		{Name: "proxy", Run: d.runSOCKS, Shutdown: d.shutdownSOCKS},
+		{Name: "proxy", Run: d.runInbounds, Shutdown: d.shutdownSOCKS},
 		{Name: "management", Run: d.runWeb, Shutdown: d.shutdownWeb},
 		{Name: "accounts", Run: d.runtime.RunAccounts, Shutdown: func(context.Context) error { d.runtime.Stop(); return nil }},
 		{Name: "smart-proxy", Run: d.runSmartProxy},
-		{Name: "inbounds", Run: d.runInbounds},
 		{Name: "watchdog", Run: lifecycle.Watchdog(10*time.Second, 3, d.watchdog)},
 	})
 	if err != nil {
@@ -327,14 +328,6 @@ func (d *Daemon) Run(ctx context.Context) (result error) {
 		slog.New(slog.NewTextHandler(d.startupLog, nil)).Info("ready", "version", d.version, "management", d.managementEndpoint, "proxy", d.proxyEndpoint)
 	}
 	return supervisor.Run(ctx)
-}
-
-func (d *Daemon) runSOCKS(ctx context.Context) error {
-	err := d.socksServer.Serve(ctx, d.socksListener)
-	if err == nil && ctx.Err() != nil {
-		return ctx.Err()
-	}
-	return err
 }
 
 func (d *Daemon) shutdownSOCKS(ctx context.Context) error {

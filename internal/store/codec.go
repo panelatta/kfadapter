@@ -35,7 +35,7 @@ func replacePersistentStateTx(ctx context.Context, tx *sql.Tx, state domain.Pers
 		return corruptDatabase(err)
 	}
 	inbounds := state.Preferences.Inbounds
-	if _, err := tx.ExecContext(ctx, "INSERT INTO inbound_preferences (id, snell, shadowsocks, socks_tls) VALUES (1, ?, ?, ?)", boolInt(inbounds.Snell), boolInt(inbounds.Shadowsocks), boolInt(inbounds.SocksTLS)); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO inbound_preferences (id, snell, shadowsocks, socks_tls, socks5) VALUES (1, ?, ?, ?, ?)", boolInt(inbounds.Snell), boolInt(inbounds.Shadowsocks), boolInt(inbounds.SocksTLS), boolInt(!inbounds.SOCKS5Disabled)); err != nil {
 		return corruptDatabase(err)
 	}
 	excluded := make([]string, 0, len(state.Preferences.ExcludedNodeIDs))
@@ -148,18 +148,20 @@ func loadPersistentStateTx(ctx context.Context, tx *sql.Tx) (domain.PersistentSt
 	if state.Preferences.SmartProxy.Enabled, err = intBool(smartEnabled); err != nil {
 		return domain.PersistentState{}, corruptDatabase(err)
 	}
-	var snell, shadowsocks, socksTLS int64
-	if err := tx.QueryRowContext(ctx, "SELECT snell, shadowsocks, socks_tls FROM inbound_preferences WHERE id = 1").Scan(&snell, &shadowsocks, &socksTLS); err != nil {
+	var snell, shadowsocks, socksTLS, socks5 int64
+	if err := tx.QueryRowContext(ctx, "SELECT snell, shadowsocks, socks_tls, socks5 FROM inbound_preferences WHERE id = 1").Scan(&snell, &shadowsocks, &socksTLS, &socks5); err != nil {
 		return domain.PersistentState{}, corruptDatabase(err)
 	}
+	var socks5Enabled bool
 	for _, field := range []struct {
 		stored int64
 		value  *bool
-	}{{snell, &state.Preferences.Inbounds.Snell}, {shadowsocks, &state.Preferences.Inbounds.Shadowsocks}, {socksTLS, &state.Preferences.Inbounds.SocksTLS}} {
+	}{{snell, &state.Preferences.Inbounds.Snell}, {shadowsocks, &state.Preferences.Inbounds.Shadowsocks}, {socksTLS, &state.Preferences.Inbounds.SocksTLS}, {socks5, &socks5Enabled}} {
 		if *field.value, err = intBool(field.stored); err != nil {
 			return domain.PersistentState{}, corruptDatabase(err)
 		}
 	}
+	state.Preferences.Inbounds.SOCKS5Disabled = !socks5Enabled
 	state.Preferences.ExcludedNodeIDs = make(map[string]bool)
 	excludedRows, err := tx.QueryContext(ctx, "SELECT node_id FROM excluded_node_ids WHERE preference_id = 1")
 	if err != nil {

@@ -53,6 +53,14 @@ type Filter struct {
 // FormatSurge renders one Surge [Proxy] line per route.
 const FormatSurge = "surge"
 
+// protocol is the inbound protocol the filter renders.
+func (filter Filter) protocol() clientconfig.Protocol {
+	if filter.Protocol == "" {
+		return clientconfig.SOCKS5
+	}
+	return filter.Protocol
+}
+
 // SmartRouteName names the automatic route in rendered subscriptions.
 const SmartRouteName = "智能线路"
 
@@ -126,10 +134,7 @@ func Render(nodes []state.Node, filter Filter, socksAddress string, authority *c
 // RenderProfiles renders the selected routes for filter.Protocol, as Surge
 // policy lines or as padded Base64 of URIs. Like Render it has no side effects.
 func RenderProfiles(nodes []state.Node, filter Filter, options Options, authority *credentials.Identity) (string, int, error) {
-	protocol := filter.Protocol
-	if protocol == "" {
-		protocol = clientconfig.SOCKS5
-	}
+	protocol := filter.protocol()
 	if filter.Format != FormatSurge && protocol != clientconfig.SOCKS5 && protocol != clientconfig.Shadowsocks {
 		return "", 0, ErrNoEligibleLinks
 	}

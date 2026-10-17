@@ -127,6 +127,9 @@ func TestEnabledAndParse(t *testing.T) {
 	if !Enabled(SOCKS5, preferences) || !Enabled(Snell, preferences) || Enabled(Shadowsocks, preferences) || Enabled(SOCKS5TLS, preferences) {
 		t.Fatal("Enabled ignores preferences")
 	}
+	if Enabled(SOCKS5, state.InboundPreferences{SOCKS5Disabled: true}) {
+		t.Fatal("Enabled ignores a disabled SOCKS5")
+	}
 	if protocol, ok := ParseProtocol("socks5-tls"); !ok || protocol != SOCKS5TLS {
 		t.Fatal("ParseProtocol rejected socks5-tls")
 	}

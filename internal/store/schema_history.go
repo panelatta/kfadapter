@@ -80,8 +80,16 @@ var sqliteSchemaV5Statements = []string{
 	`CREATE TABLE active_session_node_profiles (position INTEGER PRIMARY KEY REFERENCES active_session_nodes(position) ON DELETE CASCADE, client_profile TEXT NOT NULL)`,
 }
 
-// sqliteSchemaV11Tables is the merged schema v11: the current schema without
-// inbound preferences.
+// sqliteSchemaV12Statements is schema v12: the current tables, with inbound
+// preferences that lack the SOCKS5 switch.
+var sqliteSchemaV12Statements = func() []string {
+	statements := append([]string(nil), sqliteSchemaStatements...)
+	statements[sqliteSchemaTables["inbound_preferences"]] = `CREATE TABLE inbound_preferences (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES preferences(id) ON DELETE CASCADE, snell INTEGER NOT NULL, shadowsocks INTEGER NOT NULL, socks_tls INTEGER NOT NULL)`
+	return statements
+}()
+
+// sqliteSchemaV11Tables is the merged schema v11: schema v12 without inbound
+// preferences.
 var sqliteSchemaV11Tables = func() map[string]int {
 	tables := make(map[string]int, len(sqliteSchemaTables)-1)
 	for name, index := range sqliteSchemaTables {

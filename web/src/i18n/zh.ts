@@ -162,6 +162,9 @@ export const zh: Messages = {
             surge: "Surge 配置",
         },
         protocol: "协议",
+        noProtocol: "没有开启任何入站协议，请先在「入站协议」卡片中开启一种。",
+        noBase64Protocol:
+            "Base64 链接只能列出 SOCKS5 或 Shadowsocks 2022。请开启其中一种，或改用 Surge 格式。",
         surgeHint: "在 Surge 中可作为策略组的 policy-path 使用，也可以导入 Sub-Store。",
     },
     inbounds: {
@@ -175,14 +178,13 @@ export const zh: Messages = {
             "socks5-tls": "SOCKS5-TLS",
         },
         details: {
-            socks5: "始终开启 · 用户名密码认证",
+            socks5: "用户名密码认证 · 默认订阅链接使用此协议",
             snell: "unshaped · 连接复用 · UDP 经 TCP 承载",
             shadowsocks: "2022-blake3-aes-128-gcm · 多用户密钥",
             "socks5-tls": "TLS 上的 SOCKS5 · 固定证书指纹",
         },
         port: (port: number) => `TCP ${port}`,
         enableLabel: (name: string) => `启用 ${name}`,
-        alwaysOn: "始终开启",
         listening: "监听中",
         off: "已关闭",
         listenFailed: "端口不可用",

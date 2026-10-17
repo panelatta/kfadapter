@@ -18,8 +18,8 @@ import (
 	"github.com/oshinop/chinadapter/internal/web"
 )
 
-// InboundServer hosts the frontends of the optional inbound protocols;
-// socks.Server implements it.
+// InboundServer hosts the frontends of the inbound protocols; socks.Server
+// implements it.
 type InboundServer interface {
 	ServeFrontend(context.Context, net.Listener, socks.Frontend) error
 	CloseListener(net.Listener)
@@ -30,11 +30,11 @@ type InboundPreferenceStore interface {
 	Update(context.Context, func(*state.PersistentState) error) (state.PersistentState, error)
 }
 
-// InboundConfig wires the optional inbound listeners.
+// InboundConfig wires the inbound listeners.
 type InboundConfig struct {
 	Server InboundServer
 	Store  InboundPreferenceStore
-	// Addresses are the listener addresses of the optional protocols.
+	// Addresses are the listener addresses of every inbound protocol.
 	Addresses map[clientconfig.Protocol]string
 	Ports     clientconfig.Ports
 	Initial   state.InboundPreferences
@@ -51,9 +51,14 @@ type inboundListener struct {
 // loop, which ends as soon as its listener is closed.
 const inboundStopWait = 5 * time.Second
 
-// InboundManager owns the listeners of the optional inbound protocols. A
-// protocol listens only while enabled; enabling binds its fixed port before
-// the choice is persisted, so a port conflict is reported instead of saved.
+// InboundManager owns the listeners of the inbound protocols. A protocol
+// listens only while enabled; enabling binds its fixed port before the choice
+// is persisted, so a port conflict is reported instead of saved.
+//
+// SOCKS5 keeps the contract it had while it could not be turned off: the
+// daemon binds it before starting (Bind), and a failed SOCKS5 accept loop
+// ends Run so the container restarts. The other protocols report failures
+// in Status and leave the daemon running.
 type InboundManager struct {
 	server    InboundServer
 	store     InboundPreferenceStore
@@ -61,17 +66,21 @@ type InboundManager struct {
 	ports     clientconfig.Ports
 	listen    func(network, address string) (net.Listener, error)
 	current   atomic.Pointer[state.InboundPreferences]
+	failed    chan error
 
 	mu       sync.Mutex
 	ctx      context.Context
+	bound    map[clientconfig.Protocol]net.Listener
 	running  map[clientconfig.Protocol]*inboundListener
 	failures map[clientconfig.Protocol]bool
 }
 
-var optionalInbounds = []struct {
+// managedInbounds lists every inbound protocol in console order.
+var managedInbounds = []struct {
 	protocol clientconfig.Protocol
 	frontend socks.Frontend
 }{
+	{clientconfig.SOCKS5, socks.FrontendSOCKS},
 	{clientconfig.Snell, socks.FrontendSnell},
 	{clientconfig.Shadowsocks, socks.FrontendShadowsocks},
 	{clientconfig.SOCKS5TLS, socks.FrontendSOCKSTLS},
@@ -81,7 +90,7 @@ func NewInboundManager(config InboundConfig) (*InboundManager, error) {
 	if config.Server == nil || config.Store == nil {
 		return nil, errors.New("app: inbound manager requires a server and a store")
 	}
-	for _, inbound := range optionalInbounds {
+	for _, inbound := range managedInbounds {
 		if config.Addresses[inbound.protocol] == "" {
 			return nil, fmt.Errorf("app: no listener address for %s", inbound.protocol)
 		}
@@ -91,6 +100,7 @@ func NewInboundManager(config InboundConfig) (*InboundManager, error) {
 	}
 	manager := &InboundManager{
 		server: config.Server, store: config.Store, addresses: config.Addresses, ports: config.Ports, listen: config.Listen,
+		failed: make(chan error, 1), bound: make(map[clientconfig.Protocol]net.Listener),
 		running: make(map[clientconfig.Protocol]*inboundListener), failures: make(map[clientconfig.Protocol]bool),
 	}
 	initial := config.Initial
@@ -109,41 +119,73 @@ func (m *InboundManager) Preferences() state.InboundPreferences {
 // Ports returns the inbound listener ports.
 func (m *InboundManager) Ports() clientconfig.Ports { return m.ports }
 
-// Run serves the enabled protocols until ctx ends. A port that cannot be
-// bound is reported in Status; the daemon and the other protocols keep
-// running.
+// Bind binds protocol's port before Run, so a daemon whose port is taken
+// fails to start; Run serves the listener while the protocol stays enabled.
+func (m *InboundManager) Bind(protocol clientconfig.Protocol) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, bound := m.bound[protocol]; bound {
+		return nil
+	}
+	listener, err := m.listen("tcp", m.addresses[protocol])
+	if err != nil {
+		return err
+	}
+	m.bound[protocol] = listener
+	return nil
+}
+
+// Run serves the enabled protocols until ctx ends or the SOCKS5 accept loop
+// fails. A port that cannot be bound is reported in Status; the daemon and
+// the other protocols keep running.
 func (m *InboundManager) Run(ctx context.Context) error {
 	m.mu.Lock()
 	m.ctx = ctx
 	preferences := m.Preferences()
-	for _, inbound := range optionalInbounds {
+	for _, inbound := range managedInbounds {
 		if clientconfig.Enabled(inbound.protocol, preferences) {
 			if err := m.startLocked(ctx, inbound.protocol, inbound.frontend); err != nil {
 				slog.Warn("inbound listener unavailable", "protocol", inbound.protocol, "address", m.addresses[inbound.protocol], "error", err)
 			}
 		}
 	}
+	m.closeUnusedBoundLocked(preferences)
 	m.mu.Unlock()
-	<-ctx.Done()
+	var err error
+	select {
+	case <-ctx.Done():
+		err = ctx.Err()
+	case err = <-m.failed:
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for protocol := range m.running {
-		m.stopLocked(protocol)
+	// Only the listeners close here; their flows stay for the SOCKS server's
+	// Shutdown to drain.
+	for protocol, running := range m.running {
+		delete(m.running, protocol)
+		running.stopped.Store(true)
+		_ = running.listener.Close()
+		waitInbound(running)
 	}
 	m.ctx = nil
-	return ctx.Err()
+	return err
 }
 
-// startLocked binds and serves protocol. Its listener lives for runCtx, the
-// manager's Run context, not for the request that enabled it.
+// startLocked serves protocol on its bound listener or binds a new one. The
+// listener lives for runCtx, the manager's Run context, not for the request
+// that enabled it.
 func (m *InboundManager) startLocked(runCtx context.Context, protocol clientconfig.Protocol, frontend socks.Frontend) error {
 	if running, ok := m.running[protocol]; ok && !closed(running.done) {
 		return nil
 	}
-	listener, err := m.listen("tcp", m.addresses[protocol])
-	if err != nil {
-		m.failures[protocol] = true
-		return err
+	listener, bound := m.bound[protocol]
+	delete(m.bound, protocol)
+	if !bound {
+		var err error
+		if listener, err = m.listen("tcp", m.addresses[protocol]); err != nil {
+			m.failures[protocol] = true
+			return err
+		}
 	}
 	delete(m.failures, protocol)
 	slog.Info("inbound listening", "protocol", protocol, "address", listener.Addr().String())
@@ -151,11 +193,36 @@ func (m *InboundManager) startLocked(runCtx context.Context, protocol clientconf
 	m.running[protocol] = running
 	go func() {
 		defer close(running.done)
-		if err := m.server.ServeFrontend(runCtx, listener, frontend); err != nil && !running.stopped.Load() {
+		err := m.server.ServeFrontend(runCtx, listener, frontend)
+		if running.stopped.Load() || runCtx.Err() != nil {
+			return
+		}
+		if protocol == clientconfig.SOCKS5 {
+			if err == nil {
+				err = errors.New("accept loop stopped")
+			}
+			select {
+			case m.failed <- fmt.Errorf("app: %s listener: %w", protocol, err):
+			default:
+			}
+			return
+		}
+		if err != nil {
 			slog.Warn("inbound listener stopped", "protocol", protocol, "error", err)
 		}
 	}()
 	return nil
+}
+
+// closeUnusedBoundLocked releases listeners bound for protocols that are no
+// longer enabled.
+func (m *InboundManager) closeUnusedBoundLocked(preferences state.InboundPreferences) {
+	for protocol, listener := range m.bound {
+		if !clientconfig.Enabled(protocol, preferences) {
+			_ = listener.Close()
+			delete(m.bound, protocol)
+		}
+	}
 }
 
 func (m *InboundManager) stopLocked(protocol clientconfig.Protocol) {
@@ -166,6 +233,10 @@ func (m *InboundManager) stopLocked(protocol clientconfig.Protocol) {
 	delete(m.running, protocol)
 	running.stopped.Store(true)
 	m.server.CloseListener(running.listener)
+	waitInbound(running)
+}
+
+func waitInbound(running *inboundListener) {
 	select {
 	case <-running.done:
 	case <-time.After(inboundStopWait):
@@ -197,7 +268,7 @@ func (m *InboundManager) Configure(ctx context.Context, next state.InboundPrefer
 		}
 	}
 	if m.ctx != nil {
-		for _, inbound := range optionalInbounds {
+		for _, inbound := range managedInbounds {
 			if _, running := m.running[inbound.protocol]; running || !clientconfig.Enabled(inbound.protocol, next) {
 				continue
 			}
@@ -215,12 +286,13 @@ func (m *InboundManager) Configure(ctx context.Context, next state.InboundPrefer
 		rollback()
 		return err
 	}
-	for _, inbound := range optionalInbounds {
+	for _, inbound := range managedInbounds {
 		if !clientconfig.Enabled(inbound.protocol, next) {
 			m.stopLocked(inbound.protocol)
 			delete(m.failures, inbound.protocol)
 		}
 	}
+	m.closeUnusedBoundLocked(next)
 	m.current.Store(&next)
 	return nil
 }
@@ -230,8 +302,8 @@ func (m *InboundManager) Status() []web.InboundStatus {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	preferences := m.Preferences()
-	statuses := []web.InboundStatus{{Protocol: string(clientconfig.SOCKS5), Port: int(m.ports.SOCKS5), Enabled: true, Listening: true}}
-	for _, inbound := range optionalInbounds {
+	statuses := make([]web.InboundStatus, 0, len(managedInbounds))
+	for _, inbound := range managedInbounds {
 		status := web.InboundStatus{Protocol: string(inbound.protocol), Port: int(m.ports.Port(inbound.protocol)), Enabled: clientconfig.Enabled(inbound.protocol, preferences)}
 		if running, ok := m.running[inbound.protocol]; ok && !closed(running.done) {
 			status.Listening = true
@@ -267,7 +339,7 @@ func (a inboundsAdapter) Status() web.InboundsStatus {
 }
 
 func (a inboundsAdapter) Configure(ctx context.Context, choices web.InboundChoices) error {
-	return a.manager.Configure(ctx, state.InboundPreferences{Snell: choices.Snell, Shadowsocks: choices.Shadowsocks, SocksTLS: choices.SocksTLS})
+	return a.manager.Configure(ctx, state.InboundPreferences{SOCKS5Disabled: !choices.SOCKS5, Snell: choices.Snell, Shadowsocks: choices.Shadowsocks, SocksTLS: choices.SocksTLS})
 }
 
 func (a inboundsAdapter) NodeProfiles(nodeID, host string) ([]web.ProxyProfile, error) {
@@ -294,7 +366,7 @@ func (a inboundsAdapter) SmartProfiles(host string) ([]web.ProxyProfile, error) 
 
 func (a inboundsAdapter) profiles(render func(clientconfig.Protocol) (clientconfig.Profile, bool)) []web.ProxyProfile {
 	preferences := a.manager.Preferences()
-	var profiles []web.ProxyProfile
+	profiles := []web.ProxyProfile{}
 	for _, protocol := range clientconfig.Protocols {
 		if !clientconfig.Enabled(protocol, preferences) {
 			continue

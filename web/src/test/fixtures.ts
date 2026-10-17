@@ -11,10 +11,10 @@ export const disabledSmartProxy = (): SmartProxyStatus => ({
   incomplete: false, targets: [], results: [],
 });
 
-export const inboundsStatus = (choices: InboundChoices = { snell: false, shadowsocks: false, socksTLS: false }): InboundsStatus => ({
+export const inboundsStatus = (choices: InboundChoices = { socks5: true, snell: false, shadowsocks: false, socksTLS: false }): InboundsStatus => ({
   tlsFingerprint: "8bd0624728415a451f10ae35626a4c2978cde481413452b41323f467c2f8f705",
   inbounds: [
-    { protocol: "socks5", port: 10808, enabled: true, listening: true },
+    { protocol: "socks5", port: 10808, enabled: choices.socks5, listening: choices.socks5 },
     { protocol: "snell", port: 10810, enabled: choices.snell, listening: choices.snell },
     { protocol: "shadowsocks", port: 10811, enabled: choices.shadowsocks, listening: choices.shadowsocks },
     { protocol: "socks5-tls", port: 10812, enabled: choices.socksTLS, listening: choices.socksTLS },

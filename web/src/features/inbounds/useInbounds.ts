@@ -3,15 +3,21 @@ import type { ApiClient } from "@/api";
 import type { InboundChoices, InboundsStatus } from "@/types";
 import { describeError, isSessionProblem } from "@/lib/errors";
 
-/** The inbound protocols in console order; SOCKS5 is always enabled. */
+/** The inbound protocols in console order. */
 export const inboundProtocols = ["socks5", "snell", "shadowsocks", "socks5-tls"] as const;
+
+function enabledIn(status: InboundsStatus, protocol: string): boolean {
+    return status.inbounds.some(
+        (inbound) => inbound.protocol === protocol && inbound.enabled,
+    );
+}
 
 export function choicesFrom(status: InboundsStatus | null): InboundChoices {
     const enabled = (protocol: string) =>
-        status?.inbounds.some(
-            (inbound) => inbound.protocol === protocol && inbound.enabled,
-        ) ?? false;
+        status ? enabledIn(status, protocol) : false;
     return {
+        // SOCKS5 is on unless the server says otherwise.
+        socks5: status ? enabledIn(status, "socks5") : true,
         snell: enabled("snell"),
         shadowsocks: enabled("shadowsocks"),
         socksTLS: enabled("socks5-tls"),
@@ -99,16 +105,12 @@ export function useInbounds({
             });
     };
 
-    const enabledProtocols = useMemo(
+    // Until the status loads, assume the default: only SOCKS5.
+    const enabledProtocols = useMemo<readonly string[]>(
         () =>
-            inboundProtocols.filter(
-                (protocol) =>
-                    protocol === "socks5" ||
-                    status?.inbounds.some(
-                        (inbound) =>
-                            inbound.protocol === protocol && inbound.enabled,
-                    ),
-            ),
+            status
+                ? inboundProtocols.filter((protocol) => enabledIn(status, protocol))
+                : ["socks5"],
         [status],
     );
 

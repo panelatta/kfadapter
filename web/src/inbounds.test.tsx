@@ -27,18 +27,23 @@ describe("inbound protocols", () => {
             expect.stringContaining("Shadowsocks 2022TCP 10811"),
             expect.stringContaining("SOCKS5-TLSTCP 10812"),
         ]);
-        expect(within(rows[0]).getByText("Always on")).toBeTruthy();
-        expect(within(rows[0]).queryByRole("switch")).toBeNull();
+        expect(within(rows[0]).getByText("Listening")).toBeTruthy();
+        expect(switchFor("SOCKS5").checked).toBe(true);
         expect(screen.queryByText(/Certificate fingerprint/)).toBeNull();
 
         await userEvent.click(switchFor("Snell v6"));
-        expect(api.configureInbounds).toHaveBeenLastCalledWith({ snell: true, shadowsocks: false, socksTLS: false });
+        expect(api.configureInbounds).toHaveBeenLastCalledWith({ socks5: true, snell: true, shadowsocks: false, socksTLS: false });
         await waitFor(() => expect(switchFor("Snell v6").checked).toBe(true));
         expect(within(rows[1]).getByText("Listening")).toBeTruthy();
 
         await userEvent.click(switchFor("SOCKS5-TLS"));
-        expect(api.configureInbounds).toHaveBeenLastCalledWith({ snell: true, shadowsocks: false, socksTLS: true });
+        expect(api.configureInbounds).toHaveBeenLastCalledWith({ socks5: true, snell: true, shadowsocks: false, socksTLS: true });
         expect(await screen.findByText(/Certificate fingerprint \(SHA-256\): 8bd0624728/)).toBeTruthy();
+
+        await userEvent.click(switchFor("SOCKS5"));
+        expect(api.configureInbounds).toHaveBeenLastCalledWith({ socks5: false, snell: true, shadowsocks: false, socksTLS: true });
+        await waitFor(() => expect(switchFor("SOCKS5").checked).toBe(false));
+        expect(within(rows[0]).getByText("Off")).toBeTruthy();
     });
 
     it("keeps a protocol off when its port cannot be bound", async () => {
@@ -53,7 +58,7 @@ describe("inbound protocols", () => {
 
     it("reports a listener that failed to start", async () => {
         const api = makeApi();
-        const failing = inboundsStatus({ snell: true, shadowsocks: false, socksTLS: false });
+        const failing = inboundsStatus({ socks5: true, snell: true, shadowsocks: false, socksTLS: false });
         failing.inbounds[1] = { ...failing.inbounds[1], listening: false, problem: "listen_failed" };
         vi.mocked(api.inbounds).mockResolvedValue(failing);
         render(<App api={api} />);
@@ -66,7 +71,7 @@ describe("inbound protocols", () => {
         const options = () => [...protocol().options].map((option) => option.value);
         expect(options()).toEqual(["socks5"]);
 
-        vi.mocked(api.configureInbounds).mockResolvedValueOnce(inboundsStatus({ snell: true, shadowsocks: true, socksTLS: false }));
+        vi.mocked(api.configureInbounds).mockResolvedValueOnce(inboundsStatus({ socks5: true, snell: true, shadowsocks: true, socksTLS: false }));
         await userEvent.click(switchFor("Snell v6"));
         // Base64 lists only protocols with a standard URI.
         await waitFor(() => expect(options()).toEqual(["socks5", "shadowsocks"]));
@@ -83,6 +88,25 @@ describe("inbound protocols", () => {
         await userEvent.selectOptions(screen.getByLabelText("Format"), "");
         expect(protocol().value).toBe("socks5");
         expect(screen.getByText(currentConsumerURL)).toBeTruthy();
+    });
+
+    it("falls back from SOCKS5 in the subscription link once it is off", async () => {
+        const { api } = await renderConsole();
+        const protocol = () => screen.getByLabelText("Protocol") as HTMLSelectElement;
+        vi.mocked(api.configureInbounds).mockResolvedValueOnce(inboundsStatus({ socks5: false, snell: true, shadowsocks: true, socksTLS: false }));
+        await userEvent.click(switchFor("SOCKS5"));
+        await waitFor(() => expect(protocol().value).toBe("shadowsocks"));
+        expect(screen.getByText(`${currentConsumerURL}?protocol=shadowsocks`)).toBeTruthy();
+
+        // Snell has no URI, so Base64 has nothing to list without SOCKS5 or
+        // Shadowsocks 2022; Surge still does.
+        vi.mocked(api.configureInbounds).mockResolvedValueOnce(inboundsStatus({ socks5: false, snell: true, shadowsocks: false, socksTLS: false }));
+        await userEvent.click(switchFor("Shadowsocks 2022"));
+        expect(await screen.findByText(/Base64 links list only SOCKS5 or Shadowsocks 2022/)).toBeTruthy();
+        expect(protocol().disabled).toBe(true);
+        expect((screen.getByRole("button", { name: "Copy subscription link" }) as HTMLButtonElement).disabled).toBe(true);
+        await userEvent.selectOptions(screen.getByLabelText("Format"), "surge");
+        expect(screen.getByText(`${currentConsumerURL}?format=surge&protocol=snell`)).toBeTruthy();
     });
 
     it("copies a node's Surge line and ss:// URL", async () => {
@@ -144,5 +168,24 @@ describe("inbound protocols", () => {
         await userEvent.click(tls);
         expect(navigator.clipboard.writeText).not.toHaveBeenCalled();
         expect((await screen.findByRole("alert")).textContent).toBe("SOCKS5-TLS is not enabled any more. Reload the page and try again.");
+    });
+    it("hides SOCKS5 URLs once SOCKS5 is off", async () => {
+        const { api } = await renderConsole();
+        vi.mocked(api.nodeDetails).mockResolvedValueOnce({
+            ...chengduDetails,
+            profiles: [{ protocol: "snell", port: 10810, surge: "Chengdu 02 = snell, 127.0.0.1, 10810, psk=k, version=6" }],
+        });
+        await userEvent.click(screen.getByRole("button", { name: "KuaiFan" }));
+        await userEvent.click((await screen.findAllByRole("button", { name: "Details for Chengdu 02" }))[0]);
+        expect(await screen.findByRole("button", { name: "Copy Surge line for Snell v6" })).toBeTruthy();
+        expect(screen.queryByRole("button", { name: "Copy SOCKS5 URL" })).toBeNull();
+    });
+
+    it("leaves the SOCKS5 URL out of the smart route without SOCKS5", async () => {
+        const api = makeApi();
+        vi.mocked(api.smartProxy).mockResolvedValue({ enabled: true, intervalMinutes: 30, running: false, targets: [], results: [] });
+        render(<SmartProxyCard api={api} getSessionRevision={() => 0} onAccessLost={() => {}} protocols={["snell"]} />);
+        expect(await screen.findByRole("button", { name: "Copy smart route Surge line for Snell v6" })).toBeTruthy();
+        expect(screen.queryByRole("button", { name: "Copy smart route SOCKS5 URL" })).toBeNull();
     });
 });

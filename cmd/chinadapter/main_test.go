@@ -12,48 +12,44 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/oshinop/chinadapter/internal/store"
 )
 
-func TestHealthcheckUsesConfiguredWildcardListeners(t *testing.T) {
+func TestHealthcheckUsesConfiguredWildcardManagement(t *testing.T) {
 	management, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer management.Close()
+	// Nothing listens on the proxy port: SOCKS5 can be turned off, so the
+	// healthcheck asks only the management endpoint.
 	proxy, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer proxy.Close()
+	proxyAddress := proxy.Addr().String()
+	_ = proxy.Close()
+	probed := make(chan struct{}, 1)
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/healthz" {
 			http.NotFound(w, r)
 			return
 		}
+		probed <- struct{}{}
 		w.WriteHeader(http.StatusOK)
 	})}
 	go func() { _ = server.Serve(management) }()
 	defer server.Shutdown(context.Background())
-	accepted := make(chan struct{}, 1)
-	go func() {
-		c, err := proxy.Accept()
-		if err == nil {
-			close(accepted)
-			_ = c.Close()
-		}
-	}()
-	writeWorkingConfig(t, management.Addr().String(), proxy.Addr().String())
+	writeWorkingConfig(t, management.Addr().String(), proxyAddress)
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"healthcheck"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("healthcheck exit=%d stderr=%q", code, stderr.String())
 	}
 	select {
-	case <-accepted:
-	case <-time.After(time.Second):
-		t.Fatal("healthcheck did not connect to wildcard proxy")
+	case <-probed:
+	default:
+		t.Fatal("healthcheck did not ask the wildcard management endpoint")
 	}
 }
 

@@ -16,8 +16,9 @@ type Inbounds interface {
 	SmartProfiles(host string) ([]ProxyProfile, error)
 }
 
-// InboundChoices enables the optional inbound protocols; SOCKS5 is always on.
+// InboundChoices chooses the served inbound protocols.
 type InboundChoices struct {
+	SOCKS5      bool
 	Snell       bool
 	Shadowsocks bool
 	SocksTLS    bool
@@ -63,6 +64,7 @@ func (a *API) inboundsConfigure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		SOCKS5      *bool `json:"socks5"`
 		Snell       *bool `json:"snell"`
 		Shadowsocks *bool `json:"shadowsocks"`
 		SocksTLS    *bool `json:"socksTLS"`
@@ -75,11 +77,31 @@ func (a *API) inboundsConfigure(w http.ResponseWriter, r *http.Request) {
 		a.writeProblem(w, http.StatusBadRequest, "invalid_inbounds", "Set snell, shadowsocks and socksTLS")
 		return
 	}
-	if err := a.inbounds.Configure(r.Context(), InboundChoices{Snell: *body.Snell, Shadowsocks: *body.Shadowsocks, SocksTLS: *body.SocksTLS}); err != nil {
+	// socks5 is optional, so a console loaded before SOCKS5 could be turned
+	// off keeps it as it is.
+	socks5 := a.socks5Enabled()
+	if body.SOCKS5 != nil {
+		socks5 = *body.SOCKS5
+	}
+	if err := a.inbounds.Configure(r.Context(), InboundChoices{SOCKS5: socks5, Snell: *body.Snell, Shadowsocks: *body.Shadowsocks, SocksTLS: *body.SocksTLS}); err != nil {
 		a.writeBackendError(w, err, "inbounds_config_failed", http.StatusServiceUnavailable)
 		return
 	}
 	a.writeJSON(w, http.StatusOK, a.inbounds.Status())
+}
+
+// socks5Enabled reports the current SOCKS5 choice; without inbound status
+// SOCKS5 is served.
+func (a *API) socks5Enabled() bool {
+	if a.inbounds == nil {
+		return true
+	}
+	for _, inbound := range a.inbounds.Status().Inbounds {
+		if inbound.Protocol == "socks5" {
+			return inbound.Enabled
+		}
+	}
+	return true
 }
 
 // advertisedHost is the host clients use for every inbound listener: the

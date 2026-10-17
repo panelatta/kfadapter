@@ -211,8 +211,9 @@ type NodeDetails struct {
 	SocksPassword string `json:"socksPassword"`
 	Health        string `json:"health"`
 	TCPLatencyMS  int    `json:"tcpLatencyMs,omitempty"`
-	// Profiles render the node for every enabled inbound protocol.
-	Profiles []ProxyProfile `json:"profiles,omitempty"`
+	// Profiles render the node for every enabled inbound protocol: empty
+	// when every protocol is off, absent without inbound status.
+	Profiles *[]ProxyProfile `json:"profiles,omitempty"`
 }
 
 // ProbeResult reports the latest bounded TCP probe for one node.

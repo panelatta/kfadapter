@@ -28,7 +28,11 @@ export function useSubscriptionLink(
             ),
         [enabledProtocols, format],
     );
-    const protocol = protocols.includes(selectedProtocol) ? selectedProtocol : "socks5";
+    // With SOCKS5 off the link falls back to the first protocol the format
+    // can list; with none, there is no link to offer.
+    const protocol = protocols.includes(selectedProtocol)
+        ? selectedProtocol
+        : (protocols[0] ?? "");
 
     const nodeProviders = useMemo(
         () =>
@@ -61,7 +65,7 @@ export function useSubscriptionLink(
         : "";
 
     const filteredSubscriptionURL = useMemo(() => {
-        if (!subscriptionURL) return "";
+        if (!subscriptionURL || !protocol) return "";
         try {
             const next = new URL(subscriptionURL);
             if (filterProvider)

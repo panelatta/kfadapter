@@ -29,6 +29,7 @@ export function SubscriptionLinkCard({ link }: { link: ReturnType<typeof useSubs
     } = link;
     // Success shows on the button itself; only a failure needs a visible line.
     const copied = copyMessage === m.subscription.copied;
+    const noProtocol = protocols.length === 0;
 
     return (
         <Card>
@@ -105,6 +106,7 @@ export function SubscriptionLinkCard({ link }: { link: ReturnType<typeof useSubs
                     <Field label={m.subscription.protocol} name="subscription-protocol">
                         <select
                             className={selectClassName}
+                            disabled={noProtocol}
                             id="subscription-protocol"
                             onChange={(event) => setProtocol(event.currentTarget.value)}
                             value={protocol}
@@ -119,14 +121,21 @@ export function SubscriptionLinkCard({ link }: { link: ReturnType<typeof useSubs
                 </div>
                 <div className="flex flex-col rounded-lg bg-ticket text-ticket-foreground sm:flex-row">
                     <code
-                        aria-busy={!filteredSubscriptionURL}
+                        aria-busy={!filteredSubscriptionURL && !noProtocol}
                         className="block min-w-0 flex-1 break-all px-4 py-3.5 font-mono text-[0.8125rem] leading-6"
                     >
-                        {filteredSubscriptionURL || (
-                            <span className="animate-pulse text-ticket-muted">
-                                {m.subscription.loading}
-                            </span>
-                        )}
+                        {filteredSubscriptionURL ||
+                            (noProtocol ? (
+                                <span className="font-sans text-ticket-muted">
+                                    {format === "surge"
+                                        ? m.subscription.noProtocol
+                                        : m.subscription.noBase64Protocol}
+                                </span>
+                            ) : (
+                                <span className="animate-pulse text-ticket-muted">
+                                    {m.subscription.loading}
+                                </span>
+                            ))}
                     </code>
                     <div aria-hidden="true" className="ticket-divider" />
                     <div className="flex items-center p-3 sm:px-4">

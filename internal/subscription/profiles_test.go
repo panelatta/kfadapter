@@ -74,6 +74,21 @@ func TestSurgeSubscriptionPerProtocol(t *testing.T) {
 	if filtered := serveProfiles(t, service, "format=surge&protocol=snell&provider=kuaifan").Body.String(); strings.Contains(filtered, SmartRouteName) {
 		t.Fatal("row filters kept the automatic route")
 	}
+
+	// With SOCKS5 off, every SOCKS5 list, including the default link, is
+	// the empty 404 while the other protocols keep working.
+	if response := serveProfiles(t, service, ""); response.Code != http.StatusOK {
+		t.Fatalf("default list = %d", response.Code)
+	}
+	inbounds.SOCKS5Disabled = true
+	for _, query := range []string{"", "protocol=socks5", "format=surge", "format=surge&protocol=socks5"} {
+		if response := serveProfiles(t, service, query); response.Code != http.StatusNotFound || response.Body.Len() != 0 {
+			t.Errorf("SOCKS5 off: %q = %d %q", query, response.Code, response.Body.String())
+		}
+	}
+	if response := serveProfiles(t, service, "format=surge&protocol=snell"); response.Code != http.StatusOK {
+		t.Fatalf("snell list with SOCKS5 off = %d", response.Code)
+	}
 }
 
 func TestSurgeSubscriptionDeduplicatesPolicyNames(t *testing.T) {

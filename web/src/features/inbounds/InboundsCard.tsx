@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { choicesFrom, type useInbounds } from "./useInbounds";
 
 const choiceKeys: Record<string, keyof InboundChoices> = {
+    socks5: "socks5",
     snell: "snell",
     shadowsocks: "shadowsocks",
     "socks5-tls": "socksTLS",
@@ -104,9 +105,8 @@ function ledTone(inbound: InboundStatus): string {
 
 function stateLabel(
     inbound: InboundStatus,
-    labels: { alwaysOn: string; listening: string; off: string; listenFailed: string },
+    labels: { listening: string; off: string; listenFailed: string },
 ): string {
-    if (inbound.protocol === "socks5") return labels.alwaysOn;
     if (inbound.listening) return labels.listening;
     if (inbound.enabled) return labels.listenFailed;
     return labels.off;
