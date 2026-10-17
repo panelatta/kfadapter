@@ -202,7 +202,7 @@ func TestLoadValidatesDurationBounds(t *testing.T) {
 	fields := []struct {
 		line, path, minimum, maximum string
 	}{
-		{"  sessionTTL: 30m\n", "management.sessionTTL", "59s", "24h1s"},
+		{"  sessionTTL: 30m\n", "management.sessionTTL", "59s", "720h1s"},
 		{"  dialTimeout: 10s\n", "proxy.dialTimeout", "999ms", "11s"},
 		{"  handshakeTimeout: 15s\n", "proxy.handshakeTimeout", "999ms", "1m1s"},
 		{"  requestTimeout: 15s\n", "provider.requestTimeout", "999ms", "16s"},

@@ -235,7 +235,7 @@ listenAddr: 0.0.0.0
 # hostname: adapter.example.com
 management:
   port: 10809
-  sessionTTL: 30m
+  sessionTTL: 168h
 proxy:
   port: 10808
   snellPort: 10810

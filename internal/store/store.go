@@ -26,7 +26,7 @@ const (
 	MaxPersistentStateBytes = 10 << 20
 	maxSQLiteStateBytes     = MaxPersistentStateBytes + 8<<20
 	maxBrowserSessions      = 4096
-	maxSessionLifetime      = 24 * time.Hour
+	maxSessionLifetime      = 30 * 24 * time.Hour
 )
 
 // SQLiteStore owns one secure, relational state database. The store exposes one

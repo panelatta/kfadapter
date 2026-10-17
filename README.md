@@ -78,7 +78,7 @@ SOCKS5 始终开启。控制台总览页的 **入站协议** 卡片可以单独�
 | `hostname` | 无 | 可选的 SOCKS DNS 名，也是直接 HTTP 访问时接受的管理域名 |
 | `management.port` | `10809` | 管理控制台 HTTP 端口 |
 | `management.publicOrigin` | 无 | TLS 反代的外部 HTTPS origin，例如 `https://console.example.com`；配置后订阅链接使用此地址 |
-| `management.sessionTTL` | `30m` | 浏览器会话时长（1m–24h） |
+| `management.sessionTTL` | `168h` | 浏览器会话时长（1m–720h，即最长 30 天；Go 时长不支持 `d`，7 天写作 `168h`） |
 | `proxy.port` | `10808` | SOCKS5 端口 |
 | `proxy.snellPort` | `10810` | Snell v6 端口，在控制台开启后才监听 |
 | `proxy.shadowsocksPort` | `10811` | Shadowsocks 2022 端口，在控制台开启后才监听 |
@@ -142,7 +142,7 @@ hostname: socks.example.com # SOCKS 客户端实际连接的主机，可与控�
 management:
   port: 10809
   publicOrigin: https://console.example.com
-  sessionTTL: 30m
+  sessionTTL: 168h
 ```
 
 `publicOrigin` 必须是规范的小写 HTTPS origin，可以带非默认端口（例如 `:8443`），不能使用回环 IP、`localhost` 或其子域名，也不能带路径、末尾 `/`、凭据、查询参数、片段或默认 `:443`。代理必须把回源 `Host` 固定为该 origin 的 authority，并保留浏览器的 `Origin`。例如，在已配置证书的 Nginx HTTPS server 中：

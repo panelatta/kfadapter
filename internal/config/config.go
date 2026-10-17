@@ -26,7 +26,7 @@ const (
 	maxDialTimeout            = 10 * time.Second
 	maxHandshakeTimeout       = time.Minute
 	minSessionTTL             = time.Minute
-	maxSessionTTL             = 24 * time.Hour
+	maxSessionTTL             = 30 * 24 * time.Hour
 )
 
 // Duration is a YAML duration such as "15s" or "2h".
@@ -149,7 +149,7 @@ func Default() Config {
 	return Config{
 		ListenAddr: "127.0.0.1",
 		Management: Management{
-			Port: 10809, SessionTTL: Duration(30 * time.Minute),
+			Port: 10809, SessionTTL: Duration(7 * 24 * time.Hour),
 		},
 		Proxy: Proxy{
 			Port: 10808, SnellPort: 10810, ShadowsocksPort: 10811, SocksTLSPort: 10812,

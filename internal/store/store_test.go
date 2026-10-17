@@ -280,9 +280,9 @@ func TestFutureDatedBrowserSessionsArePrunedNotCorrupt(t *testing.T) {
 		if err := store.SaveBrowserSession(t.Context(), token, now.Add(time.Hour), 16); err != nil {
 			t.Fatal(err)
 		}
-		// Simulate a wall clock that stepped back by two days after the session
-		// was issued: the stored expiry is now far beyond the maximum lifetime.
-		if _, err := store.db.ExecContext(t.Context(), "UPDATE browser_sessions SET expires_at_ns = ?", nanos(now.Add(48*time.Hour))); err != nil {
+		// Simulate a wall clock that stepped back by more than the maximum
+		// lifetime after the session was issued: the stored expiry is now beyond it.
+		if _, err := store.db.ExecContext(t.Context(), "UPDATE browser_sessions SET expires_at_ns = ?", nanos(now.Add(maxSessionLifetime+48*time.Hour))); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -311,6 +311,25 @@ func TestFutureDatedBrowserSessionsArePrunedNotCorrupt(t *testing.T) {
 	var count int
 	if err := store.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM browser_sessions").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("future-dated sessions after prune: %d, %v", count, err)
+	}
+}
+
+func TestMultiDayBrowserSessionsPersist(t *testing.T) {
+	store, now := newClockedStore(t)
+	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))
+	// The longest management.sessionTTL (30 days) must remain storable.
+	if err := store.SaveBrowserSession(t.Context(), token, now.Add(30*24*time.Hour), 16); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	restored := 0
+	if err := store.RestoreBrowserSessions(t.Context(), now, 16, func([]byte, time.Time) error { restored++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if restored != 1 {
+		t.Fatalf("restored %d multi-day sessions, want 1", restored)
 	}
 }
 
