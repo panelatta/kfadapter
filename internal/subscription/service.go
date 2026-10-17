@@ -147,11 +147,12 @@ func (service *Service) HandleSubscription(w http.ResponseWriter, r *http.Reques
 	}
 	var body string
 	var err error
-	if !clientconfig.Enabled(filter.protocol(), service.inboundPreferences()) {
+	switch {
+	case !clientconfig.Enabled(filter.protocol(), service.inboundPreferences()):
 		err = ErrNoEligibleLinks
-	} else if filter.Format == "" && filter.protocol() == clientconfig.SOCKS5 {
+	case filter.Format == "" && filter.protocol() == clientconfig.SOCKS5:
 		body, _, err = Render(current.nodes, filter, socksAddress, current.identity)
-	} else {
+	default:
 		body, _, err = service.renderProfiles(current, filter, socksAddress)
 	}
 	if errors.Is(err, ErrNoEligibleLinks) {
