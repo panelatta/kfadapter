@@ -273,8 +273,8 @@ func TestDoHFailuresFallBackAndBackOff(t *testing.T) {
 		{name: "redirect", respond: func(_ *testing.T, w http.ResponseWriter, r *http.Request, _ dohTestQuery) {
 			http.Redirect(w, r, "/elsewhere", http.StatusFound)
 		}},
-		{name: "SERVFAIL", respond: func(t *testing.T, w http.ResponseWriter, _ *http.Request, query dohTestQuery) {
-			writeDoHAnswer(t, w, query, dnsmessage.RCodeServerFailure)
+		{name: "REFUSED", respond: func(t *testing.T, w http.ResponseWriter, _ *http.Request, query dohTestQuery) {
+			writeDoHAnswer(t, w, query, dnsmessage.RCodeRefused)
 		}},
 		{name: "content type", respond: func(t *testing.T, w http.ResponseWriter, _ *http.Request, query dohTestQuery) {
 			w.Header().Set("Content-Type", "application/dns-json")
@@ -315,6 +315,153 @@ func TestDoHFailuresFallBackAndBackOff(t *testing.T) {
 				t.Fatalf("after backoff: requests %d, system lookups %d", server.requests.Load(), fallbacks.Load())
 			}
 		})
+	}
+}
+
+// failingDoHServer answers SERVFAIL, or stalls past the lookup budget, for
+// names starting with "fail" and a public address for every other name.
+func failingDoHServer(t *testing.T, stall bool) *dohTestServer {
+	t.Helper()
+	return newDoHTestServer(t, func(w http.ResponseWriter, r *http.Request, query dohTestQuery) {
+		if !strings.HasPrefix(query.name, "fail") {
+			writeDoHAnswer(t, w, query, dnsmessage.RCodeSuccess, aRecord(query.name, 60, "34.160.111.145"))
+			return
+		}
+		if !stall {
+			writeDoHAnswer(t, w, query, dnsmessage.RCodeServerFailure)
+			return
+		}
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	})
+}
+
+func TestDoHNameFailuresAffectOnlyThatName(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		stall bool
+	}{{name: "SERVFAIL"}, {name: "timeout on a ready connection", stall: true}} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server := failingDoHServer(t, test.stall)
+			transport, clock, fallbacks := dohTestTransport(t, server)
+			resolve := func(host string) netip.Addr {
+				t.Helper()
+				address, err := transport.resolveTarget(context.Background(), host, "198.51.100.77", 400*time.Millisecond)
+				if err != nil {
+					t.Fatalf("%s: %v", host, err)
+				}
+				return address
+			}
+			for range 2 {
+				if resolve("fail.example") != netip.MustParseAddr("203.0.113.80") {
+					t.Fatal("failed name did not use the system resolver")
+				}
+			}
+			if server.requests.Load() != 1 || fallbacks.Load() != 2 {
+				t.Fatalf("failed name: requests %d, system lookups %d", server.requests.Load(), fallbacks.Load())
+			}
+			if resolve("video.example") != netip.MustParseAddr("34.160.111.145") || server.requests.Load() != 2 {
+				t.Fatalf("another name after a name failure: %d requests", server.requests.Load())
+			}
+			clock.Advance(dohNameRetry)
+			resolve("fail.example")
+			if server.requests.Load() != 3 {
+				t.Fatalf("failed name after its retry window: %d requests", server.requests.Load())
+			}
+		})
+	}
+}
+
+func TestDoHRepeatedNameFailuresPauseTheResolver(t *testing.T) {
+	t.Parallel()
+	server := failingDoHServer(t, false)
+	transport, _, _ := dohTestTransport(t, server)
+	resolve := func(host string) netip.Addr {
+		t.Helper()
+		address, err := transport.resolveTarget(context.Background(), host, "198.51.100.77", time.Second)
+		if err != nil {
+			t.Fatalf("%s: %v", host, err)
+		}
+		return address
+	}
+	// An answer in between resets the count.
+	for _, host := range []string{"fail-a.example", "fail-b.example", "ok-c.example", "fail-d.example", "fail-e.example"} {
+		resolve(host)
+	}
+	if resolve("ok-f.example") != netip.MustParseAddr("34.160.111.145") || server.requests.Load() != 6 {
+		t.Fatalf("resolver paused after interrupted failures: %d requests", server.requests.Load())
+	}
+	// Three different names failing in a row pause DoH for every name.
+	for _, host := range []string{"fail-g.example", "fail-h.example", "fail-i.example"} {
+		resolve(host)
+	}
+	if resolve("ok-j.example") != netip.MustParseAddr("203.0.113.80") || server.requests.Load() != 9 {
+		t.Fatalf("resolver not paused after three failing names: %d requests", server.requests.Load())
+	}
+}
+
+func TestDoHConcurrentFailuresOfOneNameCountOnce(t *testing.T) {
+	t.Parallel()
+	server := failingDoHServer(t, true)
+	transport, _, _ := dohTestTransport(t, server)
+	var wait sync.WaitGroup
+	for range 4 {
+		wait.Go(func() {
+			if _, err := transport.resolveTarget(context.Background(), "fail.example", "198.51.100.77", 400*time.Millisecond); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wait.Wait()
+	transport.doh.mu.Lock()
+	failures := transport.doh.nameFailures
+	transport.doh.mu.Unlock()
+	if failures != 1 {
+		t.Fatalf("concurrent failures of one name counted %d times", failures)
+	}
+}
+
+func TestDoHConnectionFailurePausesTheResolver(t *testing.T) {
+	t.Parallel()
+	// The listener accepts TCP but never answers the TLS handshake.
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var accepted atomic.Int32
+	go func() {
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			t.Cleanup(func() { _ = connection.Close() })
+		}
+	}()
+	resolver, err := newDoHResolver("https://"+listener.Addr().String()+"/dns-query", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := NewTransport()
+	transport.doh = resolver
+	var fallbacks atomic.Int32
+	transport.lookup = func(context.Context, string, string) ([]netip.Addr, error) {
+		fallbacks.Add(1)
+		return []netip.Addr{netip.MustParseAddr("203.0.113.80")}, nil
+	}
+	for _, host := range []string{"video.example", "image.example"} {
+		if address, err := transport.resolveTarget(context.Background(), host, "198.51.100.77", 400*time.Millisecond); err != nil || address != netip.MustParseAddr("203.0.113.80") {
+			t.Fatalf("%s resolved %v, %v", host, address, err)
+		}
+	}
+	if accepted.Load() != 1 || fallbacks.Load() != 2 {
+		t.Fatalf("connections %d, system lookups %d", accepted.Load(), fallbacks.Load())
 	}
 }
 
@@ -405,10 +552,12 @@ func TestDoHCacheIsBounded(t *testing.T) {
 	resolver.clock = clock.Now
 	subnet := netip.MustParsePrefix("198.51.100.0/24")
 	expired := dohCacheKey{host: "expired.example", subnet: subnet}
-	resolver.store(expired, dohCacheEntry{expires: clock.Now().Add(time.Second)})
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	resolver.storeLocked(expired, dohCacheEntry{expires: clock.Now().Add(time.Second)})
 	for index := range maxDoHCacheEntries + 10 {
 		key := dohCacheKey{host: "host" + strconv.Itoa(index) + ".example", subnet: subnet}
-		resolver.store(key, dohCacheEntry{expires: clock.Now().Add(time.Minute)})
+		resolver.storeLocked(key, dohCacheEntry{expires: clock.Now().Add(time.Minute)})
 		if index == 0 {
 			clock.Advance(2 * time.Second)
 		}

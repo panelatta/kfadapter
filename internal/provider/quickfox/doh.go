@@ -10,10 +10,12 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -39,9 +41,16 @@ const (
 	// maxDoHBudget bounds one lookup so a stalled resolver leaves the
 	// handshake time for the system resolver fallback.
 	maxDoHBudget = 3 * time.Second
-	// dohBackoff skips the resolver after a failure so an outage costs at
+	// dohBackoff skips the resolver after it fails so an outage costs at
 	// most one budget per backoff window instead of one per connection.
 	dohBackoff = 30 * time.Second
+	// dohNameRetry keeps one name on the system resolver after its lookup
+	// failed upstream, so a slow authoritative server costs one budget per
+	// window for that name without pausing DoH for other names.
+	dohNameRetry = 30 * time.Second
+	// dohNameFailureLimit distinct names failing in a row, with no answer in
+	// between, mean the resolver itself is struggling.
+	dohNameFailureLimit = 3
 )
 
 var (
@@ -51,6 +60,9 @@ var (
 	// errDoHUnavailable marks resolver failures that fall back to the
 	// system resolver and start the backoff window.
 	errDoHUnavailable = errors.New("quickfox: DoH resolver unavailable")
+	// errDoHNameFailed marks a timeout after the connection was ready or a
+	// SERVFAIL: the name's upstream failed, not the resolver.
+	errDoHNameFailed = errors.New("quickfox: DoH lookup failed for this name")
 )
 
 type dohResolver struct {
@@ -61,6 +73,8 @@ type dohResolver struct {
 	mu           sync.Mutex
 	cache        map[dohCacheKey]dohCacheEntry
 	backoffUntil time.Time
+	// nameFailures counts distinct names that failed since the last answer.
+	nameFailures int
 }
 
 type dohCacheKey struct {
@@ -69,9 +83,10 @@ type dohCacheKey struct {
 }
 
 // dohCacheEntry holds unfiltered A records; nil addresses cache a negative
-// answer.
+// answer, and failed sends the name to the system resolver until it expires.
 type dohCacheEntry struct {
 	addresses []netip.Addr
+	failed    bool
 	expires   time.Time
 }
 
@@ -111,8 +126,10 @@ func newDoHResolver(endpoint string, client *http.Client) (*dohResolver, error) 
 }
 
 // lookup returns the A records for host as seen from node's /24. Parent
-// cancellation is returned as is; a resolver failure wraps errDoHUnavailable
-// and starts the backoff window, while a name that cannot be encoded does not.
+// cancellation is returned as is. A resolver failure wraps errDoHUnavailable
+// and starts the backoff window; a name failure wraps errDoHNameFailed and
+// sends only that name to the system resolver for a while; a name that cannot
+// be encoded changes neither.
 func (resolver *dohResolver) lookup(ctx context.Context, host string, node netip.Addr, budget time.Duration) ([]netip.Addr, error) {
 	if !node.Is4() {
 		return nil, errors.New("quickfox: DoH subnet requires an IPv4 node")
@@ -135,7 +152,10 @@ func (resolver *dohResolver) lookup(ctx context.Context, host string, node netip
 	now := resolver.clock()
 	if entry, ok := resolver.cache[key]; ok && now.Before(entry.expires) {
 		resolver.mu.Unlock()
-		if entry.addresses == nil {
+		switch {
+		case entry.failed:
+			return nil, fmt.Errorf("%w: retrying later", errDoHNameFailed)
+		case entry.addresses == nil:
 			return nil, errDoHNoAddress
 		}
 		return entry.addresses, nil
@@ -152,22 +172,40 @@ func (resolver *dohResolver) lookup(ctx context.Context, host string, node netip
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	if err != nil && !errors.Is(err, errDoHNoAddress) {
-		resolver.mu.Lock()
-		resolver.backoffUntil = resolver.clock().Add(dohBackoff)
-		resolver.mu.Unlock()
-		return nil, err
-	}
-	resolver.store(key, dohCacheEntry{addresses: addresses, expires: resolver.clock().Add(ttl)})
+	resolver.record(key, addresses, ttl, err)
 	if err != nil {
 		return nil, err
 	}
 	return addresses, nil
 }
 
-func (resolver *dohResolver) store(key dohCacheKey, entry dohCacheEntry) {
+// record caches one exchange's outcome and updates the backoff state.
+func (resolver *dohResolver) record(key dohCacheKey, addresses []netip.Addr, ttl time.Duration, err error) {
 	resolver.mu.Lock()
 	defer resolver.mu.Unlock()
+	now := resolver.clock()
+	switch {
+	case err == nil || errors.Is(err, errDoHNoAddress):
+		resolver.nameFailures = 0
+		resolver.storeLocked(key, dohCacheEntry{addresses: addresses, expires: now.Add(ttl)})
+	case errors.Is(err, errDoHNameFailed):
+		// Concurrent connections to one slow name count once.
+		if previous, ok := resolver.cache[key]; ok && previous.failed && now.Before(previous.expires) {
+			return
+		}
+		resolver.storeLocked(key, dohCacheEntry{failed: true, expires: now.Add(dohNameRetry)})
+		resolver.nameFailures++
+		if resolver.nameFailures >= dohNameFailureLimit {
+			resolver.nameFailures = 0
+			resolver.backoffUntil = now.Add(dohBackoff)
+		}
+	default:
+		resolver.nameFailures = 0
+		resolver.backoffUntil = now.Add(dohBackoff)
+	}
+}
+
+func (resolver *dohResolver) storeLocked(key dohCacheKey, entry dohCacheEntry) {
 	if _, ok := resolver.cache[key]; !ok && len(resolver.cache) >= maxDoHCacheEntries {
 		now := resolver.clock()
 		for cached, value := range resolver.cache {
@@ -186,6 +224,8 @@ func (resolver *dohResolver) store(key dohCacheKey, entry dohCacheEntry) {
 }
 
 func (resolver *dohResolver) exchange(ctx context.Context, query []byte, name dnsmessage.Name) ([]netip.Addr, time.Duration, error) {
+	var connected atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, resolver.endpoint, bytes.NewReader(query))
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: %w", errDoHUnavailable, err)
@@ -194,6 +234,11 @@ func (resolver *dohResolver) exchange(ctx context.Context, query []byte, name dn
 	request.Header.Set("Accept", dohMediaType)
 	response, err := resolver.client.Do(request)
 	if err != nil {
+		// Waiting past the budget on a ready connection is a slow upstream
+		// for this name; failing to connect is the resolver's own failure.
+		if connected.Load() && errors.Is(err, context.DeadlineExceeded) {
+			return nil, 0, fmt.Errorf("%w: %w", errDoHNameFailed, err)
+		}
 		return nil, 0, fmt.Errorf("%w: %w", errDoHUnavailable, err)
 	}
 	defer response.Body.Close()
@@ -260,6 +305,8 @@ func decodeDoHAnswer(message []byte, name dnsmessage.Name) ([]netip.Addr, time.D
 	case dnsmessage.RCodeSuccess:
 	case dnsmessage.RCodeNameError:
 		return nil, negativeDoHTTL, errDoHNoAddress
+	case dnsmessage.RCodeServerFailure:
+		return nil, 0, fmt.Errorf("%w: response code %s", errDoHNameFailed, header.RCode)
 	default:
 		return nil, 0, fmt.Errorf("%w: response code %s", errDoHUnavailable, header.RCode)
 	}

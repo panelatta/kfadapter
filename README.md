@@ -226,7 +226,7 @@ rootless Docker 或启用 userns-remap 时，用 `CHINADAPTER_HOST_UID` 和 `CHI
 ## 已知限制
 
 - **管理监听器提供 HTTP。** 直接连接时，访问令牌、provider 密码和会话 Cookie 以明文在网络上传输。请只在可信网络中使用，或按上文配置 TLS 反向代理及 `management.publicOrigin`。
-- **QuickFox 会在本地解析域名。** QuickFox 的隧道协议只能携带 IPv4 地址，所以 SOCKS 客户端请求的域名由 chinadapter 所在主机解析，解析到回环、私有或运营商 NAT 地址的结果会被丢弃。主机在海外时，国内 CDN 会按主机的位置分配节点：2026-10 用新加坡 VPS 的网段实测，B 站视频域名分到与节点不同运营商的国内节点，图片、静态资源和 API 域名则分到新加坡、美国或香港的海外节点，流量经过国内节点后又绕回海外。设置 `provider.quickfoxDoH`（例如 AliDNS `https://223.5.5.5/dns-query`）后，chinadapter 改向该 DoH 服务器查询，并把所选 QuickFox 节点所在的 /24 作为 ECS 发送，CDN 便按节点的网络分配；DoH 失败时回退到本机 DNS，并在 30 秒内不再尝试。无论哪种方式，解析服务器都能看到这些域名；ECS 只包含 QuickFox 节点的网段，不含你的地址。快帆节点不受此限制。
+- **QuickFox 会在本地解析域名。** QuickFox 的隧道协议只能携带 IPv4 地址，所以 SOCKS 客户端请求的域名由 chinadapter 所在主机解析，解析到回环、私有或运营商 NAT 地址的结果会被丢弃。主机在海外时，国内 CDN 会按主机的位置分配节点：2026-10 用新加坡 VPS 的网段实测，B 站视频域名分到与节点不同运营商的国内节点，图片、静态资源和 API 域名则分到新加坡、美国或香港的海外节点，流量经过国内节点后又绕回海外。设置 `provider.quickfoxDoH`（例如 AliDNS `https://223.5.5.5/dns-query`）后，chinadapter 改向该 DoH 服务器查询，并把所选 QuickFox 节点所在的 /24 作为 ECS 发送，CDN 便按节点的网络分配；DoH 查询失败时本次回退到本机 DNS：单个域名超时或上游返回 SERVFAIL，只让这个域名在 30 秒内改用本机 DNS；连不上 DoH 服务器，或连续 3 个不同域名失败，才暂停 DoH 30 秒。无论哪种方式，解析服务器都能看到这些域名；ECS 只包含 QuickFox 节点的网段，不含你的地址。快帆节点不受此限制。
 - **QuickFox 不支持 IPv6 目标。** 目标是 IPv6 地址或域名没有可用公网 IPv4 地址时，`CONNECT` 返回 SOCKS 应答码 `0x08`；UDP 关联里发往 IPv6 的数据报会被逐个丢弃。QuickFox 的 UDP（包括 QUIC）经 TCP 承载的数据报中继转发，支持 IPv4 和域名目标，超过 2034 字节的单个数据报会被丢弃。
 - 已建立的 SOCKS 连接每 30 秒复查一次凭据和线路：更换访问令牌、provider 登出或线路下线后，连接会被关闭；provider 正常刷新不会中断连接。
 - 同一客户端 IP 最多同时保持 32 个尚未完成认证的连接（所有入站协议合计）。
