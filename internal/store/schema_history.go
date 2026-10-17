@@ -80,11 +80,25 @@ var sqliteSchemaV5Statements = []string{
 	`CREATE TABLE active_session_node_profiles (position INTEGER PRIMARY KEY REFERENCES active_session_nodes(position) ON DELETE CASCADE, client_profile TEXT NOT NULL)`,
 }
 
-// sqliteSchemaV9Tables is upstream chinadapter v9: the current schema without
-// smart-proxy preferences.
-var sqliteSchemaV9Tables = func() map[string]int {
+// sqliteSchemaV11Tables is the merged schema v11: the current schema without
+// inbound preferences.
+var sqliteSchemaV11Tables = func() map[string]int {
 	tables := make(map[string]int, len(sqliteSchemaTables)-1)
 	for name, index := range sqliteSchemaTables {
+		if name != "inbound_preferences" {
+			tables[name] = index
+		}
+	}
+	return tables
+}()
+
+var sqliteSchemaV11Statements = sqliteSchemaStatements[:len(sqliteSchemaV11Tables)]
+
+// sqliteSchemaV9Tables is upstream chinadapter v9: schema v11 without
+// smart-proxy preferences.
+var sqliteSchemaV9Tables = func() map[string]int {
+	tables := make(map[string]int, len(sqliteSchemaV11Tables)-1)
+	for name, index := range sqliteSchemaV11Tables {
 		if name != "smart_proxy_preferences" {
 			tables[name] = index
 		}

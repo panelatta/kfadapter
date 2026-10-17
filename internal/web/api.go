@@ -61,6 +61,7 @@ type BrowserSessionPersistence interface {
 type Dependencies struct {
 	Backend       Backend
 	Smart         SmartProxy
+	Inbounds      Inbounds
 	Subscriptions SubscriptionService
 	Liveness      Liveness
 	Sessions      BrowserSessionPersistence
@@ -210,6 +211,8 @@ type NodeDetails struct {
 	SocksPassword string `json:"socksPassword"`
 	Health        string `json:"health"`
 	TCPLatencyMS  int    `json:"tcpLatencyMs,omitempty"`
+	// Profiles render the node for every enabled inbound protocol.
+	Profiles []ProxyProfile `json:"profiles,omitempty"`
 }
 
 // ProbeResult reports the latest bounded TCP probe for one node.
@@ -238,6 +241,7 @@ type API struct {
 	config        Config
 	backend       Backend
 	smart         SmartProxy
+	inbounds      Inbounds
 	subscriptions SubscriptionService
 	liveness      Liveness
 	listenIP      netip.Addr
@@ -313,7 +317,7 @@ func NewAPI(config Config, dependencies Dependencies) (*API, error) {
 		return nil, fmt.Errorf("restore browser sessions: %w", err)
 	}
 	api := &API{
-		config: config, backend: dependencies.Backend, smart: dependencies.Smart, subscriptions: dependencies.Subscriptions,
+		config: config, backend: dependencies.Backend, smart: dependencies.Smart, inbounds: dependencies.Inbounds, subscriptions: dependencies.Subscriptions,
 		liveness: dependencies.Liveness, listenIP: listenIP, listenPort: listenPort, hostname: config.Hostname,
 		socksIP: socksIP, socksPort: socksPort, publicOrigin: publicOrigin,
 		sessions: sessions,

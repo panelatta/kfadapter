@@ -68,3 +68,26 @@ func decodeForkBrowserSessionHash(stored string) ([]byte, bool) {
 	hash, err := base64.RawURLEncoding.DecodeString(stored)
 	return hash, err == nil
 }
+
+// migrateSQLiteV11ToV12 adds inbound preferences with every optional inbound
+// protocol disabled, so an upgrade opens no new listener by itself.
+func migrateSQLiteV11ToV12(ctx context.Context, db *sql.DB) error {
+	if err := validateSQLiteSchemaDefinition(ctx, db, 11, sqliteSchemaV11Tables, sqliteSchemaV11Statements); err != nil {
+		return err
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return corruptDatabase(err)
+	}
+	defer tx.Rollback()
+	for _, query := range []string{
+		sqliteSchemaStatements[sqliteSchemaTables["inbound_preferences"]],
+		"INSERT INTO inbound_preferences (id, snell, shadowsocks, socks_tls) VALUES (1, 0, 0, 0)",
+		"UPDATE schema_version SET version = 12 WHERE id = 1",
+	} {
+		if _, err := tx.ExecContext(ctx, query); err != nil {
+			return corruptDatabase(err)
+		}
+	}
+	return corruptDatabase(tx.Commit())
+}

@@ -2,7 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { ApiClient } from "./api";
-import { currentConsumerURL, disabledSmartProxy, nodes, readyStatus, updatedConsumerURL } from "./test/fixtures";
+import { currentConsumerURL, disabledSmartProxy, inboundsStatus, nodes, readyStatus, updatedConsumerURL } from "./test/fixtures";
 import { TestEventSource } from "./test/setup";
 
 function response(payload: unknown, status = 200) {
@@ -27,6 +27,7 @@ function mountConsole(firstStatus?: Promise<Response>) {
     }
     if (path === "/api/v1/nodes") return Promise.resolve(response({ nodes: inventory }));
     if (path === "/api/v1/smart-proxy") return Promise.resolve(response(disabledSmartProxy()));
+    if (path === "/api/v1/inbounds") return Promise.resolve(response(inboundsStatus()));
     if (path === "/api/v1/subscription/url") return Promise.resolve(response({ url: subscriptionURL }));
     throw new Error(`Unexpected request: ${path}`);
   });

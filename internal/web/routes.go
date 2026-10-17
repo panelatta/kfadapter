@@ -39,6 +39,8 @@ func (a *API) routes() []apiRoute {
 		{http.MethodPut, "/api/v1/smart-proxy/config", false, plain(a.smartProxyConfigure)},
 		{http.MethodPost, "/api/v1/smart-proxy/probe", false, plain(a.smartProxyProbe)},
 		{http.MethodGet, "/api/v1/smart-proxy/details", false, plain(a.smartProxyDetails)},
+		{http.MethodGet, "/api/v1/inbounds", false, plain(a.inboundsStatus)},
+		{http.MethodPut, "/api/v1/inbounds/config", false, plain(a.inboundsConfigure)},
 	}
 }
 

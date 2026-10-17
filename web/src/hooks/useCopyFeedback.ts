@@ -41,3 +41,24 @@ export function useCopyFeedback(value: string, successMessage: string) {
     const message = feedback?.value === value ? feedback.message : "";
     return { message, copy, clear };
 }
+
+/**
+ * Copies one of several values on demand and shows a short-lived message for
+ * the latest copy.
+ */
+export function useCopyStatus() {
+    const [message, setMessage] = useState("");
+    const resetTimer = useRef<number | undefined>(undefined);
+
+    useEffect(() => () => window.clearTimeout(resetTimer.current), []);
+
+    const copy = useCallback(async (value: string, successMessage: string) => {
+        window.clearTimeout(resetTimer.current);
+        setMessage("");
+        const copied = await copyText(value);
+        setMessage(copied ? successMessage : messages().errors.copyUnavailable);
+        resetTimer.current = window.setTimeout(() => setMessage(""), feedbackDurationMs);
+    }, []);
+
+    return { message, copy };
+}

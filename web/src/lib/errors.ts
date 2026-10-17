@@ -30,6 +30,9 @@ const problemMessages: Record<string, keyof Messages["errors"]> = {
     smart_config_failed: "smartConfigFailed",
     smart_probe_unavailable: "smartProbeUnavailable",
     smart_proxy_unavailable: "smartProxyUnavailable",
+    inbound_listen_failed: "inboundListenFailed",
+    invalid_inbounds: "invalidInbounds",
+    inbounds_config_failed: "inboundsConfigFailed",
 };
 
 export function describeError(error: unknown): string {

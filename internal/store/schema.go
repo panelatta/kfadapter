@@ -13,6 +13,7 @@ var sqliteSchemaTables = map[string]int{
 	"preferences": 3, "excluded_node_ids": 4, "active_session": 5,
 	"active_session_providers": 6, "active_session_authorities": 7,
 	"active_session_nodes": 8, "browser_sessions": 9, "smart_proxy_preferences": 10,
+	"inbound_preferences": 11,
 }
 
 var sqliteSchemaStatements = func() []string {
@@ -25,6 +26,8 @@ var sqliteSchemaStatements = func() []string {
 	// The kfadapter fork's v10 definition, kept byte-identical so its
 	// databases migrate without rebuilding this table.
 	statements = append(statements, `CREATE TABLE smart_proxy_preferences (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES preferences(id) ON DELETE CASCADE, enabled INTEGER NOT NULL, interval_minutes INTEGER NOT NULL)`)
+	// Schema v12 (fork only): which optional inbound protocols are enabled.
+	statements = append(statements, `CREATE TABLE inbound_preferences (id INTEGER PRIMARY KEY CHECK (id = 1) REFERENCES preferences(id) ON DELETE CASCADE, snell INTEGER NOT NULL, shadowsocks INTEGER NOT NULL, socks_tls INTEGER NOT NULL)`)
 	return statements
 }()
 

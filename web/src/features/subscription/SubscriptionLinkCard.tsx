@@ -17,10 +17,15 @@ export function SubscriptionLinkCard({ link }: { link: ReturnType<typeof useSubs
         filterName,
         filterProvider,
         filteredSubscriptionURL,
+        format,
         nodeProviders,
+        protocol,
+        protocols,
         setFilterGroup,
         setFilterName,
         setFilterProvider,
+        setFormat,
+        setProtocol,
     } = link;
     // Success shows on the button itself; only a failure needs a visible line.
     const copied = copyMessage === m.subscription.copied;
@@ -83,6 +88,35 @@ export function SubscriptionLinkCard({ link }: { link: ReturnType<typeof useSubs
                         />
                     </Field>
                 </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                    <Field label={m.subscription.format} name="subscription-format">
+                        <select
+                            className={selectClassName}
+                            id="subscription-format"
+                            onChange={(event) =>
+                                setFormat(event.currentTarget.value === "surge" ? "surge" : "")
+                            }
+                            value={format}
+                        >
+                            <option value="">{m.subscription.formats.base64}</option>
+                            <option value="surge">{m.subscription.formats.surge}</option>
+                        </select>
+                    </Field>
+                    <Field label={m.subscription.protocol} name="subscription-protocol">
+                        <select
+                            className={selectClassName}
+                            id="subscription-protocol"
+                            onChange={(event) => setProtocol(event.currentTarget.value)}
+                            value={protocol}
+                        >
+                            {protocols.map((option) => (
+                                <option key={option} value={option}>
+                                    {m.inbounds.names[option] ?? option}
+                                </option>
+                            ))}
+                        </select>
+                    </Field>
+                </div>
                 <div className="flex flex-col rounded-lg bg-ticket text-ticket-foreground sm:flex-row">
                     <code
                         aria-busy={!filteredSubscriptionURL}
@@ -121,6 +155,11 @@ export function SubscriptionLinkCard({ link }: { link: ReturnType<typeof useSubs
                 >
                     {copyMessage}
                 </p>
+                {format === "surge" ? (
+                    <p className="-mt-1 text-[0.8125rem] text-muted-foreground">
+                        {m.subscription.surgeHint}
+                    </p>
+                ) : null}
             </CardContent>
         </Card>
     );

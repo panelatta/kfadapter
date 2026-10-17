@@ -20,6 +20,8 @@ import { providerLabel, providerLoginStates } from "@/features/accounts/provider
 import { StatusBadge, stateDetail } from "@/features/accounts/StatusBadge";
 import { useAccountViews } from "@/features/accounts/useAccountViews";
 import { useDiagnosticsExport } from "@/features/diagnostics/useDiagnosticsExport";
+import { InboundsCard } from "@/features/inbounds/InboundsCard";
+import { useInbounds } from "@/features/inbounds/useInbounds";
 import { NodeList } from "@/features/nodes/NodeList";
 import { SmartProxyCard } from "@/features/smart/SmartProxyCard";
 import { SubscriptionLinkCard } from "@/features/subscription/SubscriptionLinkCard";
@@ -174,7 +176,12 @@ function StatusConsole({
         () => nodes.filter((node) => node.eligible),
         [nodes],
     );
-    const subscriptionLink = useSubscriptionLink(eligibleNodes, subscriptionURL);
+    const inbounds = useInbounds({ api, getSessionRevision, onAccessLost });
+    const subscriptionLink = useSubscriptionLink(
+        eligibleNodes,
+        subscriptionURL,
+        inbounds.enabledProtocols,
+    );
     const accountView = useAccountViews(status, subscriptionLink.resetFilters);
     const { activeProvider, selectProvider } = accountView;
     const diagnostics = useDiagnosticsExport({
@@ -373,10 +380,15 @@ function StatusConsole({
                         <SubscriptionLinkCard link={subscriptionLink} />
                     ) : null}
 
+                    {activeProvider === "all" ? (
+                        <InboundsCard inbounds={inbounds} />
+                    ) : null}
+
                     <SmartProxyCard
                         api={api}
                         getSessionRevision={getSessionRevision}
                         onAccessLost={onAccessLost}
+                        protocols={inbounds.enabledProtocols}
                     />
 
                     {activeAccount ? (

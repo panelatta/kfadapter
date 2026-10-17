@@ -7,8 +7,8 @@
 
 | Area | Decision |
 |---|---|
-| Adapter interface | Expose one authenticated SOCKS5 listener. Each logical node is represented by a credential-bearing `socks5://` URI. |
-| Subscription interface | Render a Base64-encoded, newline-delimited list of SOCKS5 URIs at one installation-bound UUIDv8 path. External consumers fetch that path on their own schedule. |
+| Adapter interface | Expose one authenticated SOCKS5 listener, plus optional Snell v6 (unshaped), Shadowsocks 2022 and SOCKS5-TLS listeners that the console enables. Each logical node has its own credential on every protocol: a `socks5://` username, a Snell PSK, a Shadowsocks 2022 user key. |
+| Subscription interface | Render a Base64-encoded, newline-delimited list of SOCKS5 URIs at one installation-bound UUIDv8 path; query options select `ss://` URIs or plain Surge policy lines for any enabled protocol. External consumers fetch that path on their own schedule. |
 | Control plane | Serve the local UI and JSON API from the Go daemon. A local access token protects the browser session; provider login credentials remain transient, while validated provider session authority is retained in protected SQLite until explicit provider logout. |
 | Data plane | Dispatch KuaiFan iOS-profile nodes through the observed Fanster-branded `WIFIIN` TCP and UDP-over-TCP framing and Windows-profile nodes through `SPEEDIN` (Shadowsocks AEAD with provider authentication, native UDP); QuickFox nodes through its observed native XOR-framed TCP proxy and TCP-carried datagram relay; Transocks nodes through on-demand Shadowsocks or Trojan; Baidu Proxy nodes through HTTP CONNECT (TCP only). |
 | Smart route | One extra SOCKS username selects, per connection, the route that best reached domestic HTTPS sites in the latest scheduled probe round. |
@@ -44,7 +44,7 @@ The external consumer remains outside the adapter trust boundary. It fetches the
 
 ### Non-goals
 
-- Implementing a general VPN, routing engine, or a protocol other than SOCKS5 for external consumers.
+- Implementing a general VPN or routing engine, or inbound protocols beyond SOCKS5, SOCKS5-TLS, Snell v6 (unshaped) and Shadowsocks 2022 TCP.
 - Promising compatibility with a consumer that does not accept Base64-encoded newline-delimited SOCKS5 URIs.
 - Exposing the UI, SOCKS listener, or subscription endpoint to the LAN by default.
 - Persisting raw local access tokens, provider login accounts or passwords, or relay state.
@@ -60,7 +60,7 @@ The daemon maintains three related state domains:
 - **Browser access state** contains `sha256(cookieToken)` and expiry. Raw cookie tokens are never persisted; the unused legacy CSRF column remains only for schema compatibility. Login attempts and throttling reservations remain process-local.
 - **Installation identity** derives subscription and SOCKS credentials from the installation ID and the local access-token verifier. Provider identities and display labels never participate. No separate binding keys, account-scoped selector keys, or rendered subscription body are stored.
 
-Schema v11 contains exactly `schema_version`, `state_metadata`, `access_token_verifier`, `preferences`, `excluded_node_ids`, `active_session`, `active_session_providers`, `active_session_authorities`, `active_session_nodes`, `browser_sessions`, and `smart_proxy_preferences`. `InstallationID`, exclusions, the smart-route policy, provider account/refresh/authority/node rows, expiry hints, and the Argon2id verifier remain durable. The legacy `preferences.refresh_policy` column is kept for schema compatibility but ignored; `provider.refreshInterval` in `config.yaml` is authoritative. Live username maps are rebuilt from the catalog and identity.
+Schema v12 contains exactly `schema_version`, `state_metadata`, `access_token_verifier`, `preferences`, `excluded_node_ids`, `active_session`, `active_session_providers`, `active_session_authorities`, `active_session_nodes`, `browser_sessions`, `smart_proxy_preferences`, and `inbound_preferences`. `InstallationID`, exclusions, the smart-route policy, the inbound protocol switches, provider account/refresh/authority/node rows, expiry hints, and the Argon2id verifier remain durable. The legacy `preferences.refresh_policy` column is kept for schema compatibility but ignored; `provider.refreshInterval` in `config.yaml` is authoritative. Live username maps are rebuilt from the catalog and identity.
 
 The store requires a non-symlinked, current-UID-owned `0700` directory and a regular, non-symlinked, current-UID-owned `0600` database with exactly one link. Initial creation and aggregate replacement are transactional. SQLite uses `_txlock=immediate`, foreign keys, a bounded busy timeout, secure deletion, rollback-journal `DELETE` mode, and `synchronous=FULL`. Every store operation accepts a context and uses context-aware SQL. Integrity checking runs only when opening a database; `Load` never prunes or writes state. The single aggregate write path validates its input and uses prepared statements for bulk inserts. `ErrStateBusy` distinguishes SQLite busy contention from corruption. Every physical connection sets `max_page_count` so `state.db` cannot grow past 18 MiB: an oversized write rolls back with `ErrStateFull` and the previous state stays intact. A closed store never silently reopens (`ErrStoreClosed`). A first run interrupted before its schema was committed leaves an incomplete file that the next start removes and recreates; any other unexpected file in the state directory is refused by name. Browser sessions whose expiry lies beyond the 24-hour maximum lifetime (a clock that stepped back) are pruned rather than treated as corruption. An injected clock controls browser-session lifecycle; eviction retains the latest expiry dates first (`expires_at_ns DESC`) and removes the oldest excess rows.
 
@@ -92,7 +92,15 @@ nodeID = provider || "_" || base64url(SHA256(nodeKey)[:12])
 socksUsername = "n_" || base64url(HMAC-SHA256(instanceKey,
                     "chinadapter/socks-user/v3\x00" || nodeKey)[:12])
 smartUsername = "a_" || base64url(HMAC-SHA256(instanceKey, "chinadapter/smart-user/v1")[:12])
+snellPSK = base64url(HMAC-SHA256(instanceKey, "chinadapter/snell-psk/v1\x00" || nodeKey)[:18])
+smartSnellPSK = base64url(HMAC-SHA256(instanceKey, "chinadapter/snell-smart-psk/v1")[:18])
+ssServerKey = HMAC-SHA256(instanceKey, "chinadapter/ss2022-server/v1")[:16]
+ssUserKey = HMAC-SHA256(instanceKey, "chinadapter/ss2022-user/v1\x00" || nodeKey)[:16]
+smartSSUserKey = HMAC-SHA256(instanceKey, "chinadapter/ss2022-smart-user/v1")[:16]
+tlsKey = first valid P-256 scalar of HMAC-SHA256(instanceKey, "chinadapter/tls-key/v1\x00" || counter)
 ```
+
+The SOCKS5-TLS certificate is self-signed for `chinadapter`, valid 2025–2099, and signed with RFC 6979 deterministic ECDSA, so its DER bytes and SHA-256 fingerprint are reproducible from the instance key: they survive restarts and change only with the access token, like every other credential.
 
 UUID construction uses the first 16 digest bytes, sets the version nibble to 8 and the RFC 9562 variant bits to `10`, and formats a lowercase canonical 36-character UUID. There is no usable installation key before token setup, so subscription and SOCKS authentication are unavailable. All nodes share the instance password; a node's username depends only on its transport route. KuaiFan dials `NodeHost:NodePort`; QuickFox resolves `NodeHost` and dials `NodePort`. Transocks uses a stable synthetic line route and resolves its line ID from opaque authority to a provider-issued tunnel endpoint. Every transport dials only through the request's `Dial` function. Display labels are not routing inputs; authority identity is checked separately when pinning a tunnel.
 
@@ -105,6 +113,10 @@ The rendered subscription body, derived selector credentials, provider session a
 ### Schema v9 release note
 
 Upgrading from v8 changes the subscription URL and SOCKS credentials once. Copy the new `/sub/<36-char-uuid>` URL into each external consumer after upgrading. Subsequent provider account changes no longer rotate credentials. The v8-to-v9 migration keeps both providers' accounts, refresh state, authorities and nodes because every `nodeKey` input is already persisted; neither provider requires re-login or a forced catalog refresh. It recomputes route-based node IDs, merges duplicate routes, remaps known excluded IDs and drops exclusions with no matching node. Existing raw browser-session tokens are hashed so their cookies remain valid. It removes `subscription_authority`, `active_session_selectors`, `last_good`, `last_good_nodes`, and the stored node selector column. The committed `internal/store/testdata/v8.db` fixture was created by the v8 store at HEAD `a25303b` in a temporary worktree before store changes and exercises this preservation contract. Historical v4–v7 migrations retain their existing renewable-authority cutovers before reaching v9.
+
+### Schema v12
+
+Schema v12 (fork only) is v11 plus `inbound_preferences`, one row of three booleans for Snell, Shadowsocks 2022 and SOCKS5-TLS. Every migration path ends at v11 and then adds the row with all three disabled, so an upgrade never opens a listener by itself. A future upstream schema bump must be renumbered past 12.
 
 ### Schema v11 and the kfadapter lineage
 
@@ -226,6 +238,9 @@ management:
   sessionTTL: 30m
 proxy:
   port: 10808
+  snellPort: 10810
+  shadowsocksPort: 10811
+  socksTLSPort: 10812
   dialTimeout: 10s
   handshakeTimeout: 15s
 provider:
@@ -233,6 +248,8 @@ provider:
   refreshInterval: 2h
   # quickfoxDoH: https://223.5.5.5/dns-query
 ```
+
+The three optional inbound ports default to 10810–10812 when omitted. All five ports must differ. An optional listener binds `listenAddr` on its port only while the console has it enabled.
 
 `management.publicOrigin` optionally names the canonical HTTPS origin of a TLS reverse proxy in front of the console, such as `https://console.example.com` or `https://console.example.com:8443`. It must be lowercase, without path, trailing slash, credentials, query, fragment, default `:443`, loopback address or `localhost`. The proxy must set the upstream `Host` to that authority and keep the browser's `Origin`; `Forwarded` and `X-Forwarded-*` are never trusted. Requests carrying the public authority are admitted, receive `Secure` cookies, and can never perform first-time setup. When it is set, subscription URLs use the public origin, and SOCKS advertisements use `hostname` (or the public origin's host) with `proxy.port`.
 
@@ -320,7 +337,7 @@ Session cookies are `HttpOnly` and `SameSite=Strict`. Their SHA-256 token hashes
 | `POST /api/v1/control/refresh` with `{provider}` | Authenticated session | Refreshes only the named provider from its opaque persisted refresh state. |
 | `GET /api/v1/status` | Authenticated session | Returns provider IDs, `providerAuth` (each provider's credential fields as `{key, label, secret}`; empty for a public provider), and provider-keyed browser-safe account views containing `provider`, redacted `display`, provider-defined `tier`, `subscriptionActive`, and `subscriptionEndsAt` only for active subscriptions; raw account IDs and authority are omitted. |
 | `GET /api/v1/nodes` | Authenticated session | Returns status-only eligible node rows without endpoints or credentials. |
-| `GET /api/v1/nodes/{id}/details` | Authenticated session | Returns one non-cacheable, locally derived SOCKS profile for the current node. |
+| `GET /api/v1/nodes/{id}/details` | Authenticated session | Returns one non-cacheable, locally derived SOCKS profile for the current node, plus `profiles` for every enabled inbound protocol. |
 | `GET /api/v1/subscription/url` | Authenticated session | Returns reusable `{url}`. Ordinary status responses never contain the URL. |
 | `GET /api/v1/subscription` | Authenticated session | Returns URL-free subscription metadata: active state and node count. |
 | `POST /api/v1/nodes/{id}/probe` with `{}` | Authenticated session | Performs one bounded direct TCP reachability check to the relay host and port. It does not send provider authentication, a tunnel preface, or a destination. Success returns `{nodeId, health, tcpLatencyMs?, probedAt}`. |
@@ -329,7 +346,9 @@ Session cookies are `HttpOnly` and `SameSite=Strict`. Their SHA-256 token hashes
 | `GET /api/v1/smart-proxy` | Authenticated session | Smart-route status: policy, running state, last/next round, candidate coverage, the selected route and per-site results. No credentials or endpoints. |
 | `PUT /api/v1/smart-proxy/config` with `{enabled, intervalMinutes}` | Authenticated session | Persists the policy; the interval must be 30 or 60 (`400 invalid_smart_policy`). Changing it starts a new round. |
 | `POST /api/v1/smart-proxy/probe` with `{}` | Authenticated session | Starts a round now (`202`), or `409 smart_probe_unavailable` while disabled or already running. |
-| `GET /api/v1/smart-proxy/details` | Authenticated session | Returns the smart SOCKS address, username, password and `socks5://` URL on explicit demand; `503 smart_proxy_unavailable` while disabled or signed out. |
+| `GET /api/v1/smart-proxy/details` | Authenticated session | Returns the smart SOCKS address, username, password and `socks5://` URL on explicit demand, plus `profiles` (a Surge line and URI per enabled inbound protocol); `503 smart_proxy_unavailable` while disabled or signed out. |
+| `GET /api/v1/inbounds` | Authenticated session | Every inbound protocol's port, enabled and listening state (`problem: listen_failed` when an enabled port could not bind) and the public SOCKS5-TLS certificate fingerprint. |
+| `PUT /api/v1/inbounds/config` with `{snell, shadowsocks, socksTLS}` | Authenticated session | Binds newly enabled ports before persisting (`409 inbound_listen_failed` changes nothing), then stops disabled listeners and ends their flows. All three booleans are required (`400 invalid_inbounds`). |
 
 Every API response is non-cacheable. All API mutations (every non-`GET` route) use `net/http.CrossOriginProtection`, including setup and login, and require `Content-Type: application/json`; protected routes also require the browser session cookie. Cross-site and same-site browser mutations are rejected with `403 invalid_origin` based on `Sec-Fetch-Site`. Without that header, the standard library compares the parsed `Origin` host (including port) to the validated request Host; matching hosts are accepted without enforcing the scheme or canonical Origin formatting. Requests with neither header are permitted for non-browser clients, still subject to authentication and JSON validation. No CSRF token header is required. `GET /api/v1/events` keeps its own origin check, since the standard protection always permits safe methods. Failures use `application/problem+json` with `{code, status, title, detail?}`. The browser must branch on `code`, not provider text. Probe codes are `probe_busy` (`429`), `node_not_found` (`404`), `node_ineligible` and `node_snapshot_unavailable` (`409`), `stale_probe` (`409`), `tcp_probe_timeout` (`504`), and `tcp_probe_failed` (`502`).
 
@@ -350,7 +369,15 @@ For each `CONNECT`, the server authenticates and resolves a compact pin, checks 
 
 At most 32 not-yet-authenticated connections per client IP are admitted, so one LAN host cannot hold every connection slot through the handshake timeout.
 
-### 6.1 Smart route
+### 6.1 Optional inbound protocols
+
+Snell, Shadowsocks 2022 and SOCKS5-TLS frontends share the SOCKS server's connection slots, per-client setup limit (32 unauthenticated connections per IP across all protocols), credential registry and dispatch path: after a frontend identifies a route, the same pin revalidation, `Admit` gate, 30-second flow revalidation and transport relay apply as for a SOCKS `CONNECT` or `UDP ASSOCIATE`. One immutable registry generation holds every protocol's credentials, so a token change or route removal revokes them together. Accepted connections enable TCP keepalive (30 s idle, 10 s interval, 3 probes). Disabling a protocol closes its listener and ends the flows it accepted; the other listeners are unaffected.
+
+- **Snell v6, unshaped mode.** Each direction starts with a 16-byte salt; the AES-128-GCM key is Argon2id(psk, salt, t=3, m=8 KiB, p=1)[:16] with a 12-byte little-endian counter nonce. A record is seal(7-byte header: version 4, two reserved zero bytes, zero padding length, big-endian payload length) followed by seal(payload); an empty record is the in-band half-close. The wire format was verified against snell-server v6.0.0rc2 in unshaped mode. A connection is identified by trying each route's PSK on the first sealed header; recently matched PSKs go first, and concurrent trials are bounded by the CPU count. Requests are `[1][command][client-id][host][port]`: `CONNECT` closes the connection after one request, `CONNECT v2` (`reuse=true`) serves further requests once both directions ended in band, idling at most five minutes between them, and `UDP` relays datagrams as one record each (`[1][host-length][host or family+IP][port][payload]` in, `[0x04|0x06][IP][port][payload]` out). The tunnel response byte rides on the first downstream record; a failure before the relay is ready returns `[2][code][message]` with the SOCKS reply code and closes the connection. The PSK-shaped `default` mode and Snell v5 and earlier are not implemented.
+- **Shadowsocks 2022.** `2022-blake3-aes-128-gcm` TCP with SIP023 extensible identity headers: one server PSK and one user PSK per route (the Surge password `serverKey:userKey`), so a request identifies its route with one AES block decryption and a hash lookup. Timestamps outside ±30 s and salts seen in the last 60 s are rejected; failed requests are drained rather than answered. There is no in-band success or failure reply. UDP is not served.
+- **SOCKS5-TLS.** The SOCKS5 frontend behind TLS 1.2+ with the derived certificate, which clients pin by fingerprint. It accepts the same usernames and password as SOCKS5.
+
+### 6.2 Smart route
 
 The smart username (`a_…`, see §3) shares the instance password. While the smart route is enabled, authenticating with it resolves, once per connection, the best route of the latest completed round; that connection then behaves like a direct node connection and keeps its route even if a later round picks another. Disabling the route rejects new smart connections and ends established ones at their next 30-second check; per-node usernames are unaffected. Until a round has a successful route, and when the route is disabled or no provider is linked, smart authentication fails closed; it never falls back to a direct connection.
 
@@ -379,6 +406,8 @@ GET /sub/<36-char-uuid>
 The strict parser accepts only lowercase canonical UUIDv8 text with RFC 9562 variant `10`, exactly one path segment, and no escaped aliases or trailing slash. The path is sensitive and is never logged or included in errors. After acquiring a bounded response slot, the handler validates the strict path, compares its UUID in constant time, loads the immutable catalog atomically and renders. It has no mutation, database write or global request lock.
 
 Malformed, revoked or unknown paths, unsupported methods, and empty selections return an empty non-cacheable `404` without redirect. Saturation is checked before path validation and returns the uniform empty `503` with `Retry-After: 1`, for valid and invalid paths alike. Optional `provider`, exact `group`, and case-insensitive `name` filters affect only presentation; duplicate parameters, empty values and unknown providers return the same empty `404`.
+
+`protocol` (`socks5`, `snell`, `shadowsocks`, `socks5-tls`) selects the inbound protocol and `format=surge` switches to plain-text Surge `[Proxy]` lines, one per route with deduplicated names. Without `format`, `protocol=shadowsocks` lists SIP002 `ss://` URIs in the same Base64 form; Snell and SOCKS5-TLS have no URI form and return the empty `404`, as does any disabled protocol. An unfiltered Surge list starts with the automatic route while it is enabled. Every rendered Surge line sets `block-quic=on` and a mainland `test-url`; Snell lines add `version=6, mode=unshaped, reuse=true`, and SOCKS5-TLS lines pin `server-cert-fingerprint-sha256`.
 
 Success is standard padded Base64 of deterministically sorted, newline-delimited URI text, generated with URL-library escaping:
 
@@ -419,7 +448,7 @@ Focused verification must cover observable behavior, including:
 8. Strict UUIDv8 paths return the exact Base64 body; malformed and revoked paths return the empty not-found contract. Saturation precedes path validation. Fifty concurrent subscriptions across three Host headers each render their own authority without a data race, database write or request-global mutation.
 9. SOCKS authenticates the selector, rejects unsupported commands, dispatches eligible `CONNECT` requests through the selected KuaiFan WIFIIN or QuickFox native TCP transport, relays KuaiFan IPv4 `UDP ASSOCIATE` through the observed WIFIIN UOT transport and QuickFox IPv4/domain `UDP ASSOCIATE` through its TCP-carried datagram relay, resolves QuickFox domain targets through the configured node-scoped DoH resolver with final negative answers and a bounded fallback to the system resolver, discards fragmented and unsupported-address UDP datagrams, preserves pre-admission pin checks, and never remaps an admitted flow.
 10. Production and developer Compose declare the managed logical `db_data` volume, mounted at `/chinadapter/data`, with no external or custom-name override. Under the fixed `chinadapter` production project it resolves to `chinadapter_db_data`; under `chinadapter-local` it resolves to `chinadapter-local_db_data`. Both preserve `state.db` across container recreation while remaining non-root and read-only outside documented writable mounts. `docker compose down -v` deletes that project's managed volume and its persisted provider and browser sessions; plain `down` does not.
-11. The real v8 fixture migrates to exact schema v11 with both provider accounts, refresh state and authorities retained, route IDs and exclusions remapped, browser cookie hashes matching the original raw tokens, and no re-login. The kfadapter v10 fixture migrates to exact schema v11 keeping both providers, the remapped exclusion, the smart-route policy and its already-hashed browser session; constructed fork v9, fork v10 and upstream v9 databases migrate too. Store tests cover context cancellation, read-only Load, busy errors, oldest-first session eviction, verifier-change revocation, the 18 MiB size limit, closed-store refusal, interrupted first runs, future-dated sessions, hot snapshots and restore validation of every supported version.
+11. The real v8 fixture migrates to exact schema v12 with both provider accounts, refresh state and authorities retained, route IDs and exclusions remapped, browser cookie hashes matching the original raw tokens, and no re-login. The kfadapter v10 fixture migrates to exact schema v12 keeping both providers, the remapped exclusion, the smart-route policy and its already-hashed browser session; constructed fork v9, fork v10, upstream v9 and merged v11 databases migrate too, with every inbound protocol disabled. Store tests cover context cancellation, read-only Load, busy errors, oldest-first session eviction, verifier-change revocation, the 18 MiB size limit, closed-store refusal, interrupted first runs, future-dated sessions, hot snapshots and restore validation of every supported version.
 12. Release gates are clean `gofmt -l cmd internal`, `go vet ./...`, `golangci-lint run ./...`, `govulncheck ./...`, `go test -race -count=1 ./...`, `npm ci && npm run lint && npm run build && npm test` in `web`, and the operational script tests in `scripts/check-*`.
 
 

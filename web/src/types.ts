@@ -87,6 +87,39 @@ export interface NodeDetails {
   socksPassword: string;
   health: NodeHealth;
   tcpLatencyMs?: number;
+  /** Client lines for every enabled inbound protocol. */
+  profiles?: ProxyProfile[];
+}
+
+/** One route reached through one enabled inbound protocol. */
+export interface ProxyProfile {
+  protocol: string;
+  port: number;
+  /** A Surge [Proxy] line. */
+  surge: string;
+  /** socks5:// or ss:// URI, when the protocol has one. */
+  uri?: string;
+}
+
+export interface InboundStatus {
+  protocol: string;
+  port: number;
+  enabled: boolean;
+  listening: boolean;
+  /** "listen_failed" when an enabled protocol could not bind its port. */
+  problem?: string;
+}
+
+export interface InboundsStatus {
+  inbounds: InboundStatus[];
+  /** SHA-256 of the SOCKS5-TLS certificate, pinned by clients. */
+  tlsFingerprint?: string;
+}
+
+export interface InboundChoices {
+  snell: boolean;
+  shadowsocks: boolean;
+  socksTLS: boolean;
 }
 
 export interface NodesResponse {
@@ -176,4 +209,5 @@ export interface SmartProxyDetails {
   socksUsername: string;
   socksPassword: string;
   url: string;
+  profiles?: ProxyProfile[];
 }

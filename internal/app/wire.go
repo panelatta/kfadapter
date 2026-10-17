@@ -16,6 +16,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/oshinop/chinadapter/internal/accounts"
+	"github.com/oshinop/chinadapter/internal/clientconfig"
 	"github.com/oshinop/chinadapter/internal/config"
 	"github.com/oshinop/chinadapter/internal/credentials"
 	"github.com/oshinop/chinadapter/internal/lifecycle"
@@ -42,6 +43,7 @@ type Daemon struct {
 	httpListener       net.Listener
 	socksServer        *socks.Server
 	socksListener      net.Listener
+	inbounds           *InboundManager
 	startupLog         io.Writer
 	version            string
 	managementEndpoint string
@@ -155,8 +157,24 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 	}
 	proxyAddress := cfg.ProxyAddress()
 	managementAddress := cfg.ManagementAddress()
+	inboundPorts := clientconfig.Ports{
+		SOCKS5: uint16(cfg.Proxy.Port), Snell: uint16(cfg.Proxy.SnellPort),
+		Shadowsocks: uint16(cfg.Proxy.ShadowsocksPort), SOCKS5TLS: uint16(cfg.Proxy.SocksTLSPort),
+	}
+	inboundManager, err := NewInboundManager(InboundConfig{
+		Server: socksServer, Store: store, Ports: inboundPorts, Initial: persistent.Preferences.Inbounds,
+		Addresses: map[clientconfig.Protocol]string{
+			clientconfig.Snell:       cfg.InboundAddress(cfg.Proxy.SnellPort),
+			clientconfig.Shadowsocks: cfg.InboundAddress(cfg.Proxy.ShadowsocksPort),
+			clientconfig.SOCKS5TLS:   cfg.InboundAddress(cfg.Proxy.SocksTLSPort),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 	subscriptionService, err := subscription.NewService(subscription.ServiceConfig{
-		Store: store, SocksAddress: proxyAddress,
+		Store: store, SocksAddress: proxyAddress, Ports: inboundPorts,
+		Inbounds: inboundManager.Preferences, SmartEnabled: smartService.Enabled,
 	})
 	if err != nil {
 		return nil, err
@@ -197,7 +215,10 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 		Listen: managementAddress, Hostname: cfg.Hostname, PublicOrigin: cfg.Management.PublicOrigin, SocksListen: proxyAddress,
 		Version: version, StartedAt: startedAt, SessionTTL: cfg.Management.SessionTTL.Value(),
 		ProviderRequestTimeout: cfg.Provider.RequestTimeout.Value(),
-	}, web.Dependencies{Backend: runtimeFacade, Smart: NewSmartProxyAdapter(smartService), Subscriptions: NewSubscriptionAdapter(subscriptionService), Sessions: store, Liveness: runtimeFacade})
+	}, web.Dependencies{
+		Backend: runtimeFacade, Smart: NewSmartProxyAdapter(smartService), Inbounds: NewInboundsAdapter(inboundManager, credentialCoordinator, manager),
+		Subscriptions: NewSubscriptionAdapter(subscriptionService), Sessions: store, Liveness: runtimeFacade,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +231,7 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 		_ = httpListener.Close()
 		return nil, err
 	}
-	return &Daemon{runtime: runtimeFacade, smart: smartService, manager: manager, store: store, httpServer: server, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, startupLog: os.Stdout, version: version, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
+	return &Daemon{runtime: runtimeFacade, smart: smartService, manager: manager, store: store, httpServer: server, httpListener: httpListener, socksServer: socksServer, socksListener: socksListener, inbounds: inboundManager, startupLog: os.Stdout, version: version, managementEndpoint: "http://" + managementAddress, proxyEndpoint: "socks5://" + proxyAddress}, nil
 }
 
 func validateListenInterface(listen string) error {
@@ -295,6 +316,7 @@ func (d *Daemon) Run(ctx context.Context) (result error) {
 		{Name: "management", Run: d.runWeb, Shutdown: d.shutdownWeb},
 		{Name: "accounts", Run: d.runtime.RunAccounts, Shutdown: func(context.Context) error { d.runtime.Stop(); return nil }},
 		{Name: "smart-proxy", Run: d.runSmartProxy},
+		{Name: "inbounds", Run: d.runInbounds},
 		{Name: "watchdog", Run: lifecycle.Watchdog(10*time.Second, 3, d.watchdog)},
 	})
 	if err != nil {
@@ -334,6 +356,14 @@ func (d *Daemon) runSmartProxy(ctx context.Context) error {
 		return ctx.Err()
 	}
 	return d.smart.Run(ctx)
+}
+
+func (d *Daemon) runInbounds(ctx context.Context) error {
+	if d.inbounds == nil {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return d.inbounds.Run(ctx)
 }
 
 func (d *Daemon) shutdownWeb(ctx context.Context) error {

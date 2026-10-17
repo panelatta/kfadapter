@@ -36,6 +36,11 @@ func (a *API) nodeDetails(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	details.SocksAddress = a.socksAddress(r)
+	if a.inbounds != nil {
+		if profiles, err := a.inbounds.NodeProfiles(details.ID, a.advertisedHost(r)); err == nil {
+			details.Profiles = profiles
+		}
+	}
 	a.writeJSON(w, http.StatusOK, details)
 }
 

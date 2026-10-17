@@ -154,6 +154,42 @@ export const en = {
         namePlaceholder: "Contains…",
         loading: "Loading link…",
         copied: "Link copied.",
+        format: "Format",
+        formats: {
+            base64: "Base64 links",
+            surge: "Surge lines",
+        },
+        protocol: "Protocol",
+        surgeHint:
+            "In Surge, use the link as a policy group's policy-path, or import it into Sub-Store.",
+    },
+    inbounds: {
+        title: "Inbound protocols",
+        description:
+            "Each protocol listens on its own fixed TCP port. Allow those ports in the server firewall before importing the matching client lines.",
+        names: {
+            socks5: "SOCKS5",
+            snell: "Snell v6",
+            shadowsocks: "Shadowsocks 2022",
+            "socks5-tls": "SOCKS5-TLS",
+        } as Record<string, string>,
+        details: {
+            socks5: "Always on · username and password",
+            snell: "unshaped · connection reuse · UDP over TCP",
+            shadowsocks: "2022-blake3-aes-128-gcm · multi-user keys",
+            "socks5-tls": "SOCKS5 over TLS · pinned certificate",
+        } as Record<string, string>,
+        port: (port: number) => `TCP ${port}`,
+        enableLabel: (name: string) => `Enable ${name}`,
+        alwaysOn: "Always on",
+        listening: "Listening",
+        off: "Off",
+        listenFailed: "Port unavailable",
+        fingerprint: "Certificate fingerprint (SHA-256)",
+        loading: "Loading inbound protocols…",
+        unavailable: "Inbound protocol status is unavailable.",
+        tuning:
+            "Generated Surge lines set block-quic=on, so Bilibili and other video players fall back to HTTP/2 over TCP at once instead of QUIC inside a TCP tunnel, and use a mainland test URL so latency tests measure the domestic side. Snell carries UDP inside its TCP connection, so no UDP port is needed.",
     },
     smart: {
         title: "Smart SOCKS5 proxy",
@@ -190,6 +226,9 @@ export const en = {
         probeRequested: "Probe requested.",
         copied: "Smart SOCKS5 address copied.",
         copyFailed: "Could not copy the address. Check clipboard permissions.",
+        surgeProtocol: "Surge protocol",
+        copySurge: "Copy Surge line",
+        surgeCopied: "Smart route Surge line copied.",
     },
     nodes: {
         title: "Nodes",
@@ -213,6 +252,13 @@ export const en = {
         health: "Health",
         latency: "Latency",
         copySocks: "Copy SOCKS5 URL",
+        clientLines: "Client lines",
+        copySurge: (name: string) => `Surge · ${name}`,
+        copySurgeLabel: (name: string) => `Copy Surge line for ${name}`,
+        copyShadowsocks: "ss:// URL",
+        copyShadowsocksLabel: "Copy ss:// URL",
+        surgeCopied: "Surge line copied.",
+        shadowsocksCopied: "ss:// URL copied.",
         socksCopied: "SOCKS5 URL copied.",
         healthLabels: {
             healthy: "Healthy",
@@ -258,6 +304,10 @@ export const en = {
             "The smart proxy address is not available yet. Try again in a moment.",
         requestFailed: "The local service did not complete that request.",
         copyUnavailable: "Copy is unavailable.",
+        inboundListenFailed:
+            "That port is in use or cannot be opened. Free it or change it in config.yaml, then try again.",
+        invalidInbounds: "Choose which inbound protocols to enable.",
+        inboundsConfigFailed: "The inbound settings could not be saved. Try again.",
     },
 };
 

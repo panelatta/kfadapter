@@ -3,10 +3,12 @@ package socks
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -16,6 +18,7 @@ import (
 
 	credentialspkg "github.com/oshinop/chinadapter/internal/credentials"
 	"github.com/oshinop/chinadapter/internal/provider"
+	"github.com/oshinop/chinadapter/internal/shadowsocks"
 	"github.com/oshinop/chinadapter/internal/state"
 )
 
@@ -59,8 +62,9 @@ type Config struct {
 	MaxConnections   int
 }
 
-// Server is a SOCKS5/RFC1929 frontend. Each immutable auth map is built from
-// the current snapshot; established flows retain only a compact tunnel pin.
+// Server hosts the proxy frontends: SOCKS5/RFC1929, SOCKS5 over TLS, Snell v6
+// and Shadowsocks 2022. Each immutable credential registry is built from the
+// current snapshot; established flows retain only a compact tunnel pin.
 type Server struct {
 	smart            SmartSelector
 	snapshots        SnapshotSource
@@ -74,32 +78,20 @@ type Server struct {
 	handshakeMu sync.Mutex
 	handshakes  map[netip.Addr]int
 
+	snellRecent recentKeys
+	snellTrials chan struct{}
+	salts       *shadowsocks.SaltFilter
+
 	lifecycleMu  sync.Mutex
-	listener     net.Listener
+	listeners    map[net.Listener]struct{}
 	shuttingDown bool
-	active       map[net.Conn]context.CancelFunc
+	active       map[net.Conn]activeHandler
 	drained      chan struct{}
 }
 
-type credentialRegistry struct {
-	identity *credentialspkg.Identity
-	nodes    map[string]struct{}
-	smart    string
-}
-
-func (registry *credentialRegistry) authenticate(username, password string) bool {
-	if registry == nil {
-		return false
-	}
-	_, available := registry.nodes[username]
-	return available && registry.identity.AuthenticatePassword(password)
-}
-
-// authenticateSmart accepts the automatic-route username, which lives in its
-// own namespace and never appears in the node map.
-func (registry *credentialRegistry) authenticateSmart(username, password string) bool {
-	return registry != nil && registry.smart != "" && subtle.ConstantTimeCompare([]byte(username), []byte(registry.smart)) == 1 &&
-		registry.identity.AuthenticatePassword(password)
+type activeHandler struct {
+	cancel   context.CancelFunc
+	listener net.Listener
 }
 
 // New constructs a server. Listener selection belongs to the caller.
@@ -134,71 +126,73 @@ func New(config Config) (*Server, error) {
 	}
 	drained := make(chan struct{})
 	close(drained)
-	server := &Server{smart: config.Smart, snapshots: config.Snapshots, providers: config.Providers, dial: dial, handshakeTimeout: timeout, slots: make(chan struct{}, maxConnections), active: make(map[net.Conn]context.CancelFunc), drained: drained, handshakes: make(map[netip.Addr]int), revalidateEvery: defaultFlowRevalidation}
+	server := &Server{
+		smart: config.Smart, snapshots: config.Snapshots, providers: config.Providers, dial: dial, handshakeTimeout: timeout,
+		slots: make(chan struct{}, maxConnections), listeners: make(map[net.Listener]struct{}), active: make(map[net.Conn]activeHandler),
+		drained: drained, handshakes: make(map[netip.Addr]int), revalidateEvery: defaultFlowRevalidation,
+		snellTrials: make(chan struct{}, max(2, runtime.NumCPU())), salts: shadowsocks.NewSaltFilter(),
+	}
 	if err := server.SetCredentials(config.Identity, config.InitialSnapshot); err != nil {
 		return nil, err
 	}
 	return server, nil
 }
 
-// SetCredentials swaps one coherent live username map and instance password.
+// SetCredentials swaps one coherent generation of every frontend's
+// credentials: SOCKS usernames and instance password, Snell PSKs, Shadowsocks
+// user keys and the SOCKS5-TLS certificate.
 func (s *Server) SetCredentials(authority *credentialspkg.Identity, snapshot *state.RuntimeSnapshot) error {
 	if s == nil || authority == nil {
 		return errors.New("socks: installation identity is required")
 	}
-	nodeCount := 0
-	if snapshot != nil {
-		nodeCount = len(snapshot.Nodes)
-	}
-	next := &credentialRegistry{identity: authority, nodes: make(map[string]struct{}, nodeCount)}
-	if smart, available := authority.SmartCredentials(); available {
-		next.smart = smart.Username
-	}
-	if snapshot != nil {
-		for _, node := range snapshot.Nodes {
-			if !node.TunnelEligible() {
-				continue
-			}
-			if _, available := snapshot.Providers[node.Provider]; !available {
-				continue
-			}
-			credentials, available := authority.Credentials(node.Route())
-			if !available {
-				return credentialspkg.ErrInvalidKey
-			}
-			if _, duplicate := next.nodes[credentials.Username]; duplicate {
-				return fmt.Errorf("%w: duplicate node route", state.ErrInvalidSnapshot)
-			}
-			next.nodes[credentials.Username] = struct{}{}
-		}
+	next, err := buildCredentialRegistry(authority, snapshot)
+	if err != nil {
+		return err
 	}
 	s.credentials.Store(next)
 	return nil
 }
 
-// Shutdown stops accepting new SOCKS connections and waits for active
-// handlers to drain. When ctx expires, it cancels and closes every remaining
-// handler so relays and in-flight setup cannot outlive the shutdown deadline.
+// Shutdown stops accepting new connections on every listener and waits for
+// active handlers to drain. When ctx expires, it cancels and closes every
+// remaining handler so relays and in-flight setup cannot outlive the shutdown
+// deadline.
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s == nil || ctx == nil {
 		return errors.New("socks: server and shutdown context are required")
 	}
 	s.lifecycleMu.Lock()
 	s.shuttingDown = true
-	listener := s.listener
-	s.listener = nil
+	listeners := make([]net.Listener, 0, len(s.listeners))
+	for listener := range s.listeners {
+		listeners = append(listeners, listener)
+	}
+	clear(s.listeners)
 	drained := s.drained
 	s.lifecycleMu.Unlock()
-	if listener != nil {
+	for _, listener := range listeners {
 		_ = listener.Close()
 	}
 	select {
 	case <-drained:
 		return nil
 	case <-ctx.Done():
-		s.forceActiveHandlers()
+		s.forceActiveHandlers(nil)
 		return ctx.Err()
 	}
+}
+
+// CloseListener stops accepting on one listener served by this server and
+// immediately ends the flows it accepted. Other listeners are unaffected.
+func (s *Server) CloseListener(listener net.Listener) {
+	if s == nil || listener == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	delete(s.listeners, listener)
+	s.lifecycleMu.Unlock()
+	_ = listener.Close()
+	s.forceActiveHandlers(listener)
 }
 
 func (s *Server) beginServe(listener net.Listener) error {
@@ -207,37 +201,36 @@ func (s *Server) beginServe(listener net.Listener) error {
 	if s.shuttingDown {
 		return errors.New("socks: server is shutting down")
 	}
-	if s.listener != nil {
-		return errors.New("socks: server is already serving")
+	if _, serving := s.listeners[listener]; serving {
+		return errors.New("socks: listener is already served")
 	}
-	s.listener = listener
+	s.listeners[listener] = struct{}{}
 	return nil
 }
 
 func (s *Server) endServe(listener net.Listener) {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
-	if s.listener == listener {
-		s.listener = nil
-	}
+	delete(s.listeners, listener)
 }
 
 func (s *Server) accepting(listener net.Listener) bool {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
-	return !s.shuttingDown && s.listener == listener
+	_, serving := s.listeners[listener]
+	return !s.shuttingDown && serving
 }
 
-func (s *Server) addActiveHandler(connection net.Conn, cancel context.CancelFunc) bool {
+func (s *Server) addActiveHandler(connection net.Conn, listener net.Listener, cancel context.CancelFunc) bool {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
-	if s.shuttingDown {
+	if _, serving := s.listeners[listener]; s.shuttingDown || !serving {
 		return false
 	}
 	if len(s.active) == 0 {
 		s.drained = make(chan struct{})
 	}
-	s.active[connection] = cancel
+	s.active[connection] = activeHandler{cancel: cancel, listener: listener}
 	return true
 }
 
@@ -250,30 +243,59 @@ func (s *Server) removeActiveHandler(connection net.Conn) {
 	}
 }
 
-func (s *Server) forceActiveHandlers() {
+// forceActiveHandlers cancels and closes the handlers accepted on listener,
+// or every handler when listener is nil.
+func (s *Server) forceActiveHandlers(listener net.Listener) {
 	s.lifecycleMu.Lock()
-	handlers := make([]struct {
-		connection net.Conn
-		cancel     context.CancelFunc
-	}, 0, len(s.active))
-	for connection, cancel := range s.active {
-		handlers = append(handlers, struct {
-			connection net.Conn
-			cancel     context.CancelFunc
-		}{connection: connection, cancel: cancel})
+	connections := make([]net.Conn, 0, len(s.active))
+	cancels := make([]context.CancelFunc, 0, len(s.active))
+	for connection, handler := range s.active {
+		if listener == nil || handler.listener == listener {
+			connections = append(connections, connection)
+			cancels = append(cancels, handler.cancel)
+		}
 	}
 	s.lifecycleMu.Unlock()
-	for _, handler := range handlers {
-		handler.cancel()
-		_ = handler.connection.Close()
+	for index, connection := range connections {
+		cancels[index]()
+		_ = connection.Close()
 	}
 }
 
-// Serve accepts connections until ctx is canceled. Accepted handlers retain
-// independent contexts and must be drained with Shutdown.
+// Frontend selects the protocol a listener speaks.
+type Frontend int
+
+const (
+	FrontendSOCKS Frontend = iota
+	FrontendSOCKSTLS
+	FrontendSnell
+	FrontendShadowsocks
+)
+
+// Serve accepts SOCKS5 connections until ctx is canceled. Accepted handlers
+// retain independent contexts and must be drained with Shutdown.
 func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
+	return s.ServeFrontend(ctx, listener, FrontendSOCKS)
+}
+
+// ServeFrontend accepts connections of one frontend protocol until ctx is
+// canceled or CloseListener closes listener. Every frontend shares the
+// connection slots, per-client setup limit and route dispatch.
+func (s *Server) ServeFrontend(ctx context.Context, listener net.Listener, frontend Frontend) error {
 	if s == nil || ctx == nil || listener == nil {
 		return errors.New("socks: server, context, and listener are required")
+	}
+	accept, handle := listener, s.handleConn
+	switch frontend {
+	case FrontendSOCKS:
+	case FrontendSOCKSTLS:
+		accept = tls.NewListener(listener, s.tlsConfig())
+	case FrontendSnell:
+		handle = s.handleSnell
+	case FrontendShadowsocks:
+		handle = s.handleShadowsocks
+	default:
+		return fmt.Errorf("socks: unknown frontend %d", frontend)
 	}
 	if err := s.beginServe(listener); err != nil {
 		return err
@@ -291,7 +313,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 
 	retry := newAcceptBackOff()
 	for {
-		connection, err := listener.Accept()
+		connection, err := accept.Accept()
 		if err != nil {
 			if ctx.Err() != nil || !s.accepting(listener) {
 				return nil
@@ -317,24 +339,38 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 		select {
 		case s.slots <- struct{}{}:
 			handlerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-			if !s.addActiveHandler(connection, cancel) {
+			if !s.addActiveHandler(connection, listener, cancel) {
 				cancel()
 				releaseHandshake()
 				_ = connection.Close()
 				<-s.slots
 				continue
 			}
+			keepAlive(connection)
 			go func(connection net.Conn, handlerCtx context.Context, cancel context.CancelFunc) {
 				defer func() { <-s.slots }()
 				defer s.removeActiveHandler(connection)
 				defer cancel()
 				defer releaseHandshake()
-				_ = s.handleConn(handlerCtx, connection, releaseHandshake)
+				_ = handle(handlerCtx, connection, releaseHandshake)
 			}(connection, handlerCtx, cancel)
 		default:
 			releaseHandshake()
 			_ = connection.Close()
 		}
+	}
+}
+
+// clientKeepAlive detects clients that vanished without closing, such as a
+// phone that left its network, well before an idle relay would notice.
+var clientKeepAlive = net.KeepAliveConfig{Enable: true, Idle: 30 * time.Second, Interval: 10 * time.Second, Count: 3}
+
+func keepAlive(connection net.Conn) {
+	if inner, ok := connection.(interface{ NetConn() net.Conn }); ok {
+		connection = inner.NetConn()
+	}
+	if tcp, ok := connection.(*net.TCPConn); ok {
+		_ = tcp.SetKeepAliveConfig(clientKeepAlive)
 	}
 }
 
@@ -371,15 +407,7 @@ func (s *Server) handleConn(ctx context.Context, client net.Conn, releaseHandsha
 		return errors.New("socks: server and client are required")
 	}
 	defer client.Close()
-	handlerDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = client.Close()
-		case <-handlerDone:
-		}
-	}()
-	defer close(handlerDone)
+	defer closeOnCancel(ctx, client)()
 	if err := client.SetDeadline(time.Now().Add(s.handshakeTimeout)); err != nil {
 		return fmt.Errorf("socks: set client setup deadline: %w", err)
 	}
@@ -418,8 +446,7 @@ func (s *Server) handleConn(ctx context.Context, client net.Conn, releaseHandsha
 		}
 	}
 	pin, err := s.snapshots.CompactPin(routeUsername, now)
-	node := pin.Node
-	if err != nil || !node.TunnelEligible() {
+	if err != nil || !pin.Node.TunnelEligible() {
 		_ = writeAuthStatus(client, false)
 		if err != nil {
 			return err
@@ -450,59 +477,108 @@ func (s *Server) handleConn(ctx context.Context, client net.Conn, releaseHandsha
 		_ = writeReply(client, replyGeneralFailure, target{})
 		return errBadAddress
 	}
-	// Authentication may have completed before a client supplies CONNECT. Do
-	// not let a stalled socket create a tunnel after logout, authority
+	return s.dispatch(ctx, flow{
+		command: command, destination: destination, client: client, routeUsername: routeUsername, pin: &pin,
+		authorized: func(registry *credentialRegistry) bool {
+			return s.credentialsCurrent(registry, username, password, isSmart)
+		},
+		openPackets: func() (provider.PacketIO, error) {
+			association, err := newUDPAssociation(client, destination)
+			if err != nil {
+				return nil, err
+			}
+			return association, nil
+		},
+		ready: func(bound net.Addr) error { return writeReply(client, replySucceeded, targetFromAddr(bound)) },
+		fail:  func(code byte) { _ = writeReply(client, code, target{}) },
+	})
+}
+
+// closeOnCancel closes client when ctx ends before the returned stop runs.
+func closeOnCancel(ctx context.Context, client net.Conn) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
+}
+
+// flow is one authenticated request from any frontend.
+type flow struct {
+	command     byte
+	destination target
+	// client carries the relayed stream of a CONNECT and owns the lifetime of
+	// a UDP association; revocation closes it.
+	client        net.Conn
+	routeUsername string
+	// pin, when the frontend resolved one during authentication, must still
+	// name the same node and authority at dispatch.
+	pin *state.TunnelPin
+	// authorized re-authenticates the frontend credentials against a
+	// registry generation, including the automatic route's enabled state.
+	authorized  func(*credentialRegistry) bool
+	openPackets func() (provider.PacketIO, error)
+	ready       func(net.Addr) error
+	fail        func(code byte)
+}
+
+// dispatch revalidates an authenticated request against the current
+// credentials and snapshot, then relays it through the pinned node's
+// transport. An admitted flow keeps its compact pin and is never remapped.
+func (s *Server) dispatch(ctx context.Context, request flow) error {
+	// Authentication may have completed before a client supplies its request.
+	// Do not let a stalled socket create a tunnel after logout, authority
 	// refresh, selector rotation, preference exclusion, or node replacement.
 	// Re-resolving returns a compact current pin and never clones a snapshot.
-	now = time.Now()
-	registry = s.credentials.Load()
-	if registry == nil {
-		_ = writeReply(client, replyGeneralFailure, target{})
+	now := time.Now()
+	registry := s.credentials.Load()
+	if registry == nil || !request.authorized(registry) {
+		request.fail(replyGeneralFailure)
 		return state.ErrSelectorUnknown
 	}
-	if !s.credentialsCurrent(registry, username, password, isSmart) {
-		_ = writeReply(client, replyGeneralFailure, target{})
-		return state.ErrSelectorUnknown
-	}
-	revalidatedPin, resolveErr := s.snapshots.CompactPin(routeUsername, now)
-	revalidatedNode := revalidatedPin.Node
-	if resolveErr != nil || s.credentials.Load() != registry || !samePinAuthority(pin, revalidatedPin) || !revalidatedNode.TunnelEligible() || !sameCanonicalNode(node, revalidatedNode) {
-		_ = writeReply(client, replyGeneralFailure, target{})
+	pin, resolveErr := s.snapshots.CompactPin(request.routeUsername, now)
+	node := pin.Node
+	if resolveErr != nil || s.credentials.Load() != registry || !node.TunnelEligible() ||
+		request.pin != nil && (!samePinAuthority(*request.pin, pin) || !sameCanonicalNode(request.pin.Node, node)) {
+		request.fail(replyGeneralFailure)
 		if resolveErr != nil {
 			return resolveErr
 		}
 		return state.ErrSelectorUnknown
 	}
-	pin, node = revalidatedPin, revalidatedNode
-	if err := client.SetDeadline(time.Time{}); err != nil {
-		_ = writeReply(client, replyGeneralFailure, target{})
+	if err := request.client.SetDeadline(time.Time{}); err != nil {
+		request.fail(replyGeneralFailure)
 		return fmt.Errorf("socks: clear client setup deadline: %w", err)
 	}
 
 	transport, err := s.providers.Transport(node.Protocol)
 	if err != nil {
-		_ = writeReply(client, replyGeneralFailure, target{})
+		request.fail(replyGeneralFailure)
 		return err
 	}
-	var association *udpAssociation
+	var packets provider.PacketIO
 	var datagrams provider.DatagramTransport
-	if command == commandUDP {
+	if request.command == commandUDP {
 		capable, ok := transport.(provider.DatagramTransport)
 		if !ok {
-			_ = writeReply(client, replyCommandUnsupported, target{})
+			request.fail(replyCommandUnsupported)
 			return nil
 		}
 		datagrams = capable
-		association, err = newUDPAssociation(client, destination)
+		packets, err = request.openPackets()
 		if err != nil {
 			code := replyGeneralFailure
 			if errors.Is(err, errAddressTypeUnsupported) {
 				code = replyAddressUnsupported
 			}
-			_ = writeReply(client, code, target{})
+			request.fail(code)
 			return err
 		}
-		defer func() { _ = association.Close() }()
+		defer func() { _ = packets.Close() }()
 	}
 	admit := func() bool {
 		now := time.Now()
@@ -510,10 +586,10 @@ func (s *Server) handleConn(ctx context.Context, client net.Conn, releaseHandsha
 			return false
 		}
 		currentRegistry := s.credentials.Load()
-		if !s.credentialsCurrent(currentRegistry, username, password, isSmart) {
+		if !request.authorized(currentRegistry) {
 			return false
 		}
-		finalPin, resolveErr := s.snapshots.CompactPin(routeUsername, now)
+		finalPin, resolveErr := s.snapshots.CompactPin(request.routeUsername, now)
 		finalNode := finalPin.Node
 		if resolveErr != nil || s.credentials.Load() != currentRegistry || !samePinAuthority(pin, finalPin) || !finalNode.TunnelEligible() || !sameCanonicalNode(node, finalNode) {
 			return false
@@ -523,7 +599,7 @@ func (s *Server) handleConn(ctx context.Context, client net.Conn, releaseHandsha
 	}
 	ready := false
 	readyRelay := func(bound net.Addr) error {
-		if err := writeReply(client, replySucceeded, targetFromAddr(bound)); err != nil {
+		if err := request.ready(bound); err != nil {
 			return err
 		}
 		ready = true
@@ -533,22 +609,22 @@ func (s *Server) handleConn(ctx context.Context, client net.Conn, releaseHandsha
 	// provider account is logged out, not only at disconnect.
 	relayCtx, cancelRelay := context.WithCancel(ctx)
 	defer cancelRelay()
-	stopWatch := s.watchFlow(client, cancelRelay, username, password, routeUsername, isSmart, node)
+	stopWatch := s.watchFlow(request.client, cancelRelay, request.routeUsername, request.authorized, node)
 	defer stopWatch()
-	if association != nil {
+	if packets != nil {
 		err = datagrams.RelayDatagrams(relayCtx, provider.DatagramRequest{
-			Dial: s.dial, Control: client, Packets: association, NodeHost: node.Host, NodePort: node.Port,
+			Dial: s.dial, Control: request.client, Packets: packets, NodeHost: node.Host, NodePort: node.Port,
 			Authority: pin.Authority.Data, HandshakeTimeout: s.handshakeTimeout, Admit: admit, Ready: readyRelay,
 		})
 	} else {
 		err = transport.RelayStream(relayCtx, provider.RelayRequest{
-			Dial: s.dial, Client: client, NodeHost: node.Host, NodePort: node.Port,
-			Target: provider.Target{Host: destination.Host, Port: destination.Port}, Authority: pin.Authority.Data,
+			Dial: s.dial, Client: request.client, NodeHost: node.Host, NodePort: node.Port,
+			Target: provider.Target{Host: request.destination.Host, Port: request.destination.Port}, Authority: pin.Authority.Data,
 			HandshakeTimeout: s.handshakeTimeout, Admit: admit, Ready: readyRelay,
 		})
 	}
 	if err != nil && !ready {
-		_ = writeReply(client, dialReply(err), target{})
+		request.fail(dialReply(err))
 	}
 	return err
 }
@@ -654,7 +730,7 @@ func remoteIP(remote net.Addr) (netip.Addr, bool) {
 // watchFlow cancels the transport and closes client once the flow's
 // credentials stop authenticating or its node leaves the provider snapshot.
 // Authority bytes rotate on every provider refresh, so they are not compared.
-func (s *Server) watchFlow(client net.Conn, cancel context.CancelFunc, username, password, routeUsername string, isSmart bool, node state.Node) func() {
+func (s *Server) watchFlow(client net.Conn, cancel context.CancelFunc, routeUsername string, authorized func(*credentialRegistry) bool, node state.Node) func() {
 	interval := s.revalidateEvery
 	if interval <= 0 {
 		return func() {}
@@ -668,7 +744,7 @@ func (s *Server) watchFlow(client net.Conn, cancel context.CancelFunc, username,
 			case <-done:
 				return
 			case <-ticker.C:
-				if !s.flowAuthorized(username, password, routeUsername, isSmart, node) {
+				if !s.routeAuthorized(routeUsername, authorized, node) {
 					cancel()
 					_ = client.Close()
 					return
@@ -681,7 +757,13 @@ func (s *Server) watchFlow(client net.Conn, cancel context.CancelFunc, username,
 }
 
 func (s *Server) flowAuthorized(username, password, routeUsername string, isSmart bool, node state.Node) bool {
-	if !s.credentialsCurrent(s.credentials.Load(), username, password, isSmart) {
+	return s.routeAuthorized(routeUsername, func(registry *credentialRegistry) bool {
+		return s.credentialsCurrent(registry, username, password, isSmart)
+	}, node)
+}
+
+func (s *Server) routeAuthorized(routeUsername string, authorized func(*credentialRegistry) bool, node state.Node) bool {
+	if !authorized(s.credentials.Load()) {
 		return false
 	}
 	pin, err := s.snapshots.CompactPin(routeUsername, time.Now())

@@ -26,6 +26,11 @@ management:
 # SOCKS proxy endpoint and upstream connection limits.
 proxy:
   port: 10808
+  # Fixed TCP ports of the optional inbound protocols. Each listens only after
+  # it is enabled in the console; allow the port in the firewall first.
+  # snellPort: 10810
+  # shadowsocksPort: 10811
+  # socksTLSPort: 10812
   # Timeout for opening an upstream connection (valid range: 1s through 10s).
   dialTimeout: 10s
   # Timeout for the upstream protocol handshake (valid range: 1s through 1m).

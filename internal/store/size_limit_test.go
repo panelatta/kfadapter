@@ -397,7 +397,7 @@ func TestSQLiteSizeLimitRollsBackMigration(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer raw.Close()
-			for _, statement := range []string{"DROP TABLE smart_proxy_preferences", "UPDATE schema_version SET version = 9 WHERE id = 1"} {
+			for _, statement := range []string{"DROP TABLE inbound_preferences", "DROP TABLE smart_proxy_preferences", "UPDATE schema_version SET version = 9 WHERE id = 1"} {
 				if _, err := raw.ExecContext(t.Context(), statement); err != nil {
 					t.Fatal(err)
 				}
