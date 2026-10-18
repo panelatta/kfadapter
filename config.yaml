@@ -47,3 +47,7 @@ provider:
   # selected node's /24 as EDNS Client Subnet so CDNs answer for the node's
   # network instead of this host's; failures fall back to the system resolver.
   # quickfoxDoH: https://223.5.5.5/dns-query
+  # How QuickFox UDP associations reach the node: udp2tcp (default) carries
+  # datagrams on a TCP connection; native sends them to the node's UDP port,
+  # which needs outbound UDP from this host.
+  # quickfoxUDP: native

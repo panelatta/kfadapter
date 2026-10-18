@@ -88,7 +88,16 @@ type Provider struct {
 	// QuickFoxDoH is an optional RFC 8484 resolver URL for QuickFox domain
 	// targets; empty keeps the system resolver.
 	QuickFoxDoH string `yaml:"quickfoxDoH,omitempty"`
+	// QuickFoxUDP selects how QuickFox UDP associations reach the relay:
+	// QuickFoxUDPOverTCP (the default when empty) or QuickFoxUDPNative.
+	QuickFoxUDP string `yaml:"quickfoxUDP,omitempty"`
 }
+
+// QuickFox UDP relay modes for provider.quickfoxUDP.
+const (
+	QuickFoxUDPOverTCP = "udp2tcp"
+	QuickFoxUDPNative  = "native"
+)
 
 type Config struct {
 	ListenAddr string     `yaml:"listenAddr"`
@@ -257,6 +266,11 @@ func (c Config) Validate() error {
 		if err := validateHTTPSURL("provider.quickfoxDoH", c.Provider.QuickFoxDoH); err != nil {
 			return err
 		}
+	}
+	switch c.Provider.QuickFoxUDP {
+	case "", QuickFoxUDPOverTCP, QuickFoxUDPNative:
+	default:
+		return fmt.Errorf("provider.quickfoxUDP must be %q or %q", QuickFoxUDPOverTCP, QuickFoxUDPNative)
 	}
 	return nil
 }

@@ -118,6 +118,9 @@ func NewDaemon(cfg config.Config, stateDirectory, version string) (result *Daemo
 			return nil, err
 		}
 	}
+	if cfg.Provider.QuickFoxUDP == config.QuickFoxUDPNative {
+		quickfoxTransport.EnableNativeUDP()
+	}
 	providers, err := provider.NewRegistry(
 		[]provider.Driver{kuaifanDriver, quickfoxDriver, transocksDriver, baidu.NewDriver(baidu.DriverConfig{})},
 		[]provider.Transport{

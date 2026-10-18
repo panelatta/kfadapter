@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/oshinop/chinadapter/internal/provider"
@@ -29,9 +30,9 @@ import (
 //	10..11 sequence number, little-endian
 //	12..13 zero
 //
-// The relay also offers the same header over native UDP to the port in control
-// acknowledgement bytes 8..9, but live relays answered it inconsistently, so
-// only the TCP-carried mode is used.
+// The relay also accepts the same header over native UDP to the port in a
+// stream-mode control acknowledgement (datagram_native.go). That mode is
+// opt-in; this TCP-carried mode stays the default.
 const (
 	datagramControlMode = 0x30
 	datagramHeaderSize  = 14
@@ -59,6 +60,9 @@ func (transport *Transport) RelayDatagrams(ctx context.Context, request provider
 	authority, err := decodeTunnelAuthority(request.Authority)
 	if err != nil {
 		return err
+	}
+	if transport.nativeUDP {
+		return transport.relayNativeDatagrams(ctx, request, authority)
 	}
 	upstream, err := dialRelay(ctx, request.Dial, request.NodeHost, request.NodePort, request.HandshakeTimeout)
 	if err != nil {
@@ -124,6 +128,12 @@ type datagramWriter struct {
 	timeout   time.Duration
 	sequence  uint16
 	resolved  map[string]netip.Addr
+	// native sends each frame as one UDP datagram without the length
+	// prefix (datagram_native.go). Its keepalive reads lastSent, the Unix
+	// nanosecond time of the latest datagram, and lastSequence, its number.
+	native       bool
+	lastSent     atomic.Int64
+	lastSequence atomic.Uint32
 }
 
 func (writer *datagramWriter) pump(packets provider.PacketIO) error {
@@ -138,6 +148,14 @@ func (writer *datagramWriter) pump(packets provider.PacketIO) error {
 		if !ok {
 			// Unsupported, unresolvable, or oversized datagrams are dropped
 			// individually; they never end the association.
+			continue
+		}
+		if writer.native {
+			if _, err := writer.upstream.Write(frame[4:]); err != nil {
+				return fmt.Errorf("quickfox: write datagram: %w", err)
+			}
+			writer.lastSequence.Store(uint32(binary.LittleEndian.Uint16(frame[14:16])))
+			writer.lastSent.Store(time.Now().UnixNano())
 			continue
 		}
 		if err := writeAll(writer.upstream, frame); err != nil {
@@ -246,19 +264,25 @@ func readDatagrams(upstream io.Reader, packets provider.PacketIO) error {
 		if _, err := io.ReadFull(upstream, frame); err != nil {
 			return fmt.Errorf("quickfox: read datagram frame: %w", err)
 		}
-		if binary.BigEndian.Uint16(frame[1:3]) != flowID {
-			continue
-		}
-		source := [4]byte(frame[4:8])
-		port := [2]byte(frame[8:10])
-		reply := frame[4:]
-		reply[0], reply[1], reply[2], reply[3] = 0, 0, 0, 0x01
-		copy(reply[4:8], source[:])
-		copy(reply[8:10], port[:])
-		if err := packets.WritePacket(reply); err != nil {
+		if err := deliverDatagram(frame, flowID, packets); err != nil {
 			return err
 		}
 	}
+}
+
+// deliverDatagram rewrites one relay frame header in place into a SOCKS UDP
+// reply and writes it when the frame belongs to flowID.
+func deliverDatagram(frame []byte, flowID uint16, packets provider.PacketIO) error {
+	if binary.BigEndian.Uint16(frame[1:3]) != flowID {
+		return nil
+	}
+	source := [4]byte(frame[4:8])
+	port := [2]byte(frame[8:10])
+	reply := frame[4:]
+	reply[0], reply[1], reply[2], reply[3] = 0, 0, 0, 0x01
+	copy(reply[4:8], source[:])
+	copy(reply[8:10], port[:])
+	return packets.WritePacket(reply)
 }
 
 // watchControl returns when the SOCKS client closes the TCP connection that

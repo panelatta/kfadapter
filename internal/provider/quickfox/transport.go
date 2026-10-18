@@ -27,14 +27,16 @@ var ErrHandshake = errors.New("quickfox: relay handshake failed")
 type lookupNetIPFunc func(context.Context, string, string) ([]netip.Addr, error)
 
 // Transport implements the observed QuickFox native framed TCP relay for IPv4
-// destinations, and its TCP-carried datagram relay (datagram.go). Streams read
-// the 14-byte control acknowledgement before opening the data connection.
+// destinations, and its TCP-carried or native datagram relay (datagram.go,
+// datagram_native.go). Streams read the 14-byte control acknowledgement
+// before opening the data connection.
 // Domain targets use the optional node-scoped DoH resolver (doh.go) when
 // configured, and the system resolver otherwise.
 type Transport struct {
-	clock  func() time.Time
-	lookup lookupNetIPFunc
-	doh    *dohResolver
+	clock     func() time.Time
+	lookup    lookupNetIPFunc
+	doh       *dohResolver
+	nativeUDP bool
 }
 
 func NewTransport() *Transport {

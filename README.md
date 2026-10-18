@@ -90,6 +90,7 @@ chinadapter 让你借助已经付费的国内 VPN 服务（快帆 KuaiFan、Quic
 | `provider.requestTimeout` | `15s` | 单次 provider API 请求超时（1s–15s） |
 | `provider.refreshInterval` | `2h` | 后台刷新周期（15m–24h） |
 | `provider.quickfoxDoH` | 无 | 可选的 RFC 8484 DoH 地址，例如 `https://223.5.5.5/dns-query`；QuickFox 用它按所选节点的 /24 解析目标域名，见“已知限制” |
+| `provider.quickfoxUDP` | `udp2tcp` | QuickFox UDP 的承载方式：`udp2tcp` 把数据报放在到节点的 TCP 连接里；`native` 改用节点的原生 UDP 端口，主机需要能向外发 UDP，见“已知限制” |
 
 在容器里执行 `./chinadapter validate-config` 可以校验配置，出错时会打印具体原因；检查类命令不会创建任何文件。
 
@@ -229,7 +230,7 @@ rootless Docker 或启用 userns-remap 时，用 `CHINADAPTER_HOST_UID` 和 `CHI
 
 - **管理监听器提供 HTTP。** 直接连接时，访问令牌、provider 密码和会话 Cookie 以明文在网络上传输。请只在可信网络中使用，或按上文配置 TLS 反向代理及 `management.publicOrigin`。
 - **QuickFox 会在本地解析域名。** QuickFox 的隧道协议只能携带 IPv4 地址，所以 SOCKS 客户端请求的域名由 chinadapter 所在主机解析，解析到回环、私有或运营商 NAT 地址的结果会被丢弃。主机在海外时，国内 CDN 会按主机的位置分配节点：2026-10 用新加坡 VPS 的网段实测，B 站视频域名分到与节点不同运营商的国内节点，图片、静态资源和 API 域名则分到新加坡、美国或香港的海外节点，流量经过国内节点后又绕回海外。设置 `provider.quickfoxDoH`（例如 AliDNS `https://223.5.5.5/dns-query`）后，chinadapter 改向该 DoH 服务器查询，并把所选 QuickFox 节点所在的 /24 作为 ECS 发送，CDN 便按节点的网络分配；DoH 查询失败时本次回退到本机 DNS：单个域名超时或上游返回 SERVFAIL，只让这个域名在 30 秒内改用本机 DNS；连不上 DoH 服务器，或连续 3 个不同域名失败，才暂停 DoH 30 秒。无论哪种方式，解析服务器都能看到这些域名；ECS 只包含 QuickFox 节点的网段，不含你的地址。快帆节点不受此限制。
-- **QuickFox 不支持 IPv6 目标。** 目标是 IPv6 地址或域名没有可用公网 IPv4 地址时，`CONNECT` 返回 SOCKS 应答码 `0x08`；UDP 关联里发往 IPv6 的数据报会被逐个丢弃。QuickFox 的 UDP（包括 QUIC）经 TCP 承载的数据报中继转发，支持 IPv4 和域名目标，超过 2034 字节的单个数据报会被丢弃。
+- **QuickFox 不支持 IPv6 目标。** 目标是 IPv6 地址或域名没有可用公网 IPv4 地址时，`CONNECT` 返回 SOCKS 应答码 `0x08`；UDP 关联里发往 IPv6 的数据报会被逐个丢弃。QuickFox 的 UDP（包括 QUIC）默认经 TCP 承载的数据报中继转发，支持 IPv4 和域名目标，超过 2034 字节的单个数据报会被丢弃。设置 `provider.quickfoxUDP: native` 后改为直接向节点的原生 UDP 端口收发，主机需要能向外发 UDP（入站方向不用开端口）。2026-10 从新加坡 VPS 实测：抽样覆盖全部 23 个线路组的 41 个节点都能用。在 24 个回国节点上每秒 50 包，两种方式的中位延迟基本相同；TCP 承载不丢包，原生方式在多数节点上也不丢包，俄罗斯线路丢 1.6–2%。离 VPS 只有 1–60 ms 的东南亚、港澳台节点，两者的 p99 也相近；部分离得远的节点（往返 300–600 ms，如俄罗斯、意大利、北非、南美）上，TCP 重传让 p99 比原生方式高 250–340 ms。
 - 已建立的 SOCKS 连接每 30 秒复查一次凭据和线路：更换访问令牌、provider 登出或线路下线后，连接会被关闭；provider 正常刷新不会中断连接。
 - 同一客户端 IP 最多同时保持 32 个尚未完成认证的连接（所有入站协议合计）。
 - Snell 只支持 v6 的 `unshaped` 模式；Shadowsocks 2022 只支持 TCP。Snell 握手需要用 Argon2id 逐个尝试线路的 PSK，同时进行的尝试数量受 CPU 核数限制；线路很多且客户端不复用连接时，新连接的握手会多出几十毫秒。
