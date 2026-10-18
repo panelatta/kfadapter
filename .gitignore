@@ -6,6 +6,10 @@
 .env.*
 *.env
 
+# The maintainer's Surge profile, kept next to the checkout; it holds proxy
+# credentials.
+/FireTunnel.conf
+
 # Local build and test outputs.
 /bin/
 /build/
