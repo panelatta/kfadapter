@@ -6,9 +6,9 @@
 .env.*
 *.env
 
-# The maintainer's Surge profile, kept next to the checkout; it holds proxy
-# credentials.
-/FireTunnel.conf
+# The maintainer's Surge profile and every copy or backup of it, in any
+# directory; they hold proxy credentials.
+*[Ff][Ii][Rr][Ee][Tt][Uu][Nn][Nn][Ee][Ll]*
 
 # Local build and test outputs.
 /bin/
