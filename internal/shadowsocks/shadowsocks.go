@@ -1,5 +1,5 @@
-// Package shadowsocks implements the server side of Shadowsocks 2022 TCP
-// relay with the 2022-blake3-aes-128-gcm method and extensible identity
+// Package shadowsocks implements the server side of Shadowsocks 2022 TCP and
+// UDP relay with the 2022-blake3-aes-128-gcm method and extensible identity
 // headers (one server PSK, one user PSK per route), the multi-user form Surge
 // configures as `password=serverKey:userKey`.
 //
@@ -50,8 +50,10 @@ var (
 // indexed by the first 16 bytes of each user PSK's BLAKE3 hash.
 type Users struct {
 	serverKey []byte
-	keys      [][]byte
-	byHash    map[[16]byte]int
+	// serverBlock decrypts UDP separate and identity headers.
+	serverBlock cipher.Block
+	keys        [][]byte
+	byHash      map[[16]byte]int
 }
 
 // NewUsers builds the identity table. Each key must be KeySize bytes and
@@ -60,7 +62,14 @@ func NewUsers(serverKey []byte, userKeys [][]byte) (*Users, error) {
 	if len(serverKey) != KeySize {
 		return nil, errors.New("shadowsocks: invalid server key")
 	}
-	users := &Users{serverKey: append([]byte(nil), serverKey...), keys: make([][]byte, len(userKeys)), byHash: make(map[[16]byte]int, len(userKeys))}
+	serverBlock, err := aes.NewCipher(serverKey)
+	if err != nil {
+		return nil, err
+	}
+	users := &Users{
+		serverKey: append([]byte(nil), serverKey...), serverBlock: serverBlock,
+		keys: make([][]byte, len(userKeys)), byHash: make(map[[16]byte]int, len(userKeys)),
+	}
 	for index, key := range userKeys {
 		if len(key) != KeySize {
 			return nil, errors.New("shadowsocks: invalid user key")

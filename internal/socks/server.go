@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"runtime"
@@ -74,6 +75,8 @@ type Server struct {
 	slots            chan struct{}
 	credentials      atomic.Pointer[credentialRegistry]
 	revalidateEvery  time.Duration
+	// ssUDPIdle ends a Shadowsocks UDP session without traffic for this long.
+	ssUDPIdle time.Duration
 
 	handshakeMu sync.Mutex
 	handshakes  map[netip.Addr]int
@@ -83,7 +86,7 @@ type Server struct {
 	salts       *shadowsocks.SaltFilter
 
 	lifecycleMu  sync.Mutex
-	listeners    map[net.Listener]struct{}
+	listeners    map[io.Closer]struct{} // served net.Listeners and net.PacketConns
 	shuttingDown bool
 	active       map[net.Conn]activeHandler
 	drained      chan struct{}
@@ -91,7 +94,7 @@ type Server struct {
 
 type activeHandler struct {
 	cancel   context.CancelFunc
-	listener net.Listener
+	listener io.Closer
 }
 
 // New constructs a server. Listener selection belongs to the caller.
@@ -128,8 +131,8 @@ func New(config Config) (*Server, error) {
 	close(drained)
 	server := &Server{
 		smart: config.Smart, snapshots: config.Snapshots, providers: config.Providers, dial: dial, handshakeTimeout: timeout,
-		slots: make(chan struct{}, maxConnections), listeners: make(map[net.Listener]struct{}), active: make(map[net.Conn]activeHandler),
-		drained: drained, handshakes: make(map[netip.Addr]int), revalidateEvery: defaultFlowRevalidation,
+		slots: make(chan struct{}, maxConnections), listeners: make(map[io.Closer]struct{}), active: make(map[net.Conn]activeHandler),
+		drained: drained, handshakes: make(map[netip.Addr]int), revalidateEvery: defaultFlowRevalidation, ssUDPIdle: ssUDPIdleTimeout,
 		snellTrials: make(chan struct{}, max(2, runtime.NumCPU())), salts: shadowsocks.NewSaltFilter(),
 	}
 	if err := server.SetCredentials(config.Identity, config.InitialSnapshot); err != nil {
@@ -163,7 +166,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	s.lifecycleMu.Lock()
 	s.shuttingDown = true
-	listeners := make([]net.Listener, 0, len(s.listeners))
+	listeners := make([]io.Closer, 0, len(s.listeners))
 	for listener := range s.listeners {
 		listeners = append(listeners, listener)
 	}
@@ -182,9 +185,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
-// CloseListener stops accepting on one listener served by this server and
-// immediately ends the flows it accepted. Other listeners are unaffected.
-func (s *Server) CloseListener(listener net.Listener) {
+// CloseListener stops accepting on one listener or packet connection served
+// by this server and immediately ends the flows it accepted. Other listeners
+// are unaffected.
+func (s *Server) CloseListener(listener io.Closer) {
 	if s == nil || listener == nil {
 		return
 	}
@@ -195,7 +199,7 @@ func (s *Server) CloseListener(listener net.Listener) {
 	s.forceActiveHandlers(listener)
 }
 
-func (s *Server) beginServe(listener net.Listener) error {
+func (s *Server) beginServe(listener io.Closer) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	if s.shuttingDown {
@@ -208,20 +212,20 @@ func (s *Server) beginServe(listener net.Listener) error {
 	return nil
 }
 
-func (s *Server) endServe(listener net.Listener) {
+func (s *Server) endServe(listener io.Closer) {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	delete(s.listeners, listener)
 }
 
-func (s *Server) accepting(listener net.Listener) bool {
+func (s *Server) accepting(listener io.Closer) bool {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	_, serving := s.listeners[listener]
 	return !s.shuttingDown && serving
 }
 
-func (s *Server) addActiveHandler(connection net.Conn, listener net.Listener, cancel context.CancelFunc) bool {
+func (s *Server) addActiveHandler(connection net.Conn, listener io.Closer, cancel context.CancelFunc) bool {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	if _, serving := s.listeners[listener]; s.shuttingDown || !serving {
@@ -245,7 +249,7 @@ func (s *Server) removeActiveHandler(connection net.Conn) {
 
 // forceActiveHandlers cancels and closes the handlers accepted on listener,
 // or every handler when listener is nil.
-func (s *Server) forceActiveHandlers(listener net.Listener) {
+func (s *Server) forceActiveHandlers(listener io.Closer) {
 	s.lifecycleMu.Lock()
 	connections := make([]net.Conn, 0, len(s.active))
 	cancels := make([]context.CancelFunc, 0, len(s.active))

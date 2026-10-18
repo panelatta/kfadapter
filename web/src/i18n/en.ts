@@ -180,10 +180,10 @@ export const en = {
         details: {
             socks5: "Username and password · the default subscription link",
             snell: "unshaped · connection reuse · UDP over TCP",
-            shadowsocks: "2022-blake3-aes-128-gcm · multi-user keys",
+            shadowsocks: "2022-blake3-aes-128-gcm · multi-user keys · native UDP",
             "socks5-tls": "SOCKS5 over TLS · pinned certificate",
         } as Record<string, string>,
-        port: (port: number) => `TCP ${port}`,
+        port: (port: number, udp: boolean) => (udp ? `TCP/UDP ${port}` : `TCP ${port}`),
         enableLabel: (name: string) => `Enable ${name}`,
         listening: "Listening",
         off: "Off",
@@ -192,7 +192,7 @@ export const en = {
         loading: "Loading inbound protocols…",
         unavailable: "Inbound protocol status is unavailable.",
         tuning:
-            "Generated Surge lines set block-quic=on, so Bilibili and other video players fall back to HTTP/2 over TCP at once instead of QUIC inside a TCP tunnel, and use a mainland test URL so latency tests measure the domestic side. Snell carries UDP inside its TCP connection, so no UDP port is needed.",
+            "Generated Surge lines set block-quic=on, so Bilibili and other video players fall back to HTTP/2 over TCP at once instead of QUIC inside a TCP tunnel, and use a mainland test URL so latency tests measure the domestic side. Snell carries UDP inside its TCP connection, so no UDP port is needed; Shadowsocks 2022 relays UDP natively on the same port number, so the firewall must allow both TCP and UDP for it.",
     },
     smart: {
         title: "Smart proxy",

@@ -39,7 +39,7 @@ export function InboundsCard({ inbounds }: { inbounds: ReturnType<typeof useInbo
                                         <p className="flex flex-wrap items-baseline gap-x-2 font-medium">
                                             {name}
                                             <span className="font-mono text-[0.8125rem] font-normal text-muted-foreground">
-                                                {m.inbounds.port(inbound.port)}
+                                                {m.inbounds.port(inbound.port, inbound.protocol === "shadowsocks")}
                                             </span>
                                         </p>
                                         <p className="text-[0.8125rem] text-muted-foreground">

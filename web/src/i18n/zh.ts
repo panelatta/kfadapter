@@ -180,10 +180,10 @@ export const zh: Messages = {
         details: {
             socks5: "用户名密码认证 · 默认订阅链接使用此协议",
             snell: "unshaped · 连接复用 · UDP 经 TCP 承载",
-            shadowsocks: "2022-blake3-aes-128-gcm · 多用户密钥",
+            shadowsocks: "2022-blake3-aes-128-gcm · 多用户密钥 · 原生 UDP",
             "socks5-tls": "TLS 上的 SOCKS5 · 固定证书指纹",
         },
-        port: (port: number) => `TCP ${port}`,
+        port: (port: number, udp: boolean) => (udp ? `TCP/UDP ${port}` : `TCP ${port}`),
         enableLabel: (name: string) => `启用 ${name}`,
         listening: "监听中",
         off: "已关闭",
@@ -192,7 +192,7 @@ export const zh: Messages = {
         loading: "正在加载入站协议…",
         unavailable: "暂时无法获取入站协议状态。",
         tuning:
-            "生成的 Surge 配置带有 block-quic=on：B 站等视频会立即改用 TCP 上的 HTTP/2，而不是在 TCP 隧道里跑 QUIC；测速地址使用国内地址，延迟测试反映的是国内一侧。Snell 的 UDP 在 TCP 连接内承载，无需开放 UDP 端口。",
+            "生成的 Surge 配置带有 block-quic=on：B 站等视频会立即改用 TCP 上的 HTTP/2，而不是在 TCP 隧道里跑 QUIC；测速地址使用国内地址，延迟测试反映的是国内一侧。Snell 的 UDP 在 TCP 连接内承载，无需开放 UDP 端口；Shadowsocks 2022 在同一端口号上用原生 UDP 转发，防火墙需同时放行该端口的 TCP 和 UDP。",
     },
     smart: {
         title: "智能代理",

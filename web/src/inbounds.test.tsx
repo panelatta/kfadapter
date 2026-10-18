@@ -24,7 +24,7 @@ describe("inbound protocols", () => {
         expect(rows.map((row) => row.textContent)).toEqual([
             expect.stringContaining("SOCKS5TCP 10808"),
             expect.stringContaining("Snell v6TCP 10810"),
-            expect.stringContaining("Shadowsocks 2022TCP 10811"),
+            expect.stringContaining("Shadowsocks 2022TCP/UDP 10811"),
             expect.stringContaining("SOCKS5-TLSTCP 10812"),
         ]);
         expect(within(rows[0]).getByText("Listening")).toBeTruthy();

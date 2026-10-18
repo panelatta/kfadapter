@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -22,7 +23,8 @@ import (
 // implements it.
 type InboundServer interface {
 	ServeFrontend(context.Context, net.Listener, socks.Frontend) error
-	CloseListener(net.Listener)
+	ServePacketFrontend(context.Context, net.PacketConn, socks.Frontend) error
+	CloseListener(io.Closer)
 }
 
 // InboundPreferenceStore persists the inbound choices.
@@ -39,12 +41,31 @@ type InboundConfig struct {
 	Ports     clientconfig.Ports
 	Initial   state.InboundPreferences
 	Listen    func(network, address string) (net.Listener, error)
+	// ListenPacket binds the UDP socket of protocols that also relay UDP on
+	// their port.
+	ListenPacket func(network, address string) (net.PacketConn, error)
 }
 
 type inboundListener struct {
 	listener net.Listener
 	done     chan struct{}
-	stopped  atomic.Bool
+	// packets and packetsDone are the UDP socket and its serve loop of a
+	// protocol that relays UDP on the same port; nil otherwise.
+	packets     net.PacketConn
+	packetsDone chan struct{}
+	stopped     atomic.Bool
+}
+
+// serving reports whether every socket of the protocol is still served.
+func (running *inboundListener) serving() bool {
+	return !closed(running.done) && (running.packetsDone == nil || !closed(running.packetsDone))
+}
+
+func (running *inboundListener) close(server InboundServer) {
+	server.CloseListener(running.listener)
+	if running.packets != nil {
+		server.CloseListener(running.packets)
+	}
 }
 
 // inboundStopWait bounds how long disabling a protocol waits for its accept
@@ -65,6 +86,7 @@ type InboundManager struct {
 	addresses map[clientconfig.Protocol]string
 	ports     clientconfig.Ports
 	listen    func(network, address string) (net.Listener, error)
+	listenUDP func(network, address string) (net.PacketConn, error)
 	current   atomic.Pointer[state.InboundPreferences]
 	failed    chan error
 
@@ -86,6 +108,12 @@ var managedInbounds = []struct {
 	{clientconfig.SOCKS5TLS, socks.FrontendSOCKSTLS},
 }
 
+// relaysUDPOnPort reports whether protocol also binds a UDP socket on its
+// port: Shadowsocks 2022 carries UDP as datagrams of its own.
+func relaysUDPOnPort(protocol clientconfig.Protocol) bool {
+	return protocol == clientconfig.Shadowsocks
+}
+
 func NewInboundManager(config InboundConfig) (*InboundManager, error) {
 	if config.Server == nil || config.Store == nil {
 		return nil, errors.New("app: inbound manager requires a server and a store")
@@ -98,8 +126,12 @@ func NewInboundManager(config InboundConfig) (*InboundManager, error) {
 	if config.Listen == nil {
 		config.Listen = net.Listen
 	}
+	if config.ListenPacket == nil {
+		config.ListenPacket = net.ListenPacket
+	}
 	manager := &InboundManager{
-		server: config.Server, store: config.Store, addresses: config.Addresses, ports: config.Ports, listen: config.Listen,
+		server: config.Server, store: config.Store, addresses: config.Addresses, ports: config.Ports,
+		listen: config.Listen, listenUDP: config.ListenPacket,
 		failed: make(chan error, 1), bound: make(map[clientconfig.Protocol]net.Listener),
 		running: make(map[clientconfig.Protocol]*inboundListener), failures: make(map[clientconfig.Protocol]bool),
 	}
@@ -165,6 +197,9 @@ func (m *InboundManager) Run(ctx context.Context) error {
 		delete(m.running, protocol)
 		running.stopped.Store(true)
 		_ = running.listener.Close()
+		if running.packets != nil {
+			_ = running.packets.Close()
+		}
 		waitInbound(running)
 	}
 	m.ctx = nil
@@ -175,8 +210,14 @@ func (m *InboundManager) Run(ctx context.Context) error {
 // listener lives for runCtx, the manager's Run context, not for the request
 // that enabled it.
 func (m *InboundManager) startLocked(runCtx context.Context, protocol clientconfig.Protocol, frontend socks.Frontend) error {
-	if running, ok := m.running[protocol]; ok && !closed(running.done) {
+	if running, ok := m.running[protocol]; ok && running.serving() {
 		return nil
+	} else if ok {
+		// One of its sockets failed: rebind both.
+		delete(m.running, protocol)
+		running.stopped.Store(true)
+		running.close(m.server)
+		waitInbound(running)
 	}
 	listener, bound := m.bound[protocol]
 	delete(m.bound, protocol)
@@ -187,10 +228,28 @@ func (m *InboundManager) startLocked(runCtx context.Context, protocol clientconf
 			return err
 		}
 	}
-	delete(m.failures, protocol)
-	slog.Info("inbound listening", "protocol", protocol, "address", listener.Addr().String())
 	running := &inboundListener{listener: listener, done: make(chan struct{})}
+	if relaysUDPOnPort(protocol) {
+		packets, err := m.listenUDP("udp", m.addresses[protocol])
+		if err != nil {
+			_ = listener.Close()
+			m.failures[protocol] = true
+			return fmt.Errorf("bind UDP: %w", err)
+		}
+		running.packets, running.packetsDone = packets, make(chan struct{})
+	}
+	delete(m.failures, protocol)
+	slog.Info("inbound listening", "protocol", protocol, "address", listener.Addr().String(), "udp", running.packets != nil)
 	m.running[protocol] = running
+	if running.packets != nil {
+		go func() {
+			defer close(running.packetsDone)
+			err := m.server.ServePacketFrontend(runCtx, running.packets, frontend)
+			if err != nil && !running.stopped.Load() && runCtx.Err() == nil {
+				slog.Warn("inbound UDP listener stopped", "protocol", protocol, "error", err)
+			}
+		}()
+	}
 	go func() {
 		defer close(running.done)
 		err := m.server.ServeFrontend(runCtx, listener, frontend)
@@ -232,14 +291,21 @@ func (m *InboundManager) stopLocked(protocol clientconfig.Protocol) {
 	}
 	delete(m.running, protocol)
 	running.stopped.Store(true)
-	m.server.CloseListener(running.listener)
+	running.close(m.server)
 	waitInbound(running)
 }
 
 func waitInbound(running *inboundListener) {
-	select {
-	case <-running.done:
-	case <-time.After(inboundStopWait):
+	deadline := time.After(inboundStopWait)
+	for _, done := range []chan struct{}{running.done, running.packetsDone} {
+		if done == nil {
+			continue
+		}
+		select {
+		case <-done:
+		case <-deadline:
+			return
+		}
 	}
 }
 
@@ -305,7 +371,7 @@ func (m *InboundManager) Status() []web.InboundStatus {
 	statuses := make([]web.InboundStatus, 0, len(managedInbounds))
 	for _, inbound := range managedInbounds {
 		status := web.InboundStatus{Protocol: string(inbound.protocol), Port: int(m.ports.Port(inbound.protocol)), Enabled: clientconfig.Enabled(inbound.protocol, preferences)}
-		if running, ok := m.running[inbound.protocol]; ok && !closed(running.done) {
+		if running, ok := m.running[inbound.protocol]; ok && running.serving() {
 			status.Listening = true
 		} else if status.Enabled && (m.failures[inbound.protocol] || ok) {
 			status.Problem = "listen_failed"

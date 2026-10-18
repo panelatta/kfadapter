@@ -43,13 +43,13 @@ chinadapter 让你借助已经付费的国内 VPN 服务（快帆 KuaiFan、Quic
 | --- | --- | --- | --- |
 | SOCKS5 | `proxy.port` = `10808` | `socks5` | 用户名 |
 | Snell v6 | `proxy.snellPort` = `10810` | `snell, version=6, mode=unshaped, reuse=true` | 每条线路一个 PSK |
-| Shadowsocks 2022 | `proxy.shadowsocksPort` = `10811` | `ss, encrypt-method=2022-blake3-aes-128-gcm, password=服务端密钥:用户密钥` | 多用户身份头（EIH），每条线路一个用户密钥 |
+| Shadowsocks 2022 | `proxy.shadowsocksPort` = `10811`（TCP 和 UDP） | `ss, encrypt-method=2022-blake3-aes-128-gcm, password=服务端密钥:用户密钥, udp-relay=true` | 多用户身份头（EIH），每条线路一个用户密钥 |
 | SOCKS5-TLS | `proxy.socksTLSPort` = `10812` | `socks5-tls` + `server-cert-fingerprint-sha256` | 与 SOCKS5 相同的用户名和密码 |
 
-五个端口（含管理端口）必须互不相同。每个协议都只用 TCP：服务器防火墙需要放行对应的 TCP 端口，例如 `ufw allow 10810/tcp`。
+五个端口（含管理端口）必须互不相同。服务器防火墙需要放行对应的 TCP 端口，例如 `ufw allow 10810/tcp`；Shadowsocks 2022 还在同一端口号上收发 UDP，要再放行 `ufw allow 10811/udp`。其他协议不需要 UDP 端口。
 
 - **Snell v6**：实现 Surge 的 v6 `unshaped` 模式（AES-128-GCM 记录层，不做流量整形，比默认模式吞吐约高 10%），支持 `reuse=true` 的连接复用和 UDP over TCP，不需要开放 UDP 端口。v6 的默认（`default`，PSK 派生的流量整形）模式和 v5 及更早版本不受支持，客户端必须写 `version=6, mode=unshaped`。线路由 PSK 区分，服务端用 Argon2id 逐个尝试已知 PSK；最近用过的 PSK 优先尝试，配合连接复用，常用线路通常只需一次派生。
-- **Shadowsocks 2022**：`2022-blake3-aes-128-gcm`，用 SIP023 扩展身份头实现单端口多用户，带重放保护（时间戳 ±30 秒、60 秒盐值缓存）。只支持 TCP，Surge 中保持 `udp-relay` 关闭；需要 UDP 时用 Snell。
+- **Shadowsocks 2022**：`2022-blake3-aes-128-gcm`，用 SIP023 扩展身份头实现单端口多用户，带重放保护（时间戳 ±30 秒、60 秒盐值缓存）。TCP 和 UDP 都支持，生成的 Surge 配置行带 `udp-relay=true`。UDP 是原生数据报，所有客户端共用同一个 UDP 端口：服务端按用户密钥和客户端会话 ID 区分会话，而不是按来源地址，所以手机切换网络后会话不会中断，回包发往最近一次验证通过的地址。每个会话用滑动窗口拒绝重复的包号，会话结束后它的窗口还会保留 60 秒；会话 3 分钟内没有任何收发就会结束。每个端口最多 1024 个会话，与其他入站共用连接上限。
 - **SOCKS5-TLS**：TLS 上的 SOCKS5。证书是由安装身份确定性派生的自签 ECDSA 证书，重启不变，只有更换访问令牌时才会变化；客户端用 `server-cert-fingerprint-sha256` 固定指纹，控制台卡片会显示该指纹。
 
 ### 在 Surge 中使用
@@ -83,7 +83,7 @@ chinadapter 让你借助已经付费的国内 VPN 服务（快帆 KuaiFan、Quic
 | `management.sessionTTL` | `168h` | 浏览器会话时长（1m–720h，即最长 30 天；Go 时长不支持 `d`，7 天写作 `168h`） |
 | `proxy.port` | `10808` | SOCKS5 端口 |
 | `proxy.snellPort` | `10810` | Snell v6 端口，在控制台开启后才监听 |
-| `proxy.shadowsocksPort` | `10811` | Shadowsocks 2022 端口，在控制台开启后才监听 |
+| `proxy.shadowsocksPort` | `10811` | Shadowsocks 2022 端口（同时监听 TCP 和 UDP），在控制台开启后才监听 |
 | `proxy.socksTLSPort` | `10812` | SOCKS5-TLS 端口，在控制台开启后才监听 |
 | `proxy.dialTimeout` | `10s` | 连接上游节点的超时（1s–10s） |
 | `proxy.handshakeTimeout` | `15s` | 上游协议握手超时（1s–1m） |
@@ -233,7 +233,7 @@ rootless Docker 或启用 userns-remap 时，用 `CHINADAPTER_HOST_UID` 和 `CHI
 - **QuickFox 不支持 IPv6 目标。** 目标是 IPv6 地址或域名没有可用公网 IPv4 地址时，`CONNECT` 返回 SOCKS 应答码 `0x08`；UDP 关联里发往 IPv6 的数据报会被逐个丢弃。QuickFox 的 UDP（包括 QUIC）默认经 TCP 承载的数据报中继转发，支持 IPv4 和域名目标，超过 2034 字节的单个数据报会被丢弃。设置 `provider.quickfoxUDP: native` 后改为直接向节点的原生 UDP 端口收发，主机需要能向外发 UDP（入站方向不用开端口）。2026-10 从新加坡 VPS 实测：抽样覆盖全部 23 个线路组的 41 个节点都能用。在 24 个回国节点上每秒 50 包，两种方式的中位延迟基本相同；TCP 承载不丢包，原生方式在多数节点上也不丢包，俄罗斯线路丢 1.6–2%。离 VPS 只有 1–60 ms 的东南亚、港澳台节点，两者的 p99 也相近；部分离得远的节点（往返 300–600 ms，如俄罗斯、意大利、北非、南美）上，TCP 重传让 p99 比原生方式高 250–340 ms。
 - 已建立的 SOCKS 连接每 30 秒复查一次凭据和线路：更换访问令牌、provider 登出或线路下线后，连接会被关闭；provider 正常刷新不会中断连接。
 - 同一客户端 IP 最多同时保持 32 个尚未完成认证的连接（所有入站协议合计）。
-- Snell 只支持 v6 的 `unshaped` 模式；Shadowsocks 2022 只支持 TCP。Snell 握手需要用 Argon2id 逐个尝试线路的 PSK，同时进行的尝试数量受 CPU 核数限制；线路很多且客户端不复用连接时，新连接的握手会多出几十毫秒。
+- Snell 只支持 v6 的 `unshaped` 模式。Snell 握手需要用 Argon2id 逐个尝试线路的 PSK，同时进行的尝试数量受 CPU 核数限制；线路很多且客户端不复用连接时，新连接的握手会多出几十毫秒。
 
 ## 开发
 
@@ -263,7 +263,7 @@ govulncheck ./...
 | `internal/smart` | 智能代理的测速、排名与选线 |
 | `internal/socks` | 入站前端：SOCKS5 / RFC 1929、SOCKS5-TLS、Snell、Shadowsocks 2022，以及共用的线路分发 |
 | `internal/snell` | Snell v6 unshaped 记录层、请求与 UDP over TCP 编解码 |
-| `internal/shadowsocks` | Shadowsocks 2022（多用户身份头）TCP 服务端编解码 |
+| `internal/shadowsocks` | Shadowsocks 2022（多用户身份头）TCP 与 UDP 服务端编解码 |
 | `internal/clientconfig` | 各协议的 Surge 配置行与 URI 渲染 |
 | `internal/state` | 领域类型、聚合校验与运行时快照 |
 | `internal/store` | SQLite 持久化、迁移、浏览器会话、热备份与恢复校验 |

@@ -38,7 +38,7 @@ func TestSurgeLines(t *testing.T) {
 	}{
 		{SOCKS5, "上海 01 = socks5, adapter.example.com, 10808, " + socks.Username + ", " + socks.Password + common},
 		{Snell, "上海 01 = snell, adapter.example.com, 10810, psk=" + psk + ", version=6, mode=unshaped, reuse=true" + common},
-		{Shadowsocks, "上海 01 = ss, adapter.example.com, 10811, encrypt-method=2022-blake3-aes-128-gcm, password=" + credentials.ShadowsocksPassword(serverKey, userKey) + common},
+		{Shadowsocks, "上海 01 = ss, adapter.example.com, 10811, encrypt-method=2022-blake3-aes-128-gcm, password=" + credentials.ShadowsocksPassword(serverKey, userKey) + ", udp-relay=true" + common},
 		{SOCKS5TLS, "上海 01 = socks5-tls, adapter.example.com, 10812, " + socks.Username + ", " + socks.Password + ", server-cert-fingerprint-sha256=" + fingerprint + common},
 	} {
 		profile, ok := RouteProfile(identity, testRoute, test.protocol, "上海 01", "adapter.example.com", testPorts)

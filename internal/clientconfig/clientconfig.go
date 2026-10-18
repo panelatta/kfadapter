@@ -183,7 +183,8 @@ func Surge(profile Profile) string {
 	case Snell:
 		line.WriteString("snell, " + host + ", " + port + ", psk=" + profile.PSK + ", " + snellParameters)
 	case Shadowsocks:
-		line.WriteString("ss, " + host + ", " + port + ", encrypt-method=" + shadowsocks.Method + ", password=" + profile.ShadowsocksPassword)
+		line.WriteString("ss, " + host + ", " + port + ", encrypt-method=" + shadowsocks.Method + ", password=" + profile.ShadowsocksPassword +
+			", udp-relay=true")
 	}
 	line.WriteString(", block-quic=on, test-url=" + TestURL)
 	return line.String()
